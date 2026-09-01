@@ -22,10 +22,9 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 	return &Evaluator{Parameters: params}
 }
 
-// Mul multiplies two degree-one ciphertexts without relinearization or
-// rescaling. The result is degree two. Inputs must be in the coefficient
-// domain; q0 and q1 are the only authoritative limbs. Dormant limbs are not
-// read or mathematically updated.
+// Mul multiplies two degree-one ciphertexts and truncates the resulting
+// degree-two ciphertext under Fast's zero-secret semantics. Inputs must be in
+// the coefficient domain; q0 and q1 are the only authoritative limbs.
 func (eval *Evaluator) Mul(op0, op1, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
@@ -64,7 +63,6 @@ func (eval *Evaluator) Mul(op0, op1, opOut *rlwe.Ciphertext) error {
 	c0 := ring.NewPoly(eval.Parameters.N(), 1)
 	c1a := ring.NewPoly(eval.Parameters.N(), 1)
 	c1b := ring.NewPoly(eval.Parameters.N(), 1)
-	c2 := ring.NewPoly(eval.Parameters.N(), 1)
 
 	if err := FastMulQ01Authoritative(ringQ, op0.Value[0], op1.Value[0], c0); err != nil {
 		return fmt.Errorf("FastMulQ01Authoritative(c0): %w", err)
@@ -75,10 +73,6 @@ func (eval *Evaluator) Mul(op0, op1, opOut *rlwe.Ciphertext) error {
 	if err := FastMulQ01Authoritative(ringQ, op0.Value[1], op1.Value[0], c1b); err != nil {
 		return fmt.Errorf("FastMulQ01Authoritative(c1b): %w", err)
 	}
-	if err := FastMulQ01Authoritative(ringQ, op0.Value[1], op1.Value[1], c2); err != nil {
-		return fmt.Errorf("FastMulQ01Authoritative(c2): %w", err)
-	}
-
 	for _, limb := range []int{0, 1} {
 		ringQ.SubRings[limb].Add(c1a.Coeffs[limb], c1b.Coeffs[limb], c1a.Coeffs[limb])
 	}
@@ -94,11 +88,10 @@ func (eval *Evaluator) Mul(op0, op1, opOut *rlwe.Ciphertext) error {
 
 	copyQ01(c0, opOut.Value[0])
 	copyQ01(c1a, opOut.Value[1])
-	copyQ01(c2, opOut.Value[2])
-	return nil
+	return FastTruncateDegree2To1(opOut, opOut)
 }
 
-// MulNew returns a newly allocated degree-two Fast ciphertext.
+// MulNew returns a newly allocated degree-one Fast ciphertext.
 func (eval *Evaluator) MulNew(op0, op1 *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
 	if eval == nil || op0 == nil || op1 == nil {
 		return nil, errors.New("evaluator and operands cannot be nil")

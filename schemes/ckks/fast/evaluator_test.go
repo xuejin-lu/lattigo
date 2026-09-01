@@ -80,18 +80,16 @@ func TestFastMulQ01Authoritative(t *testing.T) {
 	r := params.RingQ().AtLevel(3)
 	for i := 0; i < 2; i++ {
 		want0 := negacyclicProductMod(valuesA[0], valuesB[0], r.SubRings[i].Modulus)
-		want2 := negacyclicProductMod(valuesA[1], valuesB[1], r.SubRings[i].Modulus)
 		cross0 := negacyclicProductMod(valuesA[0], valuesB[1], r.SubRings[i].Modulus)
 		cross1 := negacyclicProductMod(valuesA[1], valuesB[0], r.SubRings[i].Modulus)
 		for j := 0; j < r.N(); j++ {
 			require.Equal(t, want0[j], out.Value[0].Coeffs[i][j], "c0 limb=%d coeff=%d", i, j)
 			require.Equal(t, (cross0[j]+cross1[j])%r.SubRings[i].Modulus, out.Value[1].Coeffs[i][j], "c1 limb=%d coeff=%d", i, j)
-			require.Equal(t, want2[j], out.Value[2].Coeffs[i][j], "c2 limb=%d coeff=%d", i, j)
 		}
 	}
-	require.Equal(t, 2, out.Degree())
+	require.Equal(t, 1, out.Degree())
 	require.Equal(t, a.Scale.Mul(b.Scale), out.Scale)
-	require.Equal(t, dormant, cloneDormant(out, 2))
+	require.Equal(t, dormant[:2], cloneDormant(out, 2))
 }
 
 func TestFastMulQ01AuthoritativeIgnoresDormantInputs(t *testing.T) {
@@ -123,11 +121,11 @@ func TestFastMulQ01AuthoritativeIgnoresDormantInputs(t *testing.T) {
 	dormant2 := cloneDormant(out2, 2)
 	require.NoError(t, eval.Mul(a, b, out1))
 	require.NoError(t, eval.Mul(a2, b2, out2))
-	for d := 0; d < 3; d++ {
+	for d := 0; d < 2; d++ {
 		require.Equal(t, out1.Value[d].Coeffs[:2], out2.Value[d].Coeffs[:2])
 	}
-	require.Equal(t, dormant1, cloneDormant(out1, 2))
-	require.Equal(t, dormant2, cloneDormant(out2, 2))
+	require.Equal(t, dormant1[:2], cloneDormant(out1, 2))
+	require.Equal(t, dormant2[:2], cloneDormant(out2, 2))
 }
 
 func TestFastEvaluatorMulInPlaceAndLevels(t *testing.T) {
@@ -141,25 +139,23 @@ func TestFastEvaluatorMulInPlaceAndLevels(t *testing.T) {
 		fillFastCKKSCiphertext(b, params, nil, uint64(level+11))
 		want := a.CopyNew()
 		require.NoError(t, eval.Mul(a, b, want))
-		require.Equal(t, 2, want.Degree())
+		require.Equal(t, 1, want.Degree())
 		require.Equal(t, level, want.Level())
 
 		a2 := a.CopyNew()
 		b2 := b.CopyNew()
-		expected := ckks.NewCiphertext(params, 2, level)
+		expected := ckks.NewCiphertext(params, 1, level)
 		expected.IsNTT = false
 		require.NoError(t, eval.Mul(a2, b2, expected))
 		require.NoError(t, eval.Mul(a2, b2, a2))
 		require.Equal(t, expected.Value[0].Coeffs[:2], a2.Value[0].Coeffs[:2])
 		require.Equal(t, expected.Value[1].Coeffs[:2], a2.Value[1].Coeffs[:2])
-		require.Equal(t, expected.Value[2].Coeffs[:2], a2.Value[2].Coeffs[:2])
 
 		a3 := a.CopyNew()
 		b3 := b.CopyNew()
 		require.NoError(t, eval.Mul(a3, b3, b3))
 		require.Equal(t, expected.Value[0].Coeffs[:2], b3.Value[0].Coeffs[:2])
 		require.Equal(t, expected.Value[1].Coeffs[:2], b3.Value[1].Coeffs[:2])
-		require.Equal(t, expected.Value[2].Coeffs[:2], b3.Value[2].Coeffs[:2])
 	}
 }
 
