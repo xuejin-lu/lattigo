@@ -34,6 +34,12 @@ import (
 //   - opOut ring degree must match the evaluator's ring degree.
 //   - evk must have been generated using the key-generator of the large ring degree with as input small-key -> large-key.
 func (eval Evaluator) ApplyEvaluationKey(ctIn *Ciphertext, evk *EvaluationKey, opOut *Ciphertext) (err error) {
+	if evk == nil {
+		return fmt.Errorf("cannot ApplyEvaluationKey: evaluation key is nil")
+	}
+	if evk.Layout == KeyLayoutFast {
+		return fmt.Errorf("unsupported: cannot use Fast evaluation key with Standard execution")
+	}
 
 	if ctIn.Degree() != 1 || opOut.Degree() != 1 {
 		return fmt.Errorf("cannot ApplyEvaluationKey: input and output Ciphertext must be of degree 1")

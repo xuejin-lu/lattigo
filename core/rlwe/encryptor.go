@@ -462,12 +462,15 @@ func (enc Encryptor) WithKey(key EncryptionKey) *Encryptor {
 	return &enc
 }
 
-// checkPk checks that a given pk is correct for the parameters.
-func (enc Encryptor) checkPk(pk *PublicKey) (err error) {
+// Add the smallest possible validation to reject Fast Public Keys natively
+func (enc *Encryptor) checkPk(pk *PublicKey) error {
+	if pk.Layout == KeyLayoutFast {
+		return fmt.Errorf("unsupported: cannot encrypt using a Fast PublicKey")
+	}
 	if pk.Value[0].Q.N() != enc.params.N() || pk.Value[1].Q.N() != enc.params.N() {
 		return fmt.Errorf("pk ring degree does not match params ring degree")
 	}
-	return
+	return nil
 }
 
 // checkPk checks that a given pk is correct for the parameters.

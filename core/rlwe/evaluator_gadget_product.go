@@ -14,6 +14,9 @@ import (
 //
 // Expects the flag IsNTT of ct to correctly reflect the domain of cx.
 func (eval Evaluator) GadgetProduct(levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ct *Ciphertext) {
+	if gadgetCt != nil && gadgetCt.Layout == KeyLayoutFast {
+		panic(fmt.Errorf("unsupported: cannot use Fast evaluation key with Standard execution"))
+	}
 
 	levelQ = utils.Min(levelQ, gadgetCt.LevelQ())
 	levelP := gadgetCt.LevelP()
@@ -106,6 +109,9 @@ func (eval Evaluator) ModDown(levelQ, levelP int, ctQP *Element[ringqp.Poly], ct
 //
 // The method will return an error if ctQP.Level() < gadgetCt.Level().
 func (eval Evaluator) GadgetProductLazy(levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ctQP *Element[ringqp.Poly]) (err error) {
+	if gadgetCt != nil && gadgetCt.Layout == KeyLayoutFast {
+		return fmt.Errorf("unsupported: cannot use Fast evaluation key with Standard execution")
+	}
 
 	if ctQP.LevelP() < gadgetCt.LevelP() {
 		return fmt.Errorf("ctQP.LevelP()=%d < gadgetCt.LevelP()=%d", ctQP.LevelP(), gadgetCt.LevelP())
@@ -508,20 +514,3 @@ func (eval Evaluator) DecomposeSingleNTT(levelQ, levelP, nbPi, BaseRNSDecomposit
 		ringP.NTT(c2QiP, c2QiP)
 	}
 }
-
-/*
-type DecompositionBuffer [][]ringqp.Poly
-
-func (eval Evaluator) ALlocateDecompositionBuffer(levelQ, levelP, Pow2Base int) (DecompositionBuffer){
-
-	decompQP := make([][]ringqp.Poly, BaseRNSDecompositionVectorSize)
-	for i := 0; i < BaseRNSDecompositionVectorSize; i++ {
-
-		for j := 0; j < BaseTwoDecompositionVectorSize; j++{
-			DecompositionBuffer[i][j] = ringQP.NewPoly()
-		}
-	}
-
-	return decompQPs
-}
-*/

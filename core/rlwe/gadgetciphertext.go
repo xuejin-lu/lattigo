@@ -18,6 +18,7 @@ import (
 // plaintext times the gadget power matrix.
 type GadgetCiphertext struct {
 	BaseTwoDecomposition int
+	Layout               KeyLayout
 	Value                structs.Matrix[VectorQP]
 }
 
@@ -40,7 +41,7 @@ func NewGadgetCiphertext(params ParameterProvider, Degree, LevelQ, LevelP, BaseT
 		}
 	}
 
-	return &GadgetCiphertext{BaseTwoDecomposition: BaseTwoDecomposition, Value: m}
+	return &GadgetCiphertext{BaseTwoDecomposition: BaseTwoDecomposition, Layout: KeyLayoutStandard, Value: m}
 }
 
 // Degree returns the degree of the target ciphertext.
@@ -79,7 +80,7 @@ func (ct GadgetCiphertext) Equal(other *GadgetCiphertext) bool {
 
 // CopyNew creates a deep copy of the receiver ciphertext and returns it.
 func (ct GadgetCiphertext) CopyNew() (ctCopy *GadgetCiphertext) {
-	return &GadgetCiphertext{BaseTwoDecomposition: ct.BaseTwoDecomposition, Value: ct.Value.CopyNew()}
+	return &GadgetCiphertext{BaseTwoDecomposition: ct.BaseTwoDecomposition, Layout: ct.Layout, Value: ct.Value.CopyNew()}
 }
 
 // BinarySize returns the serialized size of the object in bytes.
