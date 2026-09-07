@@ -36,7 +36,7 @@ For implementation tasks: inspect the exact operation, trace its source-level ca
 
 ## Testing
 
-Prefer targeted tests for changed code. Do not run broad repository tests unless shared infrastructure changes justify them. Normal CKKS behavior must remain unchanged unintentionally, and Fast-specific behavior requires explicit tests.
+Prefer targeted tests for changed code. Do not run broad repository tests unless shared infrastructure changes justify them. Normal CKKS behavior must not be changed unintentionally. Fast-specific behavior requires explicit tests.
 
 ## Git discipline
 
