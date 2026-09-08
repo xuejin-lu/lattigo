@@ -112,6 +112,40 @@ func TestFastRescaleMatchesStandardAndReachesLevelZero(t *testing.T) {
 	require.Equal(t, 0, out.Level())
 }
 
+func TestFastRescaleLevelOneRoundedDivisionInPlaceAndOutOfPlace(t *testing.T) {
+	params := rescaleTestParameters(t)
+	standard := ckks.NewEvaluator(params, nil)
+	fastEval := NewEvaluator(params)
+	q1 := params.RingQ().SubRings[1].Modulus
+	half := q1 / 2
+	values := []int64{
+		int64(3*q1 + half - 1),
+		int64(3*q1 + half + 1),
+		-int64(3*q1 + half - 1),
+		-int64(3*q1 + half + 1),
+		int64(7*q1 + 17),
+		-int64(7*q1 + 17),
+	}
+	in := makeFastRescaleCiphertext(params, 1, values, 0)
+	standardOut := ckks.NewCiphertext(params, 1, 0)
+	fastOut := ckks.NewCiphertext(params, 1, 0)
+	require.NoError(t, standard.Rescale(in, standardOut))
+	require.NoError(t, fastEval.Rescale(in, fastOut))
+	require.Equal(t, standardOut.Scale, fastOut.Scale)
+	require.Equal(t, 0, fastOut.Level())
+	for component := range fastOut.Value {
+		require.Equal(t, standardOut.Value[component].Coeffs[0], fastOut.Value[component].Coeffs[0])
+	}
+
+	inPlace := in.CopyNew()
+	require.NoError(t, fastEval.Rescale(inPlace, inPlace))
+	require.Equal(t, fastOut.Scale, inPlace.Scale)
+	require.Equal(t, fastOut.Level(), inPlace.Level())
+	for component := range fastOut.Value {
+		require.Equal(t, fastOut.Value[component].Coeffs[0], inPlace.Value[component].Coeffs[0])
+	}
+}
+
 func TestFastRescaleMatchesStandardAtHigherLevels(t *testing.T) {
 	params := rescaleTestParameters(t)
 	standard := ckks.NewEvaluator(params, nil)
@@ -282,6 +316,22 @@ func BenchmarkStandardRescaleLogN16(b *testing.B) {
 	benchmarkRescaleLogN(b, 16, false)
 }
 
+func BenchmarkFastRescaleLevelOneLogN13(b *testing.B) {
+	benchmarkRescaleLevelOneLogN(b, 13, true)
+}
+
+func BenchmarkStandardRescaleLevelOneLogN13(b *testing.B) {
+	benchmarkRescaleLevelOneLogN(b, 13, false)
+}
+
+func BenchmarkFastRescaleLevelOneLogN16(b *testing.B) {
+	benchmarkRescaleLevelOneLogN(b, 16, true)
+}
+
+func BenchmarkStandardRescaleLevelOneLogN16(b *testing.B) {
+	benchmarkRescaleLevelOneLogN(b, 16, false)
+}
+
 func benchmarkRescaleLogN(b *testing.B, logN int, fastPath bool) {
 	logQ := []int{55, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56}
 	if logN == 16 {
@@ -314,6 +364,34 @@ func benchmarkRescaleLogN(b *testing.B, logN int, fastPath bool) {
 			if err := eval.Rescale(in, out); err != nil {
 				b.Fatal(err)
 			}
+		}
+	}
+}
+
+func benchmarkRescaleLevelOneLogN(b *testing.B, logN int, fastPath bool) {
+	logQ := []int{55, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56}
+	if logN == 16 {
+		logQ[0], logQ[1] = 54, 38
+	}
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{LogN: logN, LogQ: logQ, LogDefaultScale: 30})
+	if err != nil {
+		b.Fatal(err)
+	}
+	in := makeFastRescaleCiphertext(params, 1, []int64{1, -2, 12345, -67890}, 0)
+	out := ckks.NewCiphertext(params, 1, 0)
+	var eval interface {
+		Rescale(*rlwe.Ciphertext, *rlwe.Ciphertext) error
+	}
+	if fastPath {
+		eval = NewEvaluator(params)
+	} else {
+		eval = ckks.NewEvaluator(params, nil)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := eval.Rescale(in, out); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

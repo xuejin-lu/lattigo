@@ -77,11 +77,16 @@ func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.In
 	opOut.Resize(op0.Degree(), level)
 	*opOut.MetaData = *op0.MetaData
 	ringQ := eval.Parameters.RingQ()
+	var scalarMontgomery [2]uint64
+	for limb := 0; limb <= level && limb < len(scalarMontgomery); limb++ {
+		subring := ringQ.SubRings[limb]
+		scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
+		scalarMontgomery[limb] = ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant)
+	}
 	for d := range op0.Value {
 		for limb := 0; limb <= level && limb < 2; limb++ {
 			subring := ringQ.SubRings[limb]
-			scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
-			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant), opOut.Value[d].Coeffs[limb])
+			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], scalarMontgomery[limb], opOut.Value[d].Coeffs[limb])
 		}
 	}
 	return nil

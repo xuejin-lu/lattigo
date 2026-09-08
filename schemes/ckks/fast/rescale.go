@@ -137,6 +137,24 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 		return err
 	}
 
+	// The Ring primitive is the exact Standard rescale operation for an
+	// ordinary NTT polynomial. At level one it only needs q0 and q1 and can
+	// write q0 in place while reading q1, avoiding the fixed-width CRT/INTT
+	// path below. Montgomery data deliberately remains on the generic path:
+	// DivRoundByLastModulusNTT operates on the ordinary representation.
+	if op0.Level() == 1 && nbRescales == 1 && !op0.IsMontgomery {
+		ringQLevelOne := ringQ.AtLevel(1)
+		for component := range op0.Value {
+			ringQLevelOne.DivRoundByLastModulusNTT(op0.Value[component], opOut.Value[component])
+		}
+		*opOut.MetaData = *op0.MetaData
+		opOut.Scale = op0.Scale.Div(rlwe.NewScale(ringQ.SubRings[1].Modulus))
+		if op0 == opOut {
+			opOut.Resize(op0.Degree(), 0)
+		}
+		return nil
+	}
+
 	for component := range op0.Value {
 		if err := FastPartialINTT(ringQ, op0.Value[component], scratch.coeff); err != nil {
 			return err
