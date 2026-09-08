@@ -1,4 +1,4 @@
 # Current Task
 
-Task: Implement `specs/006C-fast-trace-modup.md`
+Task: Implement `specs/007A-fast-polynomial-execution.md`
 Status: READY
