@@ -123,7 +123,7 @@ Each operation has exactly one Fast coverage classification.
 | `PackAndSwitchN1ToN2.pack` / `unpack` | Full-Q monomial multiply/add | `MISSING_FAST_IMPLEMENTATION` | No minimum-residue-subset packing wrapper; every stored residue limb is processed at active Level |
 | `switchRingDegreeN1ToN2New` / `switchRingDegreeN2ToN1New` | Standard `ApplyEvaluationKey` | `FAST_EXISTS_BUT_NOT_WIRED` | `FastN1ToN2/FastN2ToN1` exist for the current first-two-residue shortcut, but Bootstrap calls Standard key switching |
 | `ScaleDown` level dropping | `Resize` only | `STANDARD_BUT_CHEAP` | Correctly removes high-modulus representation without coefficient division, Scale change, or rounding; it may reach Level 0 |
-| `ScaleDown` scalar multiply | Standard CKKS scalar Mul over all active Q limbs | `MISSING_FAST_IMPLEMENTATION` | A minimum-residue-subset scalar path is absent from the Fast evaluator surface |
+| `ScaleDown` scalar multiply | Standard CKKS scalar Mul over all active Q limbs | `FAST_EXISTS_BUT_NOT_WIRED` | The explicit Fast evaluator now has an NTT-resident q0/q1 scalar path; ScaleDown wiring remains deferred |
 | `ScaleDown` `RescaleTo` | Full-Q rounded division and level consumption | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Rescale now exists, but ScaleDown still uses the Standard evaluator |
 | `ModUp` | INTT, r0-to-all-Q-residue materialization, NTT, optional QP key switch, Trace | `BOUNDARY_ONLY` | Modulus raising is an explicit representation boundary; Fast must preserve Level 0 input semantics without maintaining unnecessary output residues |
 | `ModUp` dense/sparse switches | ApplyEvaluationKey and GadgetProductHoisted | `STANDARD_HIGH_COST` | Default-like ephemeral-secret configurations activate QP security work |
@@ -132,14 +132,14 @@ Each operation has exactly one Fast coverage classification.
 | common `LinearTransform.EvaluateMany` | DecomposeNTT, hoisted/BSGS rotations, QP products, ModDown | `FAST_EXISTS_BUT_NOT_WIRED` | Fast LinearTransform exists but its level/Montgomery/API contracts do not match this caller |
 | DFT Conjugate/Rotate | Standard automorphism/key switching | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Standard-ring automorphism exists, but DFT calls Standard CKKS methods |
 | DFT Add/Sub | Standard full-Q arithmetic | `FAST_EXISTS_BUT_NOT_WIRED` | FastAdd/FastSub exist but are not exposed through DFT's evaluator |
-| DFT scalar Mul | Standard full-Q scalar operation | `MISSING_FAST_IMPLEMENTATION` | Current Fast Mul only accepts two ciphertexts |
+| DFT scalar Mul | Standard full-Q scalar operation | `FAST_EXISTS_BUT_NOT_WIRED` | The explicit Fast evaluator now has NTT-resident q0/q1 scalar Mul; DFT wiring remains deferred |
 | DFT Rescale | Standard full-Q rounded division | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Rescale now exists, but DFT still uses the Standard evaluator |
 | `mod1.Evaluator.EvaluateNew` | Polynomial evaluation and DoubleAngle | `STANDARD_HIGH_COST` | It is constructed with Standard CKKS and polynomial evaluators |
-| Polynomial ciphertext Mul/MulRelin | Power basis and Paterson-Stockmeyer steps | `FAST_EXISTS_BUT_NOT_WIRED` | Fast ciphertext Mul exists, but only for coefficient/non-Montgomery inputs and not the generic evaluator interface |
-| Polynomial Relinearize | Standard GadgetProduct | `FAST_EXISTS_BUT_NOT_WIRED` | Current zero-secret truncation exists but is not wired as `Relinearize` |
-| Polynomial Rescale | Repeated full-Q rounded division | `MISSING_FAST_IMPLEMENTATION` | No Fast equivalent; repeatedly blocks EvalMod |
-| Polynomial scalar/plaintext Mul/MulThenAdd | Coefficients and correction terms | `MISSING_FAST_IMPLEMENTATION` | General Fast evaluator forms are absent |
-| Polynomial Add/Sub | Full-Q Standard arithmetic | `FAST_EXISTS_BUT_NOT_WIRED` | FastAdd/FastSub exist but not behind `schemes.Evaluator` |
+| Polynomial ciphertext Mul/MulRelin | Power basis and Paterson-Stockmeyer steps | `FAST_EXISTS_BUT_NOT_WIRED` | The explicit Fast evaluator now preserves NTT residency and the degree-2 `Mul`/degree-1 `MulRelin` contract; generic polynomial wiring remains deferred |
+| Polynomial Relinearize | Standard GadgetProduct | `FAST_EXISTS_BUT_NOT_WIRED` | The explicit Fast evaluator now exposes current zero-secret truncation as `Relinearize`; generic polynomial wiring remains deferred |
+| Polynomial Rescale | Repeated full-Q rounded division | `FAST_EXISTS_BUT_NOT_WIRED` | Fast fixed-width q0/q1 Rescale exists; generic polynomial wiring remains deferred |
+| Polynomial scalar/plaintext Mul/MulThenAdd | Coefficients and correction terms | `FAST_EXISTS_BUT_NOT_WIRED` | NTT-resident q0/q1 scalar/plaintext Mul and direct scalar/RLWE MulThenAdd now exist; generic polynomial wiring remains deferred |
+| Polynomial Add/Sub | Full-Q Standard arithmetic | `FAST_EXISTS_BUT_NOT_WIRED` | NTT-resident q0/q1 Add/Sub now exist on the explicit Fast surface; full `schemes.Evaluator` conformance remains blocked by unsafe embedded RLWE provider methods |
 | `GenFastEvaluationKeys` / `GenFastBootstrapKeys` in `fast_keys.go` | Generates Fast-layout Bootstrap key material | `ALREADY_FAST` | Key support exists, but Standard consumers explicitly reject Fast layouts |
 | Final scale assignment and `DropLevel` | Metadata-only operations | `STANDARD_BUT_CHEAP` | No heavy arithmetic |
 | Conjugate-invariant ring switching | Standard DomainSwitcher and evaluation keys | `UNKNOWN_REQUIRES_TARGETED_AUDIT` | Current Fast automorphism/ring-degree code supports Standard rings only |
@@ -382,7 +382,7 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 | Order | Bootstrap stage | Operation | Current path | Fast status | Main expensive work | Blocker? | Recommended next task |
 | ----: | --------------- | --------- | ------------ | ----------- | ------------------- | -------- | --------------------- |
 | 1 | Cross-cutting | Rescale/Level transition | Standard `ckks.Rescale/RescaleTo` | `FAST_EXISTS_BUT_NOT_WIRED` | Fast q0/q1 dropped-prime rounding exists; caller integration remains | BLOCKER | Wire Fast Rescale into the next Fast Bootstrap boundary |
-| 2 | EvalMod | NTT ciphertext arithmetic API | Standard generic polynomial evaluator | `FAST_EXISTS_BUT_NOT_WIRED` | Repeated full-Q Mul/MulRelin and QP relinearization | BLOCKER | Task 004 — NTT-resident Fast evaluator surface |
+| 2 | EvalMod | NTT ciphertext arithmetic API | Explicit Fast q0/q1 evaluator surface implemented; Standard generic polynomial evaluator still wired | `FAST_EXISTS_BUT_NOT_WIRED` | Generic interface embeds unsafe full-Q/QP RLWE provider methods | BLOCKER | Task 007 — Fast EvalMod integration and bounded adapter |
 | 3 | CoeffsToSlots / SlotsToCoeffs | Factorized LinearTransform | Standard common LT | `FAST_EXISTS_BUT_NOT_WIRED` | QP decomposition, hoisted GadgetProducts, ModDown, many rotations | BLOCKER | Task 005 — Fast DFT adapter |
 | 4 | ScaleDown / ModUp | Fast residue lifecycle | Full-Q Standard boundary | `BOUNDARY_ONLY` | Full INTT, r0-to-all-Q-residue materialization, full NTT, optional QP switch | BLOCKER | Task 006 — Fast ScaleDown/ModUp/Trace boundary |
 | 5 | EvalMod | Mod1/Paterson-Stockmeyer wiring | Standard Mod1 and polynomial evaluators | `STANDARD_HIGH_COST` | Repeated Mul, Rescale, temporary powers | BLOCKER | Task 007 — Fast EvalMod integration |

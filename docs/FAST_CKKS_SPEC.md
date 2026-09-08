@@ -213,7 +213,7 @@ This branch does not start from Phase 0. The status below is derived from the cu
 | r0/r1 reconstruction and redistribution utilities | Reference/debug only | `schemes/ckks/fast/fast.go`; useful as a correctness oracle or explicit materialization boundary, not the production hot path |
 | First-two-limb partial NTT/INTT | Implemented | `partial_ntt.go`; transforms only residue storage for q0 and q1 |
 | Fast key generation | Implemented | `keys.go`; current key lifecycle uses zero-secret semantics and Fast layouts |
-| First-two-limb evaluator arithmetic | Implemented | Fast evaluator and arithmetic paths operate on actively maintained r0/r1 residues |
+| First-two-limb evaluator arithmetic | Implemented | NTT-resident Add/Sub, Mul/MulRelin, scalar/plaintext Mul, fused MulThenAdd, truncation-backed Relinearize, and Rescale operate on maintained r0/r1 residues; full `schemes.Evaluator` conformance remains blocked by its unsafe full-Q/QP `rlwe.EvaluatorProvider` surface |
 | Fast multiplication | Implemented | `FastMulQ01Authoritative` avoids CRT, bounds, and redistribution; reference multiplication remains available |
 | Degree truncation | Implemented | `FastTruncateDegree2To1` under the current zero-secret mode |
 | Fast automorphism/rotation | Implemented | First-two-limb Standard-ring path; no evaluation-key use in the helper |
