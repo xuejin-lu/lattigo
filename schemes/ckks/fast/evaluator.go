@@ -3,6 +3,7 @@ package fast
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
@@ -47,6 +48,44 @@ func (eval *Evaluator) GetParameters() *ckks.Parameters { return &eval.Parameter
 // GetRLWEParameters satisfies rlwe.ParameterProvider without exposing a
 // Standard evaluator or any full-Q/QP key-switching operation.
 func (eval *Evaluator) GetRLWEParameters() *rlwe.Parameters { return &eval.Parameters.Parameters }
+
+// MulIntegerMaintained multiplies the maintained residues by an integer
+// without changing the ciphertext scale. It is intentionally separate from
+// Mul: Bootstrap ScaleDown must support the valid Level-0/r0-only state while
+// the generic Fast arithmetic surface continues to require q0 and q1.
+func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || opOut == nil || scalar == nil {
+		return errors.New("Fast integer multiplication evaluator, operands and scalar cannot be nil")
+	}
+	if op0.MetaData == nil || opOut.MetaData == nil {
+		return errors.New("Fast integer multiplication metadata cannot be nil")
+	}
+	if op0.N() != eval.Parameters.N() || opOut.N() != eval.Parameters.N() {
+		return errors.New("Fast integer multiplication dimensions do not match parameters")
+	}
+	if !op0.IsNTT || !opOut.IsNTT {
+		return errors.New("Fast integer multiplication requires NTT-domain operands")
+	}
+	if op0.IsMontgomery != opOut.IsMontgomery {
+		return errors.New("Fast integer multiplication requires matching Montgomery representations")
+	}
+
+	level := op0.Level()
+	if opOut.Level() < level {
+		level = opOut.Level()
+	}
+	opOut.Resize(op0.Degree(), level)
+	*opOut.MetaData = *op0.MetaData
+	ringQ := eval.Parameters.RingQ()
+	for d := range op0.Value {
+		for limb := 0; limb <= level && limb < 2; limb++ {
+			subring := ringQ.SubRings[limb]
+			scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
+			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant), opOut.Value[d].Coeffs[limb])
+		}
+	}
+	return nil
+}
 
 // Automorphism applies a Fast automorphism to a degree-one ciphertext. It
 // operates only on q0 and q1 and does not use evaluation keys or relinearize.
