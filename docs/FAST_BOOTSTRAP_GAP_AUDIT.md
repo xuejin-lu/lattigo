@@ -124,7 +124,7 @@ Each operation has exactly one Fast coverage classification.
 | `switchRingDegreeN1ToN2New` / `switchRingDegreeN2ToN1New` | Standard `ApplyEvaluationKey` | `FAST_EXISTS_BUT_NOT_WIRED` | `FastN1ToN2/FastN2ToN1` exist for the current first-two-residue shortcut, but Bootstrap calls Standard key switching |
 | `ScaleDown` level dropping | `Resize` only | `STANDARD_BUT_CHEAP` | Correctly removes high-modulus representation without coefficient division, Scale change, or rounding; it may reach Level 0 |
 | `ScaleDown` scalar multiply | Standard CKKS scalar Mul over all active Q limbs | `MISSING_FAST_IMPLEMENTATION` | A minimum-residue-subset scalar path is absent from the Fast evaluator surface |
-| `ScaleDown` `RescaleTo` | Full-Q rounded division and level consumption | `MISSING_FAST_IMPLEMENTATION` | Fast Rescale is absent and is a Bootstrap blocker |
+| `ScaleDown` `RescaleTo` | Full-Q rounded division and level consumption | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Rescale now exists, but ScaleDown still uses the Standard evaluator |
 | `ModUp` | INTT, r0-to-all-Q-residue materialization, NTT, optional QP key switch, Trace | `BOUNDARY_ONLY` | Modulus raising is an explicit representation boundary; Fast must preserve Level 0 input semantics without maintaining unnecessary output residues |
 | `ModUp` dense/sparse switches | ApplyEvaluationKey and GadgetProductHoisted | `STANDARD_HIGH_COST` | Default-like ephemeral-secret configurations activate QP security work |
 | `Trace` | Scalar multiply, repeated Standard automorphisms and adds | `FAST_EXISTS_BUT_NOT_WIRED` | Fast automorphism and first-two-residue Add exist; a Fast Trace adapter does not |
@@ -133,7 +133,7 @@ Each operation has exactly one Fast coverage classification.
 | DFT Conjugate/Rotate | Standard automorphism/key switching | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Standard-ring automorphism exists, but DFT calls Standard CKKS methods |
 | DFT Add/Sub | Standard full-Q arithmetic | `FAST_EXISTS_BUT_NOT_WIRED` | FastAdd/FastSub exist but are not exposed through DFT's evaluator |
 | DFT scalar Mul | Standard full-Q scalar operation | `MISSING_FAST_IMPLEMENTATION` | Current Fast Mul only accepts two ciphertexts |
-| DFT Rescale | Standard full-Q rounded division | `MISSING_FAST_IMPLEMENTATION` | Required after each DFT factorization group |
+| DFT Rescale | Standard full-Q rounded division | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Rescale now exists, but DFT still uses the Standard evaluator |
 | `mod1.Evaluator.EvaluateNew` | Polynomial evaluation and DoubleAngle | `STANDARD_HIGH_COST` | It is constructed with Standard CKKS and polynomial evaluators |
 | Polynomial ciphertext Mul/MulRelin | Power basis and Paterson-Stockmeyer steps | `FAST_EXISTS_BUT_NOT_WIRED` | Fast ciphertext Mul exists, but only for coefficient/non-Montgomery inputs and not the generic evaluator interface |
 | Polynomial Relinearize | Standard GadgetProduct | `FAST_EXISTS_BUT_NOT_WIRED` | Current zero-secret truncation exists but is not wired as `Relinearize` |
@@ -261,7 +261,7 @@ The existing `big.Int` reconstruction is the reference oracle only. Production S
 - Mod1's DoubleAngle loop invokes Rescale once per iteration (default literal: three).
 - Optional precision iterations can invoke another Rescale and additional complete Bootstrap rounds.
 
-Classification: `BOOTSTRAP_BLOCKER`. Priority: `HIGH`. The blocker is engineering: implement Standard-equivalent rounded Rescale efficiently from maintained Fast residues.
+Classification: `BOOTSTRAP_BLOCKER`. Priority: `HIGH`. Fast Rescale is implemented as a standalone primitive; Bootstrap integration remains the blocker.
 
 ## 9. ModUp / modulus-raising audit
 
@@ -381,7 +381,7 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 
 | Order | Bootstrap stage | Operation | Current path | Fast status | Main expensive work | Blocker? | Recommended next task |
 | ----: | --------------- | --------- | ------------ | ----------- | ------------------- | -------- | --------------------- |
-| 1 | Cross-cutting | Rescale/Level transition | Standard `ckks.Rescale/RescaleTo` | `MISSING_FAST_IMPLEMENTATION` | Full-Q dropped-prime rounding, INTT/NTT, all lower residue limbs | BLOCKER | Task 003 — Standard-equivalent Fast Rescale |
+| 1 | Cross-cutting | Rescale/Level transition | Standard `ckks.Rescale/RescaleTo` | `FAST_EXISTS_BUT_NOT_WIRED` | Fast q0/q1 dropped-prime rounding exists; caller integration remains | BLOCKER | Wire Fast Rescale into the next Fast Bootstrap boundary |
 | 2 | EvalMod | NTT ciphertext arithmetic API | Standard generic polynomial evaluator | `FAST_EXISTS_BUT_NOT_WIRED` | Repeated full-Q Mul/MulRelin and QP relinearization | BLOCKER | Task 004 — NTT-resident Fast evaluator surface |
 | 3 | CoeffsToSlots / SlotsToCoeffs | Factorized LinearTransform | Standard common LT | `FAST_EXISTS_BUT_NOT_WIRED` | QP decomposition, hoisted GadgetProducts, ModDown, many rotations | BLOCKER | Task 005 — Fast DFT adapter |
 | 4 | ScaleDown / ModUp | Fast residue lifecycle | Full-Q Standard boundary | `BOUNDARY_ONLY` | Full INTT, r0-to-all-Q-residue materialization, full NTT, optional QP switch | BLOCKER | Task 006 — Fast ScaleDown/ModUp/Trace boundary |
