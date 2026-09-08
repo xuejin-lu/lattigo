@@ -41,6 +41,14 @@ func newFastModUpInput(params ckks.Parameters, values []int64, scale rlwe.Scale,
 	if withBacking {
 		level = params.MaxLevel()
 	}
+	ct := newFastModUpInputAtLevel(params, values, scale, level)
+	if withBacking {
+		ct.Resize(ct.Degree(), 0)
+	}
+	return ct
+}
+
+func newFastModUpInputAtLevel(params ckks.Parameters, values []int64, scale rlwe.Scale, level int) *rlwe.Ciphertext {
 	ct := ckks.NewCiphertext(params, 1, level)
 	ct.IsNTT = true
 	ct.Scale = scale
@@ -51,16 +59,13 @@ func newFastModUpInput(params ckks.Parameters, values []int64, scale rlwe.Scale,
 			ct.Value[component].Coeffs[0][j] = new(big.Int).Mod(big.NewInt(value), new(big.Int).SetUint64(q0)).Uint64()
 		}
 		params.RingQ().SubRings[0].NTT(ct.Value[component].Coeffs[0], ct.Value[component].Coeffs[0])
-		if withBacking {
+		if level > 0 {
 			for limb := 1; limb <= level; limb++ {
 				for j := range ct.Value[component].Coeffs[limb] {
 					ct.Value[component].Coeffs[limb][j] = uint64(0x9e3779b9) + uint64(limb*params.N()+j+component)
 				}
 			}
 		}
-	}
-	if withBacking {
-		ct.Resize(ct.Degree(), 0)
 	}
 	return ct
 }
@@ -100,6 +105,51 @@ func standardModUpBasisReference(params Parameters, ct *rlwe.Ciphertext) *rlwe.C
 		ct.Scale = ct.Scale.Mul(rlwe.NewScale(scale))
 	}
 	return ct
+}
+
+func standardModUpTraceReference(params Parameters, ct *rlwe.Ciphertext, logN int) {
+	ringQ := params.BootstrappingParameters.RingQ().AtLevel(ct.Level())
+	gap := 1 << (params.BootstrappingParameters.LogN() - logN - 1)
+	if logN == 0 {
+		gap <<= 1
+	}
+	if gap <= 1 {
+		return
+	}
+	nInv := new(big.Int).SetUint64(uint64(gap))
+	if nInv.ModInverse(nInv, ringQ.ModulusAtLevel[ct.Level()]) == nil {
+		panic("ModUp trace reference inverse does not exist")
+	}
+	for component := range ct.Value {
+		ringQ.MulScalarBigint(ct.Value[component], nInv, ct.Value[component])
+	}
+	apply := func(galEl uint64) {
+		index, err := ring.AutomorphismNTTIndex(ringQ.N(), ringQ.NthRoot(), galEl)
+		if err != nil {
+			panic(err)
+		}
+		for component := range ct.Value {
+			tmp := ringQ.NewPoly()
+			ringQ.AutomorphismNTTWithIndex(ct.Value[component], index, tmp)
+			ringQ.Add(ct.Value[component], tmp, ct.Value[component])
+		}
+	}
+	for i := logN; i < params.BootstrappingParameters.LogN()-1; i++ {
+		apply(params.BootstrappingParameters.GaloisElement(1 << i))
+	}
+	if logN == 0 {
+		apply(ringQ.NthRoot() - 1)
+	}
+}
+
+func standardCompleteModUpReference(params Parameters, ct *rlwe.Ciphertext) {
+	standardModUpBasisReference(params, ct)
+	standardModUpTraceReference(params, ct, params.CoeffsToSlotsParameters.LogSlots)
+	ringQ := params.BootstrappingParameters.RingQ()
+	for component := range ct.Value {
+		ringQ.MForm(ct.Value[component], ct.Value[component])
+	}
+	ct.IsMontgomery = true
 }
 
 func requireFastModUpBasisMatches(t *testing.T, want, got *rlwe.Ciphertext) {
@@ -185,6 +235,47 @@ func TestFastModUpBasisFreshLevelZeroStorage(t *testing.T) {
 	requireFastModUpBasisMatches(t, want, got)
 }
 
+func TestFastModUpCompleteBoundary(t *testing.T) {
+	params, ckksParams := fastModUpParameters(t, 4)
+	values := []int64{1, -2, 12345, -67890}
+	for _, logSlots := range []int{3, 1} {
+		params.CoeffsToSlotsParameters.LogSlots = logSlots
+		fastEval, err := NewFastEvaluator(params)
+		require.NoError(t, err)
+		input := newFastModUpInputAtLevel(ckksParams, values, rlwe.NewScale(1<<20), ckksParams.MaxLevel())
+		rowPointers := make([]*uint64, ckksParams.MaxLevel()-1)
+		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
+			rowPointers[limb-2] = &input.Value[0].Coeffs[limb][0]
+		}
+		input.Resize(input.Degree(), 0)
+
+		want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+		standardModUpTraceReference(params, want, logSlots)
+		for component := range want.Value {
+			for limb := 0; limb < 2; limb++ {
+				ckksParams.RingQ().SubRings[limb].MForm(want.Value[component].Coeffs[limb], want.Value[component].Coeffs[limb])
+			}
+		}
+		want.IsMontgomery = true
+
+		got, err := fastEval.ModUp(input)
+		require.NoError(t, err)
+		require.Equal(t, want.Level(), got.Level())
+		require.True(t, want.Scale.Equal(got.Scale))
+		require.True(t, got.IsNTT)
+		require.True(t, got.IsMontgomery)
+		for component := range got.Value {
+			for limb := 0; limb < 2; limb++ {
+				require.Equal(t, want.Value[component].Coeffs[limb], got.Value[component].Coeffs[limb])
+			}
+		}
+		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
+			require.Equal(t, rowPointers[limb-2], &got.Value[0].Coeffs[limb][0])
+			require.Equal(t, uint64(0x9e3779b9)+uint64(limb*ckksParams.N()), got.Value[0].Coeffs[limb][0])
+		}
+	}
+}
+
 func TestFastModUpBasisValidation(t *testing.T) {
 	params, ckksParams := fastModUpParameters(t, 4)
 	fastEval, err := NewFastEvaluator(params)
@@ -228,6 +319,8 @@ func resetFastModUpInput(ct, template *rlwe.Ciphertext, scale rlwe.Scale) {
 		copy(ct.Value[component].Coeffs[0], template.Value[component].Coeffs[0])
 	}
 	ct.Scale = scale
+	ct.IsNTT = true
+	ct.IsMontgomery = false
 }
 
 func BenchmarkFastModUpBasisLogN13(b *testing.B) {
@@ -284,6 +377,53 @@ func BenchmarkFastModUpBasisColdLogN13(b *testing.B) {
 		b.StartTimer()
 		if _, err := fastEval.modUpBasis(input); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFastModUpLogN13(b *testing.B) {
+	benchmarkFastModUp(b, 13, true)
+}
+
+func BenchmarkStandardModUpReferenceLogN13(b *testing.B) {
+	benchmarkFastModUp(b, 13, false)
+}
+
+func BenchmarkFastModUpLogN16(b *testing.B) {
+	benchmarkFastModUp(b, 16, true)
+}
+
+func BenchmarkStandardModUpReferenceLogN16(b *testing.B) {
+	benchmarkFastModUp(b, 16, false)
+}
+
+func benchmarkFastModUp(b *testing.B, logN int, fastPath bool) {
+	params, ckksParams := fastModUpParameters(b, logN)
+	params.CoeffsToSlotsParameters.LogSlots = 1
+	values := []int64{1 << 40, -(1 << 40) + 17, 1 << 39, -123456789}
+	scale := rlwe.NewScale(1 << 40)
+	template := newFastModUpInput(ckksParams, values, scale, true)
+	input := newFastModUpInput(ckksParams, values, scale, true)
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(b, err)
+	if fastPath {
+		if _, err := fastEval.ModUp(input); err != nil {
+			b.Fatal(err)
+		}
+		resetFastModUpInput(input, template, scale)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		resetFastModUpInput(input, template, scale)
+		b.StartTimer()
+		if fastPath {
+			if _, err := fastEval.ModUp(input); err != nil {
+				b.Fatal(err)
+			}
+		} else {
+			standardCompleteModUpReference(params, input)
 		}
 	}
 }

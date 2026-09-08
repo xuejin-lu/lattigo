@@ -95,6 +95,30 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 	return ct, nil
 }
 
+// ModUp completes the Stage-A Fast ModUp boundary: basis raise, Fast Trace,
+// and q0/q1-only Montgomery conversion. Dense/sparse switching and the rest
+// of Bootstrap orchestration are intentionally outside this boundary.
+func (eval *FastEvaluator) ModUp(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if eval == nil {
+		return nil, errors.New("Fast Bootstrap evaluator cannot be nil")
+	}
+	ct, err := eval.modUpBasis(ct)
+	if err != nil {
+		return nil, err
+	}
+	if err = eval.FastCKKS.Trace(ct, eval.Parameters.CoeffsToSlotsParameters.LogSlots, ct); err != nil {
+		return nil, err
+	}
+	ringQ := eval.Parameters.BootstrappingParameters.RingQ()
+	for component := range ct.Value {
+		for limb := 0; limb < 2; limb++ {
+			ringQ.SubRings[limb].MForm(ct.Value[component].Coeffs[limb], ct.Value[component].Coeffs[limb])
+		}
+	}
+	ct.IsMontgomery = true
+	return ct, nil
+}
+
 // restoreFastModUpLevel restores structural rows without allocating rows that
 // were retained when ScaleDown shortened the coefficient-row slice.
 func restoreFastModUpLevel(poly *ring.Poly, level, N int) error {

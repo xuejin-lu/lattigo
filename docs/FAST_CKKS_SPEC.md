@@ -222,9 +222,11 @@ This branch does not start from Phase 0. The status below is derived from the cu
 | Fast DFT adapter | Implemented, not wired | `circuits/ckks/dft/fast.go` executes CoeffsToSlots/SlotsToCoeffs factor groups with Fast LinearTransform, Conjugate, scalar arithmetic, and Rescale; Bootstrap orchestration remains deferred |
 | Fast Bootstrap key support | Implemented | `circuits/ckks/bootstrapping/fast_keys.go` generates Fast evaluation-key material |
 | Fast Rescale | Implemented | `schemes/ckks/fast/rescale.go` provides fixed-width q0/q1 arithmetic with Standard Scale/Level semantics; targeted tests pass |
-| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; Trace and full Bootstrap remain incomplete |
-| Fast ModUp basis raise / scale alignment | Implemented | `circuits/ckks/bootstrapping/fast_modup.go` restores MaxLevel structure, computes only maintained q0/q1, and stops before Trace; full Fast ModUp remains incomplete |
-| Fast Trace, ModUp/ModDown, KeySwitch, and full Bootstrap execution | Not implemented | Trace is the next bounded stage; do not imply that Fast key support or the pre-Trace basis raise is full Fast Bootstrap execution |
+| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; full Bootstrap remains incomplete |
+| Fast ModUp basis raise / scale alignment | Implemented | `circuits/ckks/bootstrapping/fast_modup.go` restores MaxLevel structure, computes only maintained q0/q1, and feeds the Fast Trace boundary |
+| Fast Trace | Implemented | `schemes/ckks/fast/trace.go` performs q0/q1-only inverse normalization, automorphism/add stages, and logN=0 final order-two stage with evaluator-owned scratch/cache |
+| Fast ModUp boundary | Implemented for Stage-A no-key Standard-ring path | `FastEvaluator.ModUp` performs basis raise, Fast Trace, and q0/q1-only Montgomery handoff; Dense/Sparse switching and full Bootstrap remain incomplete |
+| Fast ModUp/ModDown, KeySwitch, EvalMod, and full Bootstrap execution | Not implemented | Do not imply that Fast key support or the Stage-A ModUp boundary is full Fast Bootstrap execution |
 
 The current implementation status is not a permanent architecture claim. In particular, current zero-secret behavior and current evaluation-key material are implementation modes that future experiments may extend.
 
