@@ -13,8 +13,8 @@ import (
 
 // FastEvaluator is the narrow Fast Bootstrap boundary. It deliberately does
 // not embed a Standard CKKS evaluator or accept Bootstrap evaluation keys.
-// ScaleDown is the only stage implemented here; ModUp, Trace and the full
-// Bootstrap orchestration remain separate future boundaries.
+// ScaleDown and the pre-Trace ModUp basis raise are the implemented Fast
+// boundaries; Trace and full Bootstrap orchestration remain future stages.
 type FastEvaluator struct {
 	Parameters     Parameters
 	FastCKKS       *fastckks.Evaluator
@@ -31,6 +31,7 @@ func NewFastEvaluator(params Parameters) (*FastEvaluator, error) {
 		Parameters: params,
 		FastCKKS:   fastckks.NewEvaluator(params.BootstrappingParameters),
 		Mod1Parameters: mod1.Parameters{
+			LogDefaultScale: params.Mod1ParametersLiteral.LogScale,
 			LogMessageRatio: params.Mod1ParametersLiteral.LogMessageRatio,
 		},
 	}, nil

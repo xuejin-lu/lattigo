@@ -222,8 +222,9 @@ This branch does not start from Phase 0. The status below is derived from the cu
 | Fast DFT adapter | Implemented, not wired | `circuits/ckks/dft/fast.go` executes CoeffsToSlots/SlotsToCoeffs factor groups with Fast LinearTransform, Conjugate, scalar arithmetic, and Rescale; Bootstrap orchestration remains deferred |
 | Fast Bootstrap key support | Implemented | `circuits/ckks/bootstrapping/fast_keys.go` generates Fast evaluation-key material |
 | Fast Rescale | Implemented | `schemes/ckks/fast/rescale.go` provides fixed-width q0/q1 arithmetic with Standard Scale/Level semantics; targeted tests pass |
-| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; ModUp, Trace, and full Bootstrap remain incomplete |
-| ModUp/ModDown, KeySwitch, and full Bootstrap execution | Not implemented | These remain future bounded stages; do not imply that Fast key support is Fast Bootstrap execution |
+| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; Trace and full Bootstrap remain incomplete |
+| Fast ModUp basis raise / scale alignment | Implemented | `circuits/ckks/bootstrapping/fast_modup.go` restores MaxLevel structure, computes only maintained q0/q1, and stops before Trace; full Fast ModUp remains incomplete |
+| Fast Trace, ModUp/ModDown, KeySwitch, and full Bootstrap execution | Not implemented | Trace is the next bounded stage; do not imply that Fast key support or the pre-Trace basis raise is full Fast Bootstrap execution |
 
 The current implementation status is not a permanent architecture claim. In particular, current zero-secret behavior and current evaluation-key material are implementation modes that future experiments may extend.
 
