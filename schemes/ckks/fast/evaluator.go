@@ -12,14 +12,17 @@ import (
 
 // Evaluator is an explicit Fast CKKS execution boundary. It intentionally
 // does not replace or modify ckks.Evaluator: callers select Fast execution by
-// constructing this evaluator explicitly.
+// constructing this evaluator explicitly. Evaluators reuse internal scratch
+// and are intended for one execution stream at a time; use separate instances
+// for concurrent evaluation.
 type Evaluator struct {
-	Parameters ckks.Parameters
+	Parameters     ckks.Parameters
+	rescaleScratch fastRescaleScratch
 }
 
 // NewEvaluator creates an explicit q0/q1-authoritative evaluator.
 func NewEvaluator(params ckks.Parameters) *Evaluator {
-	return &Evaluator{Parameters: params}
+	return &Evaluator{Parameters: params, rescaleScratch: newFastRescaleScratch(params.RingQ())}
 }
 
 // Mul multiplies two degree-one ciphertexts and truncates the resulting

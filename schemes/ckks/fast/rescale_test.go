@@ -117,14 +117,21 @@ func TestFastRescaleMatchesStandardAtHigherLevels(t *testing.T) {
 	standard := ckks.NewEvaluator(params, nil)
 	fastEval := NewEvaluator(params)
 	for _, level := range []int{2, 3} {
-		in := makeFastRescaleCiphertext(params, level, []int64{1, -2, 12345, -67890}, 0)
+		d := params.RingQ().SubRings[level].Modulus
+		positive := []uint64{d - 1, d + 1, 2*d + 1, 3*d + (d-1)/2, 3*d + (d+1)/2}
+		values := make([]int64, 0, 2*len(positive))
+		for _, value := range positive {
+			values = append(values, int64(value), -int64(value))
+		}
+		in := makeFastRescaleCiphertext(params, level, values, 0)
 		standardOut := ckks.NewCiphertext(params, 1, level-1)
 		fastOut := ckks.NewCiphertext(params, 1, level-1)
 		require.NoError(t, standard.Rescale(in, standardOut))
 		require.NoError(t, fastEval.Rescale(in, fastOut))
 		require.Equal(t, standardOut.Scale, fastOut.Scale)
 		for component := range fastOut.Value {
-			for limb := 0; limb <= level-1; limb++ {
+			require.NotEqual(t, make([]uint64, len(fastOut.Value[component].Coeffs[0])), fastOut.Value[component].Coeffs[0])
+			for limb := 0; limb <= level-1 && limb < 2; limb++ {
 				require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
 			}
 		}

@@ -16,6 +16,28 @@ const (
 	fastRescaleMinDivisorBits = 32
 )
 
+type fastRescaleScratch struct {
+	coeff, result                ring.Poly
+	q0, q1, q0InverseModQ1       uint64
+	q01Lo, q01Hi, halfLo, halfHi uint64
+}
+
+func newFastRescaleScratch(ringQ *ring.Ring) fastRescaleScratch {
+	scratch := fastRescaleScratch{}
+	if ringQ == nil || ringQ.Level() < 1 {
+		return scratch
+	}
+	scratch.coeff = ring.NewPoly(ringQ.N(), 1)
+	scratch.result = ring.NewPoly(ringQ.N(), 1)
+	scratch.q0 = ringQ.SubRings[0].Modulus
+	scratch.q1 = ringQ.SubRings[1].Modulus
+	scratch.q0InverseModQ1, _ = inverseMod(scratch.q0%scratch.q1, scratch.q1)
+	scratch.q01Hi, scratch.q01Lo = bits.Mul64(scratch.q0, scratch.q1)
+	scratch.halfLo = (scratch.q01Lo >> 1) | (scratch.q01Hi << 63)
+	scratch.halfHi = scratch.q01Hi >> 1
+	return scratch
+}
+
 // Rescale applies the Standard CKKS rescale semantics using only the
 // actively-maintained q0/q1 residues. The input must be NTT-domain. Both
 // ordinary and Montgomery-form NTT representations are supported and the
@@ -63,9 +85,10 @@ func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOu
 	threshold := minScale.Div(rlwe.NewScale(2))
 	scale := op0.Scale
 	newLevel := op0.Level()
+	ringQ := eval.Parameters.RingQ()
 	nbRescales := 0
 	for newLevel > 0 {
-		candidate := scale.Div(rlwe.NewScale(eval.Parameters.Q()[newLevel]))
+		candidate := scale.Div(rlwe.NewScale(ringQ.SubRings[newLevel].Modulus))
 		if candidate.Cmp(threshold) == -1 {
 			break
 		}
@@ -100,71 +123,63 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 		opOut.Resize(op0.Degree(), targetLevel)
 	}
 
-	ringQ := eval.Parameters.RingQ().AtLevel(op0.Level())
-	q0 := ringQ.SubRings[0].Modulus
-	q1 := ringQ.SubRings[1].Modulus
-	inv, ok := inverseMod(q0%q1, q1)
-	if !ok {
+	ringQ := eval.Parameters.RingQ()
+	if eval.rescaleScratch.coeff.N() != ringQ.N() ||
+		eval.rescaleScratch.q0 != ringQ.SubRings[0].Modulus ||
+		eval.rescaleScratch.q1 != ringQ.SubRings[1].Modulus {
+		eval.rescaleScratch = newFastRescaleScratch(eval.Parameters.RingQ())
+	}
+	scratch := &eval.rescaleScratch
+	if scratch.q0InverseModQ1 == 0 {
 		return errors.New("Fast Rescale requires coprime q0 and q1")
 	}
-	if err := validateFastRescaleRange(q0, q1, ringQ.SubRings[ringQ.Level()].Modulus); err != nil {
+	if err := validateFastRescaleRange(scratch.q0, scratch.q1, ringQ.SubRings[op0.Level()].Modulus); err != nil {
 		return err
 	}
 
-	q01Hi, q01Lo := bits.Mul64(q0, q1)
-	halfLo := (q01Lo >> 1) | (q01Hi << 63)
-	halfHi := q01Hi >> 1
 	for component := range op0.Value {
-		coeff := ring.NewPoly(ringQ.N(), 1)
-		if err := FastPartialINTT(ringQ, op0.Value[component], coeff); err != nil {
+		if err := FastPartialINTT(ringQ, op0.Value[component], scratch.coeff); err != nil {
 			return err
 		}
 		if op0.IsMontgomery {
 			for limb := 0; limb < 2; limb++ {
-				ringQ.SubRings[limb].IMForm(coeff.Coeffs[limb], coeff.Coeffs[limb])
+				ringQ.SubRings[limb].IMForm(scratch.coeff.Coeffs[limb], scratch.coeff.Coeffs[limb])
 			}
 		}
-		next := ring.NewPoly(ringQ.N(), 1)
-		level := op0.Level()
 		for step := 0; step < nbRescales; step++ {
-			d := eval.Parameters.Q()[level-step]
-			if err := validateFastRescaleRange(q0, q1, d); err != nil {
+			d := ringQ.SubRings[op0.Level()-step].Modulus
+			if err := validateFastRescaleRange(scratch.q0, scratch.q1, d); err != nil {
 				return err
 			}
-			for k := 0; k < ringQ.N(); k++ {
-				xLo, xHi := crtQ01(coeff.Coeffs[0][k], coeff.Coeffs[1][k], q0, q1, inv)
-				y, negative := roundedMagnitude128(xLo, xHi, q01Lo, q01Hi, halfLo, halfHi, d)
-				next.Coeffs[0][k] = signedResidue(y, negative, q0)
-				if level-step-1 >= 1 {
-					next.Coeffs[1][k] = signedResidue(y, negative, q1)
-				}
+		}
+		firstDivisor := ringQ.SubRings[op0.Level()].Modulus
+		for k := 0; k < ringQ.N(); k++ {
+			xLo, xHi := crtQ01(scratch.coeff.Coeffs[0][k], scratch.coeff.Coeffs[1][k], scratch.q0, scratch.q1, scratch.q0InverseModQ1)
+			magnitude, negative := roundedMagnitude128(xLo, xHi, scratch.q01Lo, scratch.q01Hi, scratch.halfLo, scratch.halfHi, firstDivisor)
+			for step := 1; step < nbRescales; step++ {
+				magnitude = roundedMagnitude64(magnitude, ringQ.SubRings[op0.Level()-step].Modulus)
 			}
-			coeff, next = next, coeff
+			scratch.result.Coeffs[0][k] = signedResidue(magnitude, negative, scratch.q0)
+			if targetLevel >= 1 {
+				scratch.result.Coeffs[1][k] = signedResidue(magnitude, negative, scratch.q1)
+			}
 		}
 
-		nttResult := ring.NewPoly(ringQ.N(), 1)
+		ringQ.SubRings[0].NTT(scratch.result.Coeffs[0], opOut.Value[component].Coeffs[0])
 		if targetLevel >= 1 {
-			if err := FastPartialNTT(ringQ, coeff, nttResult); err != nil {
-				return err
-			}
-		} else {
-			ringQ.SubRings[0].NTT(coeff.Coeffs[0], nttResult.Coeffs[0])
+			ringQ.SubRings[1].NTT(scratch.result.Coeffs[1], opOut.Value[component].Coeffs[1])
 		}
 		if op0.IsMontgomery {
 			for limb := 0; limb <= targetLevel && limb < 2; limb++ {
-				ringQ.SubRings[limb].MForm(nttResult.Coeffs[limb], nttResult.Coeffs[limb])
+				ringQ.SubRings[limb].MForm(opOut.Value[component].Coeffs[limb], opOut.Value[component].Coeffs[limb])
 			}
-		}
-		copy(opOut.Value[component].Coeffs[0], nttResult.Coeffs[0])
-		if targetLevel >= 1 {
-			copy(opOut.Value[component].Coeffs[1], nttResult.Coeffs[1])
 		}
 	}
 
 	*opOut.MetaData = *op0.MetaData
 	opOut.Scale = op0.Scale
 	for step := 0; step < nbRescales; step++ {
-		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(eval.Parameters.Q()[op0.Level()-step]))
+		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(ringQ.SubRings[op0.Level()-step].Modulus))
 	}
 	if op0 == opOut {
 		opOut.Resize(op0.Degree(), targetLevel)
@@ -248,6 +263,14 @@ func roundedMagnitude128(xLo, xHi, qLo, qHi, halfLo, halfHi, divisor uint64) (ui
 		quotient++
 	}
 	return quotient, negative
+}
+
+func roundedMagnitude64(magnitude, divisor uint64) uint64 {
+	quotient, remainder := magnitude/divisor, magnitude%divisor
+	if remainder > divisor/2 {
+		quotient++
+	}
+	return quotient
 }
 
 func signedResidue(magnitude uint64, negative bool, modulus uint64) uint64 {
