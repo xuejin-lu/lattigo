@@ -4,14 +4,20 @@
 
 Before starting any Fast-CKKS task:
 
-1. Read `CURRENT_TASK.md`.
-2. Read the task specification referenced there.
-3. Read `docs/FAST_CKKS_SPEC.md` for durable architecture and invariants.
-4. Inspect the relevant current source before editing; repository evidence takes precedence over assumptions from names or prior knowledge.
-5. Implement only the requested scope. Do not begin the next task implicitly.
-6. Run the relevant targeted tests and benchmarks.
-7. Review the diff and remove unrelated changes.
-8. Report the result, tests, benchmark changes, commit hash, and push result.
+1. Safely synchronize the local `fast-ckks` branch with `origin/fast-ckks` before reading the task.
+   - Check that the current branch is `fast-ckks` and inspect `git status --short`.
+   - If the worktree is clean, run `git fetch origin` and update with `git pull --ff-only origin fast-ckks`.
+   - If the worktree has uncommitted changes, the branch is not `fast-ckks`, or the fast-forward update fails, do not reset, stash, overwrite, or discard anything automatically. Stop and report the condition instead.
+   - After synchronization, re-read this `AGENTS.md` because the repository instructions themselves may have changed.
+2. Read `CURRENT_TASK.md`.
+3. Read the task specification referenced there.
+4. Read `docs/FAST_CKKS_SPEC.md` for durable architecture and invariants.
+5. Inspect the relevant current source before editing; repository evidence takes precedence over assumptions from names or prior knowledge.
+6. Implement only the requested scope. Do not begin the next task implicitly.
+7. Run the relevant targeted tests and benchmarks.
+8. Review the diff and remove unrelated changes.
+9. Commit and push the completed task to `origin/fast-ckks` unless the task explicitly says otherwise. If push fails, keep the local commit intact and report the failure; do not rewrite history merely to retry.
+10. Report the result, tests, benchmark changes, commit hash, and push result.
 
 `CURRENT_TASK.md` is only the current work pointer. Task-specific requirements belong in `specs/`. Durable Fast-CKKS architecture belongs in `docs/FAST_CKKS_SPEC.md`. Do not duplicate those layers unnecessarily.
 
