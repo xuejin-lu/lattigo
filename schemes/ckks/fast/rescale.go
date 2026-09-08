@@ -7,7 +7,6 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
-	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 )
 
 const (
@@ -18,8 +17,9 @@ const (
 )
 
 // Rescale applies the Standard CKKS rescale semantics using only the
-// actively-maintained q0/q1 residues. The input must be NTT-domain and
-// Montgomery-form, as produced by the Standard CKKS evaluator.
+// actively-maintained q0/q1 residues. The input must be NTT-domain. Both
+// ordinary and Montgomery-form NTT representations are supported and the
+// output preserves the input representation.
 func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
@@ -95,51 +95,25 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 		return validate
 	}
 
-	current := op0.CopyNew()
-	for i := 0; i < nbRescales; i++ {
-		level := current.Level()
-		var next *rlwe.Ciphertext
-		if i == nbRescales-1 {
-			next = opOut
-			next.Resize(current.Degree(), level-1)
-		} else {
-			next = ckks.NewCiphertext(eval.Parameters, current.Degree(), level-1)
-		}
-		if err := fastRescaleOnce(eval.Parameters.RingQ().AtLevel(level), current, next); err != nil {
-			return fmt.Errorf("Fast rescale at level %d: %w", level, err)
-		}
-		current = next
-	}
-	return nil
-}
-
-func fastRescaleOnce(ringQ *ring.Ring, op0, opOut *rlwe.Ciphertext) error {
-	if op0.Level() < 1 {
-		return errors.New("Fast Rescale requires input Level >= 1")
-	}
-	if err := validateFastRescaleDomain(op0); err != nil {
-		return err
-	}
-	outMontgomery := op0.IsMontgomery
-	if opOut.Degree() != op0.Degree() || opOut.Level() != op0.Level()-1 {
-		return errors.New("Fast Rescale output must have the same degree and one lower level")
+	targetLevel := op0.Level() - nbRescales
+	if op0 != opOut {
+		opOut.Resize(op0.Degree(), targetLevel)
 	}
 
+	ringQ := eval.Parameters.RingQ().AtLevel(op0.Level())
 	q0 := ringQ.SubRings[0].Modulus
 	q1 := ringQ.SubRings[1].Modulus
-	d := ringQ.SubRings[ringQ.Level()].Modulus
 	inv, ok := inverseMod(q0%q1, q1)
 	if !ok {
 		return errors.New("Fast Rescale requires coprime q0 and q1")
 	}
-	if err := validateFastRescaleRange(q0, q1, d); err != nil {
+	if err := validateFastRescaleRange(q0, q1, ringQ.SubRings[ringQ.Level()].Modulus); err != nil {
 		return err
 	}
 
 	q01Hi, q01Lo := bits.Mul64(q0, q1)
 	halfLo := (q01Lo >> 1) | (q01Hi << 63)
 	halfHi := q01Hi >> 1
-	results := make([]ring.Poly, op0.Degree()+1)
 	for component := range op0.Value {
 		coeff := ring.NewPoly(ringQ.N(), 1)
 		if err := FastPartialINTT(ringQ, op0.Value[component], coeff); err != nil {
@@ -150,40 +124,50 @@ func fastRescaleOnce(ringQ *ring.Ring, op0, opOut *rlwe.Ciphertext) error {
 				ringQ.SubRings[limb].IMForm(coeff.Coeffs[limb], coeff.Coeffs[limb])
 			}
 		}
-		result := ring.NewPoly(ringQ.N(), opOut.Level())
-		for k := 0; k < ringQ.N(); k++ {
-			xLo, xHi := crtQ01(coeff.Coeffs[0][k], coeff.Coeffs[1][k], q0, q1, inv)
-			y, negative := roundedMagnitude128(xLo, xHi, q01Lo, q01Hi, halfLo, halfHi, d)
-			result.Coeffs[0][k] = signedResidue(y, negative, q0)
-			if opOut.Level() >= 1 {
-				result.Coeffs[1][k] = signedResidue(y, negative, q1)
-			}
-		}
-
-		if opOut.Level() >= 1 {
-			nttResult := ring.NewPoly(ringQ.N(), opOut.Level())
-			if err := FastPartialNTT(ringQ, result, nttResult); err != nil {
+		next := ring.NewPoly(ringQ.N(), 1)
+		level := op0.Level()
+		for step := 0; step < nbRescales; step++ {
+			d := eval.Parameters.Q()[level-step]
+			if err := validateFastRescaleRange(q0, q1, d); err != nil {
 				return err
 			}
-			result = nttResult
-		} else {
-			nttResult := ring.NewPoly(ringQ.N(), 0)
-			ringQ.SubRings[0].NTT(result.Coeffs[0], nttResult.Coeffs[0])
-			result = nttResult
+			for k := 0; k < ringQ.N(); k++ {
+				xLo, xHi := crtQ01(coeff.Coeffs[0][k], coeff.Coeffs[1][k], q0, q1, inv)
+				y, negative := roundedMagnitude128(xLo, xHi, q01Lo, q01Hi, halfLo, halfHi, d)
+				next.Coeffs[0][k] = signedResidue(y, negative, q0)
+				if level-step-1 >= 1 {
+					next.Coeffs[1][k] = signedResidue(y, negative, q1)
+				}
+			}
+			coeff, next = next, coeff
 		}
-		if outMontgomery {
-			for limb := 0; limb <= opOut.Level() && limb < 2; limb++ {
-				ringQ.SubRings[limb].MForm(result.Coeffs[limb], result.Coeffs[limb])
+
+		nttResult := ring.NewPoly(ringQ.N(), 1)
+		if targetLevel >= 1 {
+			if err := FastPartialNTT(ringQ, coeff, nttResult); err != nil {
+				return err
+			}
+		} else {
+			ringQ.SubRings[0].NTT(coeff.Coeffs[0], nttResult.Coeffs[0])
+		}
+		if op0.IsMontgomery {
+			for limb := 0; limb <= targetLevel && limb < 2; limb++ {
+				ringQ.SubRings[limb].MForm(nttResult.Coeffs[limb], nttResult.Coeffs[limb])
 			}
 		}
-		results[component] = result
+		copy(opOut.Value[component].Coeffs[0], nttResult.Coeffs[0])
+		if targetLevel >= 1 {
+			copy(opOut.Value[component].Coeffs[1], nttResult.Coeffs[1])
+		}
 	}
 
 	*opOut.MetaData = *op0.MetaData
-	opOut.Scale = op0.Scale.Div(rlwe.NewScale(d))
-	opOut.Resize(op0.Degree(), op0.Level()-1)
-	for component := range results {
-		opOut.Value[component] = results[component]
+	opOut.Scale = op0.Scale
+	for step := 0; step < nbRescales; step++ {
+		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(eval.Parameters.Q()[op0.Level()-step]))
+	}
+	if op0 == opOut {
+		opOut.Resize(op0.Degree(), targetLevel)
 	}
 	return nil
 }
@@ -249,7 +233,8 @@ func crtQ01(r0, r1, q0, q1, inverse uint64) (lo, hi uint64) {
 }
 
 func roundedMagnitude128(xLo, xHi, qLo, qHi, halfLo, halfHi, divisor uint64) (uint64, bool) {
-	negative := xHi > halfHi || (xHi == halfHi && xLo >= halfLo)
+	// For odd Q01, floor(Q01/2) is still the positive centered endpoint.
+	negative := xHi > halfHi || (xHi == halfHi && xLo > halfLo)
 	if negative {
 		borrow := uint64(0)
 		qLo, borrow = bits.Sub64(qLo, xLo, 0)

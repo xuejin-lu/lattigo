@@ -29,8 +29,10 @@ func TestFixedWidthCRTMatchesBigInt(t *testing.T) {
 	Q := new(big.Int).Mul(new(big.Int).SetUint64(q0), new(big.Int).SetUint64(q1))
 	values := []*big.Int{
 		big.NewInt(0), big.NewInt(1), big.NewInt(-1), big.NewInt(7),
+		new(big.Int).Rsh(new(big.Int).Set(Q), 1),
 		new(big.Int).Sub(new(big.Int).Rsh(new(big.Int).Set(Q), 1), big.NewInt(1)),
 		new(big.Int).Neg(new(big.Int).Rsh(new(big.Int).Set(Q), 1)),
+		new(big.Int).Add(new(big.Int).Neg(new(big.Int).Rsh(new(big.Int).Set(Q), 1)), big.NewInt(1)),
 	}
 	for i := 0; i < 128; i++ {
 		values = append(values, new(big.Int).Lsh(big.NewInt(int64(i+1)), uint(i%17)))
@@ -43,7 +45,7 @@ func TestFixedWidthCRTMatchesBigInt(t *testing.T) {
 		got := new(big.Int).SetUint64(hi)
 		got.Lsh(got, 64)
 		got.Add(got, new(big.Int).SetUint64(lo))
-		if got.Cmp(new(big.Int).Rsh(new(big.Int).Set(Q), 1)) >= 0 {
+		if got.Cmp(new(big.Int).Rsh(new(big.Int).Set(Q), 1)) > 0 {
 			got.Sub(got, Q)
 		}
 		require.Equal(t, want, got)
@@ -110,6 +112,77 @@ func TestFastRescaleMatchesStandardAndReachesLevelZero(t *testing.T) {
 	require.Equal(t, 0, out.Level())
 }
 
+func TestFastRescaleMatchesStandardAtHigherLevels(t *testing.T) {
+	params := rescaleTestParameters(t)
+	standard := ckks.NewEvaluator(params, nil)
+	fastEval := NewEvaluator(params)
+	for _, level := range []int{2, 3} {
+		in := makeFastRescaleCiphertext(params, level, []int64{1, -2, 12345, -67890}, 0)
+		standardOut := ckks.NewCiphertext(params, 1, level-1)
+		fastOut := ckks.NewCiphertext(params, 1, level-1)
+		require.NoError(t, standard.Rescale(in, standardOut))
+		require.NoError(t, fastEval.Rescale(in, fastOut))
+		require.Equal(t, standardOut.Scale, fastOut.Scale)
+		for component := range fastOut.Value {
+			for limb := 0; limb <= level-1; limb++ {
+				require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
+			}
+		}
+	}
+}
+
+func TestFastRescaleToSequentialLevelsAndInPlace(t *testing.T) {
+	params := rescaleTestParameters(t)
+	standard := ckks.NewEvaluator(params, nil)
+	fastEval := NewEvaluator(params)
+	in := makeFastRescaleCiphertext(params, 3, []int64{1, -2, 12345, -67890}, 0)
+	in.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 160))
+	standardOut := ckks.NewCiphertext(params, 1, 3)
+	fastOut := ckks.NewCiphertext(params, 1, 3)
+	minScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 20))
+	require.NoError(t, standard.RescaleTo(in, minScale, standardOut))
+	require.NoError(t, fastEval.RescaleTo(in, minScale, fastOut))
+	require.Equal(t, standardOut.Level(), fastOut.Level())
+	require.Equal(t, standardOut.Scale, fastOut.Scale)
+	for component := range fastOut.Value {
+		for limb := 0; limb <= fastOut.Level() && limb < 2; limb++ {
+			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
+		}
+	}
+
+	inPlace := in.CopyNew()
+	outOfPlace := ckks.NewCiphertext(params, 1, 3)
+	require.NoError(t, fastEval.RescaleTo(inPlace, minScale, inPlace))
+	require.NoError(t, fastEval.RescaleTo(in, minScale, outOfPlace))
+	require.Equal(t, outOfPlace.Level(), inPlace.Level())
+	for component := range inPlace.Value {
+		for limb := 0; limb <= inPlace.Level() && limb < 2; limb++ {
+			require.Equal(t, outOfPlace.Value[component].Coeffs[limb], inPlace.Value[component].Coeffs[limb])
+		}
+	}
+}
+
+func TestFastRescaleSupportsBothNTTRepresentations(t *testing.T) {
+	params := rescaleTestParameters(t)
+	eval := NewEvaluator(params)
+	nonMontgomery := makeFastRescaleCiphertext(params, 2, []int64{1, -2, 12345, -67890}, 41)
+	montgomery := makeFastRescaleCiphertext(params, 2, []int64{1, -2, 12345, -67890}, 41, true)
+	nonOut := ckks.NewCiphertext(params, 1, 1)
+	montOut := ckks.NewCiphertext(params, 1, 1)
+	require.NoError(t, eval.Rescale(nonMontgomery, nonOut))
+	require.NoError(t, eval.Rescale(montgomery, montOut))
+	require.False(t, nonOut.IsMontgomery)
+	require.True(t, montOut.IsMontgomery)
+	r := params.RingQ().AtLevel(1)
+	for component := range nonOut.Value {
+		for limb := 0; limb < 2; limb++ {
+			converted := append([]uint64(nil), montOut.Value[component].Coeffs[limb]...)
+			r.SubRings[limb].IMForm(converted, converted)
+			require.Equal(t, nonOut.Value[component].Coeffs[limb], converted)
+		}
+	}
+}
+
 func TestFastRescaleIgnoresDormantResidues(t *testing.T) {
 	params := rescaleTestParameters(t)
 	fastEval := NewEvaluator(params)
@@ -132,10 +205,10 @@ func TestFastRescaleIgnoresDormantResidues(t *testing.T) {
 	}
 }
 
-func makeFastRescaleCiphertext(params ckks.Parameters, level int, values []int64, poison uint64) *rlwe.Ciphertext {
+func makeFastRescaleCiphertext(params ckks.Parameters, level int, values []int64, poison uint64, montgomery ...bool) *rlwe.Ciphertext {
 	ct := ckks.NewCiphertext(params, 1, level)
 	ct.IsNTT = true
-	ct.IsMontgomery = false
+	ct.IsMontgomery = len(montgomery) > 0 && montgomery[0]
 	ct.Scale = rlwe.NewScale(1 << 40)
 	r := params.RingQ().AtLevel(level)
 	for component := range ct.Value {
@@ -148,7 +221,7 @@ func makeFastRescaleCiphertext(params ckks.Parameters, level int, values []int64
 				} else {
 					ct.Value[component].Coeffs[limb][k] = uint64(v) % q
 				}
-				if limb >= 2 {
+				if limb >= 2 && poison != 0 {
 					ct.Value[component].Coeffs[limb][k] += poison + uint64(limb+k)
 					ct.Value[component].Coeffs[limb][k] %= q
 				}
@@ -157,6 +230,9 @@ func makeFastRescaleCiphertext(params ckks.Parameters, level int, values []int64
 		for limb := 0; limb <= level; limb++ {
 			ntt := make([]uint64, len(ct.Value[component].Coeffs[limb]))
 			r.SubRings[limb].NTT(ct.Value[component].Coeffs[limb], ntt)
+			if ct.IsMontgomery {
+				r.SubRings[limb].MForm(ntt, ntt)
+			}
 			copy(ct.Value[component].Coeffs[limb], ntt)
 		}
 	}
@@ -179,6 +255,58 @@ func BenchmarkFastRescale(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if err := eval.Rescale(ct, out); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFastRescaleLogN13(b *testing.B) {
+	benchmarkRescaleLogN(b, 13, true)
+}
+
+func BenchmarkStandardRescaleLogN13(b *testing.B) {
+	benchmarkRescaleLogN(b, 13, false)
+}
+
+func BenchmarkFastRescaleLogN16(b *testing.B) {
+	benchmarkRescaleLogN(b, 16, true)
+}
+
+func BenchmarkStandardRescaleLogN16(b *testing.B) {
+	benchmarkRescaleLogN(b, 16, false)
+}
+
+func benchmarkRescaleLogN(b *testing.B, logN int, fastPath bool) {
+	logQ := []int{55, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56}
+	if logN == 16 {
+		// The N=65536 NTT-prime generator can select q0/q1 just above the
+		// documented profile; use the nearest profile within the fixed-width
+		// production contract for this optional benchmark.
+		logQ[0], logQ[1] = 54, 38
+	}
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{LogN: logN, LogQ: logQ, LogDefaultScale: 30})
+	if err != nil {
+		b.Fatal(err)
+	}
+	level := params.MaxLevel()
+	in := makeFastRescaleCiphertext(params, level, []int64{1, -2, 12345, -67890}, 0)
+	out := ckks.NewCiphertext(params, 1, level-1)
+	if fastPath {
+		eval := NewEvaluator(params)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := eval.Rescale(in, out); err != nil {
+				b.Fatal(err)
+			}
+		}
+	} else {
+		eval := ckks.NewEvaluator(params, nil)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := eval.Rescale(in, out); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }
