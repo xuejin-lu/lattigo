@@ -12,20 +12,23 @@ The branch has useful Fast primitives, but the public Bootstrap execution path d
 
 The shortest path is not to rewrite Bootstrap. It is to supply the missing Fast evaluator contracts in dependency order and wire the existing orchestration to them:
 
-1. define and implement Fast q0/q1 level-transition/Rescale semantics;
+1. implement Standard-equivalent Rescale from the maintained Fast residue subset;
 2. provide an NTT-compatible Fast evaluator surface for polynomial circuits;
 3. adapt DFT to the existing Fast LinearTransform/automorphism primitives;
-4. define the deliberate q0/q1 ModUp boundary;
+4. define the deliberate Fast residue-materialization boundary for ModUp;
 5. wire packing/ring-degree conversion and the Bootstrap orchestrator.
 
-The top architectural conflict is that Standard `ScaleDown` reduces to level 0 and Standard `ModUp` reconstructs all Q limbs from q0, while established Fast primitives require q0 and q1 and treat q2...qL as dormant. This must be resolved explicitly; full redistribution is not an acceptable hidden workaround.
+Standard `ScaleDown` legitimately progresses to Level 0, where only the residue limb for q0 exists, and Standard `ModUp` then materializes all Q residue limbs from r0. Fast must preserve that logical Level/Scale progression. The remaining engineering gap is to compute required arithmetic from the minimum maintained residue subset without treating stale full-RNS storage as valid or using full redistribution as a hidden workaround.
 
 ## 2. Audit scope and notation
 
 This audit traced only the current Bootstrap call graph and the directly reached CKKS, DFT, polynomial, ring, and RLWE operations. Completed Fast primitives were inspected only to identify wiring and contract gaps.
 
-- A ciphertext at level `L` stores `L+1` Q limbs, `q0...qL`.
-- Fast authority is q0/q1; q2...qL are dormant.
+- `q_i` is the modulus prime at RNS index `i`.
+- For coefficient `x[k]`, `r_i[k] = x[k] mod q_i` is the value stored in residue limb `i`.
+- A ciphertext at Level `L` has `L+1` logical Q moduli, `q0...qL`; its storage may include corresponding residue arrays.
+- At Level >= 1, current Fast shortcuts may actively maintain r0/r1 while leaving higher residue storage unmaintained or stale. This is not a minimum-Level invariant.
+- At Level 0, only modulus q0 and its r0 residue limb remain active.
 - `c0`, `c1`, and `c2` are ciphertext polynomial components, not RNS limbs.
 - Cost classifications are structural; no benchmark percentages are claimed.
 
@@ -54,7 +57,7 @@ Evaluator.Bootstrap
     │   │   ├── Evaluator.ModUp
     │   │   │   ├── ApplyEvaluationKey dense->sparse (optional)
     │   │   │   ├── full-Q INTT
-    │   │   │   ├── q0-centered materialization into q1...qL
+    │   │   │   ├── centered r0 materialization into residue limbs for q1...qL
     │   │   │   ├── QP decomposition/NTT/GadgetProductHoisted (optional sparse->dense)
     │   │   │   ├── full-Q NTT and scalar multiplication
     │   │   │   └── rlwe.Evaluator.Trace
@@ -117,14 +120,14 @@ Each operation has exactly one Fast coverage classification.
 |---|---|---|---|
 | `bootstrapping.Evaluator.Bootstrap/BootstrapMany` in `evaluator.go` | Public entry; pack, Evaluate, unpack | `MISSING_FAST_IMPLEMENTATION` | No Fast orchestrator or evaluator selection exists |
 | `bootstrapping.NewEvaluator` in `evaluator.go` | Constructs `ckks.NewEvaluator`, `dft.NewEvaluator`, and `mod1.NewEvaluator` | `STANDARD_HIGH_COST` | This binds every circuit stage to Standard execution |
-| `PackAndSwitchN1ToN2.pack` / `unpack` | Full-Q monomial multiply/add | `MISSING_FAST_IMPLEMENTATION` | No q0/q1 packing wrapper; dormant limbs are processed at active level |
-| `switchRingDegreeN1ToN2New` / `switchRingDegreeN2ToN1New` | Standard `ApplyEvaluationKey` | `FAST_EXISTS_BUT_NOT_WIRED` | `FastN1ToN2/FastN2ToN1` exist, but Bootstrap calls Standard key switching |
-| `ScaleDown` level dropping | `Resize` only | `STANDARD_BUT_CHEAP` | Metadata/storage truncation is cheap, but dropping to level 0 conflicts with q0/q1 authority |
-| `ScaleDown` scalar multiply | Standard CKKS scalar Mul over all active Q limbs | `MISSING_FAST_IMPLEMENTATION` | A q0/q1 scalar path is absent from the Fast evaluator surface |
+| `PackAndSwitchN1ToN2.pack` / `unpack` | Full-Q monomial multiply/add | `MISSING_FAST_IMPLEMENTATION` | No minimum-residue-subset packing wrapper; every stored residue limb is processed at active Level |
+| `switchRingDegreeN1ToN2New` / `switchRingDegreeN2ToN1New` | Standard `ApplyEvaluationKey` | `FAST_EXISTS_BUT_NOT_WIRED` | `FastN1ToN2/FastN2ToN1` exist for the current first-two-residue shortcut, but Bootstrap calls Standard key switching |
+| `ScaleDown` level dropping | `Resize` only | `STANDARD_BUT_CHEAP` | Correctly removes high-modulus representation without coefficient division, Scale change, or rounding; it may reach Level 0 |
+| `ScaleDown` scalar multiply | Standard CKKS scalar Mul over all active Q limbs | `MISSING_FAST_IMPLEMENTATION` | A minimum-residue-subset scalar path is absent from the Fast evaluator surface |
 | `ScaleDown` `RescaleTo` | Full-Q rounded division and level consumption | `MISSING_FAST_IMPLEMENTATION` | Fast Rescale is absent and is a Bootstrap blocker |
-| `ModUp` | INTT, q0-to-all-Q materialization, NTT, optional QP key switch, Trace | `BOUNDARY_ONLY` | Modulus raising is an explicit representation boundary with unresolved q0/q1 semantics |
+| `ModUp` | INTT, r0-to-all-Q-residue materialization, NTT, optional QP key switch, Trace | `BOUNDARY_ONLY` | Modulus raising is an explicit representation boundary; Fast must preserve Level 0 input semantics without maintaining unnecessary output residues |
 | `ModUp` dense/sparse switches | ApplyEvaluationKey and GadgetProductHoisted | `STANDARD_HIGH_COST` | Default-like ephemeral-secret configurations activate QP security work |
-| `Trace` | Scalar multiply, repeated Standard automorphisms and adds | `FAST_EXISTS_BUT_NOT_WIRED` | Fast automorphism and q0/q1 Add exist; a Fast Trace adapter does not |
+| `Trace` | Scalar multiply, repeated Standard automorphisms and adds | `FAST_EXISTS_BUT_NOT_WIRED` | Fast automorphism and first-two-residue Add exist; a Fast Trace adapter does not |
 | `dft.Evaluator.dft` | Repeated common LinearTransform then Rescale | `STANDARD_HIGH_COST` | Entire DFT remains full-Q/QP and repeats by factorization depth |
 | common `LinearTransform.EvaluateMany` | DecomposeNTT, hoisted/BSGS rotations, QP products, ModDown | `FAST_EXISTS_BUT_NOT_WIRED` | Fast LinearTransform exists but its level/Montgomery/API contracts do not match this caller |
 | DFT Conjugate/Rotate | Standard automorphism/key switching | `FAST_EXISTS_BUT_NOT_WIRED` | Fast Standard-ring automorphism exists, but DFT calls Standard CKKS methods |
@@ -152,7 +155,7 @@ Each operation has exactly one Fast coverage classification.
 ### HIDDEN_STANDARD_FALLBACK — DFT LinearTransform
 
 - Path: `circuits/ckks/dft/dft.go:dft` -> `circuits/common/lintrans/lintrans_evaluator.go:EvaluateMany`.
-- Effect: q0/q1 Fast LinearTransform is bypassed; Standard QP decomposition, GadgetProductHoistedLazy, BSGS/hoisting, and ModDown execute for each factorized matrix.
+- Effect: the current first-two-residue Fast LinearTransform is bypassed; Standard QP decomposition, GadgetProductHoistedLazy, BSGS/hoisting, and ModDown execute for each factorized matrix.
 
 ### HIDDEN_STANDARD_FALLBACK — EvalMod polynomial evaluator
 
@@ -162,22 +165,22 @@ Each operation has exactly one Fast coverage classification.
 ### HIDDEN_STANDARD_FALLBACK — ring switching and ModUp key switches
 
 - Paths: `switchRingDegreeN1ToN2New`, `switchRingDegreeN2ToN1New`, and optional dense/sparse branches in `ModUp`.
-- Effect: Standard `ApplyEvaluationKey` and GadgetProduct are selected instead of existing q0/q1 ring conversion or a Fast key-switch contract.
+- Effect: Standard `ApplyEvaluationKey` and GadgetProduct are selected instead of existing first-two-residue ring conversion or a Fast key-switch contract.
 
 This fallback is also a functional incompatibility with Fast keys: `core/rlwe/evaluator_evaluationkey.go:ApplyEvaluationKey` and `core/rlwe/evaluator_gadget_product.go:GadgetProduct/GadgetProductLazy` explicitly reject `KeyLayoutFast`. Fast key generation alone cannot make Standard Bootstrap run Fast.
 
 ## 6. Remaining full-RNS work
 
-| Location | Operation and limbs | Are q2...qL necessary for current Stage A? |
+| Location | Operation and residue limbs | Are maintained r2...rL values necessary for current Stage A? |
 |---|---|---|
-| `BootstrapMany` packing/unpacking | `RingQ.AtLevel(level).MulCoeffsMontgomery*` on all `level+1` Q limbs | They appear to be Standard representation maintenance; q0/q1 monomial multiplication is sufficient in the existing Fast model, subject to adapter validation |
-| `ScaleDown` scalar Mul | All Q limbs at the input level | Dormant-limb work appears unnecessary; q0/q1 scalar arithmetic is missing |
-| `ckks.Evaluator.Rescale/RescaleTo` | For each component, consumes highest qL and updates every remaining q0...q(L-1); one rescale may consume multiple primes | Standard exact rounded semantics need the dropped limb. With q2...qL dormant, the required Fast semantic is unresolved; full-Q work cannot simply be retained |
-| `ModUp` | Full INTT at input level, writes every q1...qL from centered q0, then full-Q NTT and scalar Mul | Full materialization is a Standard Bootstrap invariant, not an established Fast requirement. The current q0-only source conflicts with q0/q1 authority |
-| `Trace` | Full-Q scalar multiply, automorphisms, and additions at max Bootstrap level | Fast q0/q1 primitives appear sufficient under current zero-secret semantics; wiring is absent |
-| DFT common LinearTransform | Every active Q limb plus every configured P limb; repeated for all factor matrices | q2...qL appear unnecessary for current Fast authority; Standard code maintains them because its ciphertext state is full-RNS |
-| DFT Rescale | All remaining Q limbs after each factorization group | Same unresolved Fast Rescale issue; invoked `len(Matrix.Levels)` times per DFT |
-| EvalMod polynomial arithmetic | Full-Q Mul/Add/MulThenAdd at each current level | Dormant-limb work appears unnecessary except where Standard Rescale depends on dropped limbs |
+| `BootstrapMany` packing/unpacking | `RingQ.AtLevel(level).MulCoeffsMontgomery*` on all `level+1` residue limbs | Maintaining every residue appears to be Standard representation work; operating on the minimum sufficient subset should be validated |
+| `ScaleDown` scalar Mul | All residue limbs at the input Level | Unneeded-residue work appears avoidable; a minimum-subset scalar operation is missing |
+| `ckks.Evaluator.Rescale/RescaleTo` | For each component, consumes highest logical modulus `q_L` and updates residues for `q_0...q_{L-1}`; one rescale may consume multiple primes | Standard-equivalent rounded semantics are required. Fast must reconstruct/normalize from maintained residues when the `r_L` residue is stale, then update only residues required after the transition |
+| `ModUp` | Full INTT at input Level, writes residue limbs for q1...qL from centered r0, then full-Q NTT and scalar Mul | Level-0 input is valid. Materializing every higher residue is Standard representation work, not yet an established Fast requirement |
+| `Trace` | Full-Q scalar multiply, automorphisms, and additions at max Bootstrap Level | Current first-two-residue primitives appear sufficient under zero-secret semantics; wiring is absent |
+| DFT common LinearTransform | Every active Q residue limb plus every configured P limb; repeated for all factor matrices | Maintaining r2...rL appears unnecessary for the current shortcut; Standard code maintains them because its ciphertext state is full-RNS |
+| DFT Rescale | All remaining Q residue limbs after each factorization group | Fast needs Standard-equivalent Rescale from maintained residues; invoked `len(Matrix.Levels)` times per DFT |
+| EvalMod polynomial arithmetic | Full-Q Mul/Add/MulThenAdd at each current Level | Unneeded-residue work appears avoidable except where an operation explicitly reconstructs or transitions Level |
 | EvalMod relinearization | Full-Q output plus QP gadget path | Candidate for direct degree truncation in current zero-secret mode |
 | CI domain switching | Full active Q and evaluation-key work | Uncertain because existing Fast code does not support the conjugate-invariant mapping |
 
@@ -189,60 +192,99 @@ This fallback is also a functional incompatibility with Fast keys: `core/rlwe/ev
 | EvalMod MulRelin/Relinearize | `schemes/ckks/evaluator.go:mulRelin`; `core/rlwe/evaluator_evaluationkey.go:Relinearize` | `STANDARD_SECURITY_PATH_CANDIDATE_FOR_ELISION` | Existing Fast multiplication discards c2 under the current mode |
 | ModUp dense->sparse and sparse->dense | `bootstrapping/evaluator.go:ModUp` | `STANDARD_SECURITY_PATH_CANDIDATE_FOR_ELISION` | Security-oriented ephemeral-secret switching is not a Stage-A objective; exact removal must be configuration-aware |
 | Trace/Conjugate/Rotate | `core/rlwe/evaluator_automorphism.go` | `STANDARD_SECURITY_PATH_CANDIDATE_FOR_ELISION` | Standard automorphism invokes GadgetProduct; current Fast automorphism does not |
-| N1/N2 ring-degree switch | `core/rlwe/evaluator_evaluationkey.go:ApplyEvaluationKey` | `STANDARD_SECURITY_PATH_CANDIDATE_FOR_ELISION` | Existing Fast q0/q1 ring-degree conversion is designed to avoid the evaluation key |
+| N1/N2 ring-degree switch | `core/rlwe/evaluator_evaluationkey.go:ApplyEvaluationKey` | `STANDARD_SECURITY_PATH_CANDIDATE_FOR_ELISION` | Existing Fast first-two-residue ring-degree conversion is designed to avoid the evaluation key |
 | Conjugate-invariant Real/Complex switch | CKKS DomainSwitcher reached by `EvaluateConjugateInvariant` | `UNCERTAIN` | Current Fast Standard-ring-only primitives do not establish equivalent semantics |
 | Future nonzero-secret/noise experiments | Fast specification extension points | `UNCERTAIN` | P, gadget terms, and key switching must remain structurally recoverable for Stage B audit |
 
 No QP/P operation is proven `REQUIRED_BY_CURRENT_FAST_STAGE_A` by the current zero-secret architecture. ModUp's sparse-key branch and CI switching remain audit-sensitive boundaries; this document does not authorize their removal.
 
-## 8. Rescale audit
+## 8. ScaleDown and Rescale audit
 
-### Standard implementation
+### ScaleDown's actual three-part algorithm
+
+For current Level `level`, let `Q_level = q0*q1*...*q_level`, `Delta = ciphertext Scale`, and `rho = Mod1 MessageRatio`. Then `currentMessageRatio = Q_level/Delta`.
+
+The initial loop checks whether the highest current modulus can be removed while preserving message-ratio budget. Conceptually:
+
+```text
+currentMessageRatio >= q_level * rho
+    implies
+(Q_level / q_level) / Delta >= rho
+```
+
+When true, `Resize` drops that high-modulus representation. It does not divide coefficients, change Scale, or round. This cheap DropLevel phase therefore removes unnecessary modulus budget without introducing rescaling error.
+
+After free drops, ScaleDown computes `scaleUp = currentMessageRatio / targetMessageRatio`, multiplies the ciphertext by the corresponding integer, and multiplies Scale by the same value. This does not change the represented message because `(a*x)/(a*Delta) = x/Delta`; it aligns the message-ratio/scale state with the Bootstrap target, approximately `q0/MessageRatio` at Level 0.
+
+The possible paths are:
+
+1. **Input already at Level 0:** no free drop and no `RescaleTo`; scalar adjustment may still run.
+2. **Free DropLevel reaches Level 0:** scalar adjustment runs; no `RescaleTo` is required.
+3. **Free DropLevel stops at Level j > 0:** scalar adjustment runs, then `RescaleTo` performs actual rounded division until the target scale and Level 0 are reached.
+
+Fast ScaleDown follows this Standard logical Level progression, including Level 0. The Fast implementation challenge is computing required arithmetic from the maintained residue subset without reading stale full-RNS state.
+
+### Standard Rescale implementation
 
 - Entry points: `schemes/ckks/evaluator.go:Rescale` and `RescaleTo`.
 - Expected input: ciphertext metadata present; the arithmetic path calls `ring.DivRoundByLastModulusManyNTT`, whose contract requires NTT-domain input.
-- Scale update: divide `Scale` by each consumed trailing Q prime.
+- Mathematical result for one divisor q_L: `x' = round(x/q_L)`, `Scale' = Scale/q_L`, `Level' = Level-1`.
+- Scale update: divide `Scale` by each consumed trailing modulus.
 - Level update: decrease by `LevelsConsumedPerRescaling()` for `Rescale`, or by the number selected against `minScale` for `RescaleTo`.
-- Limb access: at level `L`, `DivRoundByLastModulusNTT` reads qL, inverse-transforms that limb, and updates each lower q0...q(L-1). Multiple-prime rescale performs full INTT, sequential divisions, and full NTT on the remaining limbs.
+- Residue access: at Level L, `DivRoundByLastModulusNTT` reads the `r_L` residue limb, inverse-transforms it, and updates each lower residue `r_0...r_{L-1}`. Multiple-prime Rescale performs full INTT, sequential divisions, and full NTT on remaining limbs.
 - Allocation: one pool polynomial per ciphertext Rescale plus ring-internal scratch; multi-prime paths allocate another ring buffer.
+
+### Fast Rescale contract
+
+Fast Rescale does not invent new CKKS mathematics. It must produce the same logical rounded division, Scale update, and Level transition as Standard Rescale. If the residue r_L for logical divisor q_L is stale or unmaintained, Standard full-RNS Rescale cannot be called on it.
+
+For Level >= 1 with maintained r0/r1 shortcut residues, the implementation direction is:
+
+```text
+r0, r1
+  -> normalize to coefficient-domain, non-Montgomery canonical residues
+  -> reconstruct modulo q0*q1 and choose the required centered representative
+  -> round-divide by logical Standard divisor q_L
+  -> reduce into residue limbs that remain actively maintained
+  -> update Scale and Level exactly as Standard semantics require
+```
+
+For coprime q0 and q1, r0/r1 uniquely identify an element modulo `q0*q1`; uniqueness is not the blocker. The engineering work is domain/Montgomery/lazy-range normalization, centered interpretation, fixed-width rounded division, and supported-parameter validation. A transition to Level 0 leaves only r0.
+
+The existing `big.Int` reconstruction is the reference oracle only. Production Stage A should use allocation-free fixed-width arithmetic where supported. For the supplied 17-prime profile, `q0 < 2^55`, `q1 < 2^39`, and `q0*q1 < 2^94`, so a 128-bit representation is sufficient; this bound must be validated for other parameter sets.
 
 ### Bootstrap frequency
 
-- `ScaleDown` invokes `RescaleTo` when its input remains above level 0.
+- `ScaleDown` invokes `RescaleTo` only in Case C.
 - Each DFT invokes `Rescale` once per outer factorization group (`len(Matrix.Levels)`), for both CoeffsToSlots and SlotsToCoeffs. Repository defaults define four CoeffsToSlots groups and three SlotsToCoeffs groups, but active parameters are configurable.
 - Power-basis generation and Paterson-Stockmeyer combination invoke Rescale repeatedly according to polynomial depth.
 - Mod1's DoubleAngle loop invokes Rescale once per iteration (default literal: three).
 - Optional precision iterations can invoke another Rescale and additional complete Bootstrap rounds.
 
-### Fast conclusion
-
-Metadata and level changes are easy to preserve, but Standard rounded division fundamentally reads the prime being dropped. If q2...qL are dormant, their residues cannot be used as Standard rounding inputs. A Fast q0/q1 rule must specify how authoritative residues and scale evolve without silently reviving full-RNS state.
-
-Classification: `BOOTSTRAP_BLOCKER`. Priority: `HIGH`.
+Classification: `BOOTSTRAP_BLOCKER`. Priority: `HIGH`. The blocker is engineering: implement Standard-equivalent rounded Rescale efficiently from maintained Fast residues.
 
 ## 9. ModUp / modulus-raising audit
 
-`bootstrapping.Evaluator.ModUp` begins after `ScaleDown`. Standard `ScaleDown` aims for level 0, so the normal ModUp source is q0, not q0/q1.
+`bootstrapping.Evaluator.ModUp` begins after `ScaleDown`. Standard `ScaleDown` legitimately reaches Level 0, so the normal ModUp source has only r0 for modulus q0.
 
 The current path:
 
 1. optionally applies a dense-to-sparse evaluation key;
 2. applies INTT to every current ciphertext component over all active input limbs;
 3. resizes storage to Bootstrap `MaxLevel`;
-4. centers each q0 coefficient and reduces it into q1...qL for c0 and, without ephemeral switching, c1;
+4. centers each r0 coefficient value and reduces it into residue limbs for q1...qL for c0 and, without ephemeral switching, c1;
 5. with ephemeral switching, constructs QP decomposition buffers, performs full-Q/full-P NTT and scalar multiplication, then calls `GadgetProductHoisted`;
 6. otherwise performs full-Q NTT and scalar multiplication directly;
 7. calls `Trace`, which performs repeated Standard key-switched automorphisms.
 
-This is full redistribution on the Standard hot path. It conflicts with Fast's q0/q1-authoritative model in two ways: it starts from q0-only state, and it materializes every dormant Q limb before all later work.
+This is full redistribution on the Standard hot path. Level-0 r0-only input is valid; the Fast performance issue is that Standard ModUp materializes and then maintains every higher Q residue even when later Fast operations may need only a smaller subset.
 
-The existing `ReconstructQ0Q1`/`Redistribute` helper is a reference/debug oracle. Its q0/q1 reconstruction may help define an explicit boundary, but its big.Int reconstruction and full redistribution are not suitable for production Fast execution.
+The existing `ReconstructQ0Q1`/`Redistribute` helper is a reference/debug oracle for Level >= 1. Its r0/r1 reconstruction can validate deliberate boundaries, but its `big.Int` implementation and full redistribution are not suitable for production Fast execution.
 
 Unresolved requirements:
 
-- whether Fast ScaleDown should stop at level 1 to retain q0/q1;
-- whether Stage-A ModUp should be metadata-only, q0/q1 normalization, or another bounded transformation;
-- how the q0/q1 value and scale must be adjusted before CoeffsToSlots/EvalMod;
+- which higher residue values Stage-A ModUp must actively materialize for CoeffsToSlots/EvalMod;
+- how to preserve the Standard Level/Scale contract while avoiding ongoing full-RNS maintenance;
 - which sparse-packing Trace semantics are required without Standard key switching.
 
 Classification: `BOUNDARY_ONLY`. Performance priority: `HIGH`. Mathematical/representation decision required before implementation.
@@ -265,7 +307,7 @@ Exact contract mismatches:
 - **Rescale:** Fast LinearTransform performs no level transition; DFT requires one Rescale per factorization group.
 - **BSGS/hoisting:** Fast LinearTransform loops over all diagonals with direct Fast automorphisms. It has no BSGS/hoisted interface. This is functionally plausible for Stage A but may be slower for large diagonal sets until measured.
 - **Ring type:** Fast LinearTransform supports `ring.Standard` only.
-- **Scratch:** it allocates six q0/q1 polynomials per call, and each Fast automorphism allocates temporary N-length slices.
+- **Scratch:** it allocates six two-residue-limb polynomials per call, and each Fast automorphism allocates temporary N-length slices.
 
 The mismatch is not missing Fast diagonal arithmetic; it is a missing DFT adapter plus level/domain/representation contracts.
 
@@ -287,10 +329,10 @@ Current Fast multiplication arithmetic is reusable, but its representation and i
 
 When `ResidualParameters.N() != BootstrappingParameters.N()`, packing calls Standard `ApplyEvaluationKey` in both directions. This performs ring mapping plus evaluation-key GadgetProduct and, for a down-switch, a temporary ciphertext.
 
-`FastN1ToN2` and `FastN2ToN1` already provide q0/q1-only ring mapping without keys, CRT, or redistribution. They are **partially sufficient and need an adapter**:
+`FastN1ToN2` and `FastN2ToN1` already provide first-two-residue-limb ring mapping without keys, CRT, or redistribution. They are **partially sufficient and need an adapter**:
 
 - Bootstrap must call them instead of `ApplyEvaluationKey` under the current Fast mode;
-- input/output rings must expose matching q0/q1 moduli and equal active levels;
+- input/output rings must expose matching q0 and q1 modulus parameters and equal active Levels when using the r0/r1 shortcut;
 - NTT inputs trigger partial INTT -> coefficient mapping -> partial NTT, creating `DOMAIN_CONVERSION_DEBT`;
 - each NTT conversion allocates two polynomials per ciphertext component;
 - only Standard rings are supported.
@@ -304,7 +346,7 @@ This is not a missing mathematical primitive for the Standard-ring N1/N2 case.
 | Bootstrap input and pack | Normally NTT; ciphertext is generally non-Montgomery | Pack uses full-Q NTT-domain monomial products |
 | ScaleDown | NTT through scalar Mul and RescaleTo | Current Fast Mul cannot accept NTT inputs |
 | ModUp entry | NTT | Standard path performs full INTT |
-| ModUp middle | Coefficient, non-Montgomery | q0 is centered and redistributed to all Q/P limbs |
+| ModUp middle | Coefficient, non-Montgomery | r0 is centered and reduced into residue limbs for all Q/P moduli |
 | ModUp exit and Trace | NTT, non-Montgomery ciphertext | Standard performs full-Q NTT; Trace rotations key-switch in QP |
 | DFT matrices | NTT and Montgomery plaintext diagonals | Compatible with Fast diagonal storage, but Fast LT also requires the ciphertext to be marked Montgomery |
 | DFT ciphertext | NTT, normally non-Montgomery | Direct Fast LT rejects it |
@@ -318,15 +360,15 @@ This is not a missing mathematical primitive for the Standard-ring N1/N2 case.
 - NTT ring-degree conversion performs partial INTT/NTT for both c0 and c1.
 - ModUp's full INTT/full NTT pair is a major Standard boundary cost.
 
-The preferred Stage-A direction is an NTT-resident q0/q1 evaluator across DFT and EvalMod, with deliberate conversions only at true boundaries.
+The preferred Stage-A direction is an NTT-resident minimum-residue-subset evaluator across DFT and EvalMod, with deliberate conversions only at true boundaries.
 
 ## 14. Allocation map
 
 `ALLOCATION_DEBT` identified from source:
 
-- `fast.Evaluator.Mul` allocates three q0/q1 result temporaries; its three polynomial products each allocate four more q0/q1 polynomials in `fastMulQ01Core` (15 polynomial allocations per ciphertext multiplication before output allocation).
-- `fast.Evaluator.Automorphism` allocates two q0/q1 polynomials; `FastAutomorphism` additionally allocates one N-length `[]uint64` per limb per polynomial call.
-- `fast.Evaluator.LinearTransform` allocates six q0/q1 polynomials per call and invokes two allocation-heavy automorphisms for every diagonal.
+- `fast.Evaluator.Mul` allocates three two-residue-limb result temporaries; its three polynomial products each allocate four more such polynomials in `fastMulQ01Core` (15 polynomial allocations per ciphertext multiplication before output allocation).
+- `fast.Evaluator.Automorphism` allocates two two-residue-limb polynomials; `FastAutomorphism` additionally allocates one N-length `[]uint64` per limb per polynomial call.
+- `fast.Evaluator.LinearTransform` allocates six two-residue-limb polynomials per call and invokes two allocation-heavy automorphisms for every diagonal.
 - Fast NTT ring-degree conversion allocates input/output coefficient polynomials for each of c0 and c1.
 - Standard common LinearTransform allocates QP decomposition, several QP scratch polynomials, output buffers, and pre-rotated extended ciphertexts; pools reduce churn but the structures remain large.
 - DFT allocates output ciphertexts and, for split real/imag handling, copies or borrows temporary ciphertexts.
@@ -339,12 +381,12 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 
 | Order | Bootstrap stage | Operation | Current path | Fast status | Main expensive work | Blocker? | Recommended next task |
 | ----: | --------------- | --------- | ------------ | ----------- | ------------------- | -------- | --------------------- |
-| 1 | Cross-cutting | Rescale/level transition | Standard `ckks.Rescale/RescaleTo` | `MISSING_FAST_IMPLEMENTATION` | Full-Q dropped-prime rounding, INTT/NTT, all lower limbs | BLOCKER | Task 003 — Fast q0/q1 Rescale contract |
+| 1 | Cross-cutting | Rescale/Level transition | Standard `ckks.Rescale/RescaleTo` | `MISSING_FAST_IMPLEMENTATION` | Full-Q dropped-prime rounding, INTT/NTT, all lower residue limbs | BLOCKER | Task 003 — Standard-equivalent Fast Rescale |
 | 2 | EvalMod | NTT ciphertext arithmetic API | Standard generic polynomial evaluator | `FAST_EXISTS_BUT_NOT_WIRED` | Repeated full-Q Mul/MulRelin and QP relinearization | BLOCKER | Task 004 — NTT-resident Fast evaluator surface |
 | 3 | CoeffsToSlots / SlotsToCoeffs | Factorized LinearTransform | Standard common LT | `FAST_EXISTS_BUT_NOT_WIRED` | QP decomposition, hoisted GadgetProducts, ModDown, many rotations | BLOCKER | Task 005 — Fast DFT adapter |
-| 4 | ScaleDown / ModUp | q0/q1 modulus lifecycle | Full-Q Standard boundary | `BOUNDARY_ONLY` | Full INTT, q0->all-Q redistribution, full NTT, optional QP switch | BLOCKER | Task 006 — Fast ScaleDown/ModUp/Trace boundary |
+| 4 | ScaleDown / ModUp | Fast residue lifecycle | Full-Q Standard boundary | `BOUNDARY_ONLY` | Full INTT, r0-to-all-Q-residue materialization, full NTT, optional QP switch | BLOCKER | Task 006 — Fast ScaleDown/ModUp/Trace boundary |
 | 5 | EvalMod | Mod1/Paterson-Stockmeyer wiring | Standard Mod1 and polynomial evaluators | `STANDARD_HIGH_COST` | Repeated Mul, Rescale, temporary powers | BLOCKER | Task 007 — Fast EvalMod integration |
-| 6 | Pack/unpack | Sparse ciphertext packing | Full-Q ring operations | `MISSING_FAST_IMPLEMENTATION` | All active Q limbs and ciphertext copies | No for one ciphertext; yes for batching | Task 008 — q0/q1 pack/unpack |
+| 6 | Pack/unpack | Sparse ciphertext packing | Full-Q ring operations | `MISSING_FAST_IMPLEMENTATION` | All active residue limbs and ciphertext copies | No for one ciphertext; yes for batching | Task 008 — minimum-residue pack/unpack |
 | 7 | N1/N2 boundary | Ring-degree switch | Standard ApplyEvaluationKey | `FAST_EXISTS_BUT_NOT_WIRED` | GadgetProduct, QP ModDown, temporary ciphertext | Configuration-dependent | Task 008 — ring-degree adapter |
 | 8 | Bootstrap orchestration | Evaluator selection and stage calls | Standard embedded evaluator | `MISSING_FAST_IMPLEMENTATION` | Hidden Standard fallback across all stages | BLOCKER | Task 009 — end-to-end Fast Bootstrap evaluator |
 | 9 | CI support | Real/Complex switching | Standard DomainSwitcher | `UNKNOWN_REQUIRES_TARGETED_AUDIT` | Evaluation-key/QP ring-type switch | Configuration-dependent | Follow-up after Standard-ring Bootstrap |
@@ -352,27 +394,27 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 
 ## 16. Stage-A implementation roadmap
 
-### Task 003 — Define and implement Fast q0/q1 Rescale
+### Task 003 — Implement Standard-equivalent Fast Rescale
 
-- Behavior: preserve q0/q1 authority, scale updates, and explicit level metadata without reading dormant limbs; define `Rescale` and `RescaleTo` contracts for NTT-resident Fast ciphertexts.
+- Behavior: compute Standard-equivalent rounded division from normalized maintained residues, update Scale and Level identically to Standard semantics, support transitions through Level 0, and never read stale residue storage.
 - Likely files: `schemes/ckks/fast/evaluator.go`, a new bounded Fast rescale file, and Fast-only tests.
-- Reuse: q0/q1 subring operations and existing metadata conventions.
+- Reuse: existing `big.Int` r0/r1 reconstruction plus direct rounded division as the reference oracle; use a validated 64/128-bit production path for the supplied `q0*q1 < 2^94` profile.
 - Keep untouched: `schemes/ckks/evaluator.go` and `ring/scaling.go` Normal behavior.
-- Minimum tests: one- and multi-level transitions, in-place/out-of-place, scale updates, dormant-limb non-access, decoded/authoritative reference behavior, rejection at insufficient level.
+- Minimum tests: one- and multi-modulus transitions, transition to Level 0, in-place/out-of-place behavior, exact Scale/Level updates, stale-residue non-access, comparison with the reference oracle, representation normalization, and rejection at insufficient Level.
 - Priority reason: DFT and EvalMod both repeatedly require it; no end-to-end path can preserve current circuit contracts without a level policy.
 
 ### Task 004 — Add an NTT-resident Fast evaluator surface
 
-- Behavior: implement the Stage-A subset of `schemes.Evaluator` needed by DFT/Mod1: ciphertext Mul/MulRelin, truncation-backed Relinearize, scalar/plaintext Mul and MulThenAdd, Add/Sub, and Rescale dispatch, all on q0/q1.
+- Behavior: implement the Stage-A subset of `schemes.Evaluator` needed by DFT/Mod1: ciphertext Mul/MulRelin, truncation-backed Relinearize, scalar/plaintext Mul and MulThenAdd, Add/Sub, and Rescale dispatch, while maintaining only residues required by each operation.
 - Likely files: `schemes/ckks/fast/evaluator.go` plus small operation-specific Fast files/tests.
 - Reuse: FastAdd/FastSub, current Fast multiplication formulas, FastTruncateDegree2To1, Task 003 Rescale.
 - Keep untouched: `ckks.Evaluator` and Standard RLWE GadgetProduct.
-- Minimum tests: interface compile assertion, NTT/non-Montgomery Bootstrap representation, aliasing, scale/level metadata, polynomial power-basis operation sequences, dormant-limb poison tests.
+- Minimum tests: interface compile assertion, NTT/non-Montgomery Bootstrap representation, aliasing, Scale/Level metadata, polynomial power-basis operation sequences, and stale-residue poison tests.
 - Priority reason: unlocks the generic polynomial call shape and avoids catastrophic per-Mul NTT/INTT wrapping.
 
 ### Task 005 — Wire a Fast DFT evaluator
 
-- Behavior: execute each CoeffsToSlots/SlotsToCoeffs factor matrix with Fast LinearTransform/automorphism, q0/q1 additions/scalars, and Fast Rescale; support current factorization levels.
+- Behavior: execute each CoeffsToSlots/SlotsToCoeffs factor matrix with Fast LinearTransform/automorphism, minimum-residue additions/scalars, and Fast Rescale; support current factorization Levels.
 - Likely files: a Fast DFT adapter under `circuits/ckks/dft` or `circuits/ckks/bootstrapping`, plus narrowly scoped Fast LinearTransform contract changes.
 - Reuse: Fast LinearTransform, FastAutomorphism/Rotate, FastAdd/FastSub, Tasks 003–004.
 - Keep untouched: common Standard LinearTransform and its BSGS/QP implementation.
@@ -381,11 +423,11 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 
 ### Task 006 — Define and implement Fast ScaleDown/ModUp/Trace boundary
 
-- Behavior: retain q0/q1 authority across the modulus-raising boundary, preserve required scale/metadata, and perform sparse Trace with Fast automorphisms; explicitly decide whether Fast ScaleDown stops at level 1.
+- Behavior: follow Standard ScaleDown progression through Level 0, materialize only residues required after ModUp, preserve Scale/Level metadata, and perform sparse Trace with Fast automorphisms.
 - Likely files: Fast-only Bootstrap stage file(s) and targeted tests; reference helper use only in tests/debug.
-- Reuse: q0/q1 reconstruction as oracle, Fast automorphism, Fast Add/Sub, Fast scalar operations.
+- Reuse: r0/r1 reconstruction as an oracle where Level >= 1, Fast automorphism, Fast Add/Sub, and Fast scalar operations.
 - Keep untouched: Standard `bootstrapping.Evaluator.ModUp` and Standard dense/sparse key switching.
-- Minimum tests: boundary scale/level contract, coefficient/NTT transitions, dormant-limb poison, sparse and dense slot settings, no full-Q redistribution in production path.
+- Minimum tests: boundary Scale/Level contract, coefficient/NTT transitions, stale-residue poison, sparse and dense slot settings, and no full-Q redistribution in production path.
 - Priority reason: unavoidable Bootstrap boundary with high structural cost; deferred until the evaluator level contract is explicit.
 
 ### Task 007 — Integrate Fast EvalMod
@@ -397,13 +439,13 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 - Minimum tests: representative Mod1 parameter sets, expected level/scale progression, decoded semantic comparison, proof that Standard GadgetProduct is not reached.
 - Priority reason: completes the multiplication-heavy middle of Bootstrap after its primitive dependencies exist.
 
-### Task 008 — Wire q0/q1 packing and ring-degree conversion
+### Task 008 — Wire minimum-residue packing and ring-degree conversion
 
-- Behavior: pack/unpack only authoritative limbs and replace Standard N1/N2 ApplyEvaluationKey with existing Fast ring-degree conversion when parameters differ.
+- Behavior: pack/unpack only actively maintained residues and replace Standard N1/N2 ApplyEvaluationKey with existing Fast ring-degree conversion when parameters differ.
 - Likely files: Fast Bootstrap packing adapter and, only if needed, bounded contract changes in `schemes/ckks/fast/ring_degree.go`.
-- Reuse: FastN1ToN2/FastN2ToN1 and q0/q1 subring multiplication.
+- Reuse: FastN1ToN2/FastN2ToN1 and first-two-residue-limb subring multiplication where Level >= 1.
 - Keep untouched: Standard packing and ApplyEvaluationKey paths.
-- Minimum tests: one/many ciphertexts, odd batch count, N1=N2 and N1!=N2, NTT representation, metadata/log-slot restoration, dormant-limb poison.
+- Minimum tests: one/many ciphertexts, odd batch count, N1=N2 and N1!=N2, NTT representation, metadata/log-slot restoration, and stale-residue poison.
 - Priority reason: configuration-dependent coverage with existing core primitive; lower priority than single-ciphertext Bootstrap stages.
 
 ### Task 009 — Add the Fast Bootstrap orchestrator
@@ -426,4 +468,4 @@ These are secondary to coverage and structural elision. Do not optimize them bef
 
 ## 17. Recommended next task
 
-Proceed with **Task 003 — Define and implement Fast q0/q1 Rescale**. It has the highest expected Bootstrap speed/coverage impact relative to implementation scope because it is shared by ScaleDown, both DFTs, the polynomial power basis, Paterson-Stockmeyer combination, and DoubleAngle. The task must begin by fixing the Fast mathematical contract for level consumption; it must not call Standard full-Q Rescale on dormant limbs.
+Proceed with **Task 003 — Implement Standard-equivalent Fast Rescale**. It has the highest expected Bootstrap speed/coverage impact relative to implementation scope because it is shared by ScaleDown, both DFTs, the polynomial power basis, Paterson-Stockmeyer combination, and DoubleAngle. The mathematical contract is Standard CKKS rounded division with identical Scale/Level progression; the implementation task is to compute it efficiently from normalized maintained residues without calling Standard full-Q Rescale on stale storage.

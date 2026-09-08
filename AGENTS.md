@@ -8,8 +8,9 @@ Before Fast-CKKS work, read [`docs/FAST_CKKS_SPEC.md`](docs/FAST_CKKS_SPEC.md) a
 
 ## Persistent invariants
 
-- `q0` and `q1` are the authoritative RNS limbs in Fast hot paths. `q2...qL` are dormant/non-authoritative; do not silently perform full-RNS work or Standard/full-RNS fallback.
-- `c0`, `c1`, `c2`, ... name ciphertext components. Do not confuse them with `q0`, `q1`, `q2`, ... RNS limbs.
+- `q_i` names the modulus at RNS index `i`; `r_i[k]` names coefficient `k`'s stored residue modulo `q_i`; `c0`, `c1`, `c2`, ... name ciphertext polynomial components.
+- Fast may maintain only the minimum residue subset needed for the current operation. Do not perform unnecessary full-RNS work, but follow Standard CKKS Level/Scale semantics when an operation requires level transitions, including transitions to Level 0.
+- Never call Standard full-RNS code on stale or unmaintained Fast residue storage as a hidden fallback.
 - The current zero-secret implementation is a mode, not a permanent scientific invariant. Preserve extension points for sampled secrets and future noise experiments.
 - Preserve public APIs and CKKS parameter objects where practical; preserve structure while eliding expensive dormant or security-only computation.
 - Do not add expensive noise-fidelity work during Stage A. Normal and Fast implementations must coexist for correctness and performance comparison.
