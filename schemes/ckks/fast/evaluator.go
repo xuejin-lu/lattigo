@@ -18,6 +18,7 @@ type Evaluator struct {
 	Parameters             ckks.Parameters
 	rescaleScratch         fastRescaleScratch
 	nttScratch             [3]ring.Poly
+	linearTransformScratch fastLinearTransformScratch
 	automorphismIndexCache map[uint64][]uint64
 	automorphismScratch    [2][]uint64
 	lastBSGSBabyRotations  int
@@ -28,6 +29,7 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 	eval := &Evaluator{
 		Parameters:             params,
 		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
+		linearTransformScratch: newFastLinearTransformScratch(params.N()),
 		automorphismIndexCache: make(map[uint64][]uint64),
 	}
 	for i := range eval.nttScratch {

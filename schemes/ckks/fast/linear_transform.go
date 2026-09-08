@@ -11,6 +11,53 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
+type fastBabyRotation struct {
+	rotation int
+	c0       ring.Poly
+	c1       ring.Poly
+}
+
+type fastLinearTransformScratch struct {
+	acc0, acc1     ring.Poly
+	inner0, inner1 ring.Poly
+	outer0, outer1 ring.Poly
+	term0, term1   ring.Poly
+	rot0, rot1     ring.Poly
+	baby           []fastBabyRotation
+	babyIndex      map[int]int
+}
+
+func newFastLinearTransformScratch(N int) fastLinearTransformScratch {
+	newPoly := func() ring.Poly { return ring.NewPoly(N, 1) }
+	return fastLinearTransformScratch{
+		acc0:      newPoly(),
+		acc1:      newPoly(),
+		inner0:    newPoly(),
+		inner1:    newPoly(),
+		outer0:    newPoly(),
+		outer1:    newPoly(),
+		term0:     newPoly(),
+		term1:     newPoly(),
+		rot0:      newPoly(),
+		rot1:      newPoly(),
+		babyIndex: make(map[int]int),
+	}
+}
+
+func (scratch *fastLinearTransformScratch) prepareBabyRotations(N int, rotations []int) {
+	clear(scratch.babyIndex)
+	for i, rotation := range rotations {
+		if i == len(scratch.baby) {
+			scratch.baby = append(scratch.baby, fastBabyRotation{
+				c0: ring.NewPoly(N, 1),
+				c1: ring.NewPoly(N, 1),
+			})
+		}
+		scratch.baby[i].rotation = rotation
+		scratch.babyIndex[rotation] = i
+	}
+}
+
 // LinearTransform evaluates a single-level diagonal linear transformation
 // using only authoritative q0 and q1 limbs. N1 == 0 uses the direct diagonal
 // path; BSGS transformations use the encoded-diagonal convention from
@@ -96,9 +143,10 @@ func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lin
 }
 
 func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
-	acc0, acc1 = ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	rot0, rot1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	term0, term1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	scratch := &eval.linearTransformScratch
+	acc0, acc1 = scratch.acc0, scratch.acc1
+	rot0, rot1 := scratch.rot0, scratch.rot1
+	term0, term1 := scratch.term0, scratch.term1
 	first := true
 	slots := 1 << matrix.LogDimensions.Cols
 
@@ -125,22 +173,19 @@ func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Cipher
 }
 
 func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
-	acc0, acc1 = ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	inner0, inner1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	outer0, outer1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	term0, term1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	index, _, _ := matrix.BSGSIndex()
-	_, _, rotN2 := matrix.BSGSIndex()
-	baby0 := make(map[int]ring.Poly, len(rotN2))
-	baby1 := make(map[int]ring.Poly, len(rotN2))
+	scratch := &eval.linearTransformScratch
+	acc0, acc1 = scratch.acc0, scratch.acc1
+	inner0, inner1 := scratch.inner0, scratch.inner1
+	outer0, outer1 := scratch.outer0, scratch.outer1
+	term0, term1 := scratch.term0, scratch.term1
+	index, _, rotN2 := matrix.BSGSIndex()
+	scratch.prepareBabyRotations(eval.Parameters.N(), rotN2)
 	eval.lastBSGSBabyRotations = 0
-	for _, i := range rotN2 {
-		baby0[i] = ring.NewPoly(eval.Parameters.N(), 1)
-		baby1[i] = ring.NewPoly(eval.Parameters.N(), 1)
-		if err = eval.rotateComponents(ringQ, ctIn, baby0[i], baby1[i], i); err != nil {
-			return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", i, err)
+	for _, baby := range scratch.baby[:len(rotN2)] {
+		if err = eval.rotateComponents(ringQ, ctIn, baby.c0, baby.c1, baby.rotation); err != nil {
+			return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", baby.rotation, err)
 		}
-		if i != 0 {
+		if baby.rotation != 0 {
 			eval.lastBSGSBabyRotations++
 		}
 	}
@@ -161,8 +206,9 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", key, err)
 			}
-			fastPlaintextMul(ringQ, plaintext.Q, baby0[i], term0)
-			fastPlaintextMul(ringQ, plaintext.Q, baby1[i], term1)
+			baby := scratch.baby[scratch.babyIndex[i]]
+			fastPlaintextMul(ringQ, plaintext.Q, baby.c0, term0)
+			fastPlaintextMul(ringQ, plaintext.Q, baby.c1, term1)
 			if firstInner {
 				copyQ01(term0, inner0)
 				copyQ01(term1, inner1)
