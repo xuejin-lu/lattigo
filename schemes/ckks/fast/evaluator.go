@@ -109,3 +109,27 @@ func (eval *Evaluator) RotateNew(ctIn *rlwe.Ciphertext, k int) (*rlwe.Ciphertext
 	ctOut.IsMontgomery = ctIn.IsMontgomery
 	return ctOut, eval.Rotate(ctIn, ctOut, k)
 }
+
+// Conjugate applies the CKKS complex-conjugation automorphism without an
+// evaluation key. Fast supports this only for the Standard ring, through the
+// same q0/q1 automorphism path as Rotate.
+func (eval *Evaluator) Conjugate(ctIn, ctOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	if eval.Parameters.RingType() != ring.Standard {
+		return fmt.Errorf("Fast Conjugate requires the Standard ring, got %s", eval.Parameters.RingType())
+	}
+	return eval.Automorphism(ctIn, ctOut, eval.Parameters.GaloisElementForComplexConjugation())
+}
+
+// ConjugateNew returns the Fast conjugate of ctIn.
+func (eval *Evaluator) ConjugateNew(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if eval == nil || ctIn == nil {
+		return nil, errors.New("evaluator and ciphertext cannot be nil")
+	}
+	ctOut := ckks.NewCiphertext(eval.Parameters, 1, ctIn.Level())
+	ctOut.IsNTT = ctIn.IsNTT
+	ctOut.IsMontgomery = ctIn.IsMontgomery
+	return ctOut, eval.Conjugate(ctIn, ctOut)
+}

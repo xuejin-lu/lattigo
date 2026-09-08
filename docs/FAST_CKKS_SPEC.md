@@ -218,7 +218,8 @@ This branch does not start from Phase 0. The status below is derived from the cu
 | Degree truncation | Implemented | `FastTruncateDegree2To1` under the current zero-secret mode |
 | Fast automorphism/rotation | Implemented | First-two-limb Standard-ring path; no evaluation-key use in the helper |
 | Ring-degree conversion | Implemented | r0/r1-maintaining N1/N2 conversion |
-| Fast LinearTransform | Implemented | single-level first-two-limb path without evaluation-key, QP, or level transition |
+| Fast LinearTransform | Implemented | direct and BSGS NTT/Montgomery first-two-limb paths without evaluation-key, QP, or level transition; accepts matrices encoded at a higher LevelQ |
+| Fast DFT adapter | Implemented, not wired | `circuits/ckks/dft/fast.go` executes CoeffsToSlots/SlotsToCoeffs factor groups with Fast LinearTransform, Conjugate, scalar arithmetic, and Rescale; Bootstrap orchestration remains deferred |
 | Fast Bootstrap key support | Implemented | `circuits/ckks/bootstrapping/fast_keys.go` generates Fast evaluation-key material |
 | Fast Rescale | Implemented | `schemes/ckks/fast/rescale.go` provides fixed-width q0/q1 arithmetic with Standard Scale/Level semantics; targeted tests pass |
 | ModUp/ModDown, KeySwitch, and full Bootstrap execution | Not implemented | These remain future bounded stages; do not imply that Fast key support is Fast Bootstrap execution |

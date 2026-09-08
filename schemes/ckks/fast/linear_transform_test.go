@@ -9,6 +9,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/ring/ringqp"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
 func newFastLinearTransform(params ckks.Parameters, level int) lintrans.LinearTransformation {
@@ -122,6 +123,119 @@ func TestFastLinearTransformMatchesRingReference(t *testing.T) {
 		metadata.Scale = out.Scale
 		require.Equal(t, metadata, *out.MetaData)
 	}
+}
+
+func newFastBSGSLinearTransform(params ckks.Parameters, level int) lintrans.LinearTransformation {
+	lt := lintrans.NewLinearTransformation(params, lintrans.Parameters{
+		DiagonalsIndexList:        []int{0, 1, 2, 3, 4, 5, 6},
+		LevelQ:                    level,
+		LevelP:                    0,
+		Scale:                     rlwe.NewScale(3),
+		LogDimensions:             ring.Dimensions{Cols: 3},
+		LogBabyStepGiantStepRatio: 1,
+	})
+	lt.IsNTT = true
+	lt.IsMontgomery = true
+	for diagonal, plaintext := range lt.Vec {
+		for limb := 0; limb < 2; limb++ {
+			for i := range plaintext.Q.Coeffs[limb] {
+				plaintext.Q.Coeffs[limb][i] = uint64(11+diagonal+3*limb+i) % params.RingQ().SubRings[limb].Modulus
+			}
+			params.RingQ().SubRings[limb].NTT(plaintext.Q.Coeffs[limb], plaintext.Q.Coeffs[limb])
+			params.RingQ().SubRings[limb].MForm(plaintext.Q.Coeffs[limb], plaintext.Q.Coeffs[limb])
+		}
+		lt.Vec[diagonal] = plaintext
+	}
+	return lt
+}
+
+func referenceFastBSGS(params ckks.Parameters, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, ctOut *rlwe.Ciphertext) {
+	ringQ := params.RingQ().AtLevel(ctIn.Level())
+	index, _, _ := matrix.BSGSIndex()
+	acc0, acc1 := ring.NewPoly(params.N(), 1), ring.NewPoly(params.N(), 1)
+	inner0, inner1 := ring.NewPoly(params.N(), 1), ring.NewPoly(params.N(), 1)
+	rot0, rot1 := ring.NewPoly(params.N(), 1), ring.NewPoly(params.N(), 1)
+	term0, term1 := ring.NewPoly(params.N(), 1), ring.NewPoly(params.N(), 1)
+	outer0, outer1 := ring.NewPoly(params.N(), 1), ring.NewPoly(params.N(), 1)
+	firstOuter := true
+	slots := 1 << matrix.LogDimensions.Cols
+	for _, j := range utils.GetSortedKeys(index) {
+		firstInner := true
+		for _, i := range index[j] {
+			if i == 0 {
+				copyQ01(ctIn.Value[0], rot0)
+				copyQ01(ctIn.Value[1], rot1)
+			} else {
+				if err := FastAutomorphism(ringQ, ctIn.Value[0], rot0, params.GaloisElement(i), true); err != nil {
+					panic(err)
+				}
+				if err := FastAutomorphism(ringQ, ctIn.Value[1], rot1, params.GaloisElement(i), true); err != nil {
+					panic(err)
+				}
+			}
+			pt := matrix.Vec[j+i]
+			if pt.Q.N() == 0 {
+				pt = matrix.Vec[j+i-slots]
+			}
+			fastPlaintextMul(ringQ, pt.Q, rot0, term0)
+			fastPlaintextMul(ringQ, pt.Q, rot1, term1)
+			if firstInner {
+				copyQ01(term0, inner0)
+				copyQ01(term1, inner1)
+				firstInner = false
+			} else {
+				addQ01(ringQ, term0, inner0)
+				addQ01(ringQ, term1, inner1)
+			}
+		}
+		if j == 0 {
+			copyQ01(inner0, outer0)
+			copyQ01(inner1, outer1)
+		} else {
+			if err := FastAutomorphism(ringQ, inner0, outer0, params.GaloisElement(j), true); err != nil {
+				panic(err)
+			}
+			if err := FastAutomorphism(ringQ, inner1, outer1, params.GaloisElement(j), true); err != nil {
+				panic(err)
+			}
+		}
+		if firstOuter {
+			copyQ01(outer0, acc0)
+			copyQ01(outer1, acc1)
+			firstOuter = false
+		} else {
+			addQ01(ringQ, outer0, acc0)
+			addQ01(ringQ, outer1, acc1)
+		}
+	}
+	copyQ01(acc0, ctOut.Value[0])
+	copyQ01(acc1, ctOut.Value[1])
+}
+
+func TestFastLinearTransformBSGSAndLowerLevel(t *testing.T) {
+	params := testFastCKKSParameters(t)
+	eval := NewEvaluator(params)
+	matrix := newFastBSGSLinearTransform(params, 3)
+	require.NotZero(t, matrix.N1)
+	in := ckks.NewCiphertext(params, 1, 2)
+	out := ckks.NewCiphertext(params, 1, 2)
+	in.IsNTT, in.IsMontgomery, in.IsBatched = true, true, true
+	fillFastCKKSCiphertext(in, params, nil, 137)
+	r := params.RingQ().AtLevel(in.Level())
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < 2; limb++ {
+			r.SubRings[limb].NTT(in.Value[d].Coeffs[limb], in.Value[d].Coeffs[limb])
+			r.SubRings[limb].MForm(in.Value[d].Coeffs[limb], in.Value[d].Coeffs[limb])
+		}
+	}
+	out.IsNTT, out.IsMontgomery, out.IsBatched = true, true, true
+	want := ckks.NewCiphertext(params, 1, 2)
+	want.IsNTT, want.IsMontgomery, want.IsBatched = true, true, true
+	referenceFastBSGS(params, in, matrix, want)
+	require.NoError(t, eval.LinearTransform(in, matrix, out))
+	require.Equal(t, want.Value[0].Coeffs[:2], out.Value[0].Coeffs[:2])
+	require.Equal(t, want.Value[1].Coeffs[:2], out.Value[1].Coeffs[:2])
+	require.Equal(t, in.Scale.Mul(matrix.Scale), out.Scale)
 }
 
 func TestFastLinearTransformIgnoresDormantAndSupportsAlias(t *testing.T) {

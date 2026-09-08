@@ -8,17 +8,52 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
 // LinearTransform evaluates a single-level diagonal linear transformation
-// using only the authoritative q0 and q1 limbs. Each diagonal is evaluated as
-// FastAutomorphism followed by q0/q1 plaintext multiplication and accumulation.
-// No evaluation key, QP basis, or level transition is involved.
+// using only authoritative q0 and q1 limbs. N1 == 0 uses the direct diagonal
+// path; BSGS transformations use the encoded-diagonal convention from
+// common/lintrans: baby rotations by i, multiplication by Vec[j+i], then a
+// giant rotation by j. No evaluation key or QP basis is involved.
 //
-// The transformation must have the same level, domain, Montgomery
-// representation, and ring degree as the input ciphertext. The output may
-// alias the input; dormant limbs in the output are left untouched.
+// Matrix LevelQ may be higher than the current ciphertext level. The matrix's
+// q0/q1 encoding is reused at the current level and the matrix Scale is not
+// modified. The output may alias the input; dormant limbs are not read or
+// written.
 func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, ctOut *rlwe.Ciphertext) error {
+	if ctIn != nil && ctOut != nil && ctIn.MetaData != nil && ctOut.MetaData != nil {
+		// The receiver is an output buffer. Its domain flags may still be the
+		// constructor defaults; all maintained output limbs are overwritten.
+		ctOut.IsNTT = ctIn.IsNTT
+		ctOut.IsMontgomery = ctIn.IsMontgomery
+	}
+	if err := eval.validateLinearTransform(ctIn, matrix, ctOut); err != nil {
+		return err
+	}
+
+	ringQ := eval.Parameters.RingQ().AtLevel(utils.Min(ctIn.Level(), ctOut.Level()))
+	var acc0, acc1 ring.Poly
+	var err error
+	if matrix.N1 == 0 {
+		acc0, acc1, err = eval.linearTransformDirect(ringQ, ctIn, matrix)
+	} else {
+		acc0, acc1, err = eval.linearTransformBSGS(ringQ, ctIn, matrix)
+	}
+	if err != nil {
+		return err
+	}
+
+	level := ringQ.Level()
+	ctOut.Resize(1, level)
+	*ctOut.MetaData = *ctIn.MetaData
+	ctOut.Scale = ctIn.Scale.Mul(matrix.Scale)
+	copyQ01(acc0, ctOut.Value[0])
+	copyQ01(acc1, ctOut.Value[1])
+	return nil
+}
+
+func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, ctOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
@@ -37,92 +72,145 @@ func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.Li
 	if ctIn.N() != eval.Parameters.N() || ctOut.N() != eval.Parameters.N() {
 		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
 	}
-	if ctIn.Level() != ctOut.Level() || ctIn.Level() < 1 {
-		return errors.New("Fast LinearTransform requires equal levels containing q0 and q1")
+	if ctIn.Level() < 1 || ctOut.Level() < 1 {
+		return fmt.Errorf("Fast LinearTransform requires q0 and q1 (input level %d, output level %d)", ctIn.Level(), ctOut.Level())
 	}
-	if matrix.LevelQ != ctIn.Level() {
-		return errors.New("Fast LinearTransform requires matrix.LevelQ to equal the ciphertext level")
+	if matrix.LevelQ < ctIn.Level() {
+		return fmt.Errorf("Fast LinearTransform requires matrix.LevelQ >= ciphertext level: %d < %d", matrix.LevelQ, ctIn.Level())
 	}
-	if !ctIn.IsNTT || !matrix.IsNTT || !ctIn.IsMontgomery || !matrix.IsMontgomery {
+	if !ctIn.IsNTT || !ctOut.IsNTT || !ctIn.IsMontgomery || !ctOut.IsMontgomery || !matrix.IsNTT || !matrix.IsMontgomery {
 		return errors.New("Fast LinearTransform requires NTT and Montgomery representation")
 	}
-	if ctIn.IsBatched != matrix.IsBatched {
-		return errors.New("Fast LinearTransform requires matching batching metadata")
+	if ctIn.IsMontgomery != ctOut.IsMontgomery || ctIn.IsBatched != matrix.IsBatched {
+		return errors.New("Fast LinearTransform requires matching representation and batching metadata")
 	}
-	if len(ctIn.Value) < 2 || len(ctOut.Value) < 2 || len(ctIn.Value[0].Coeffs) < 2 || len(ctIn.Value[1].Coeffs) < 2 || len(ctOut.Value[0].Coeffs) < 2 || len(ctOut.Value[1].Coeffs) < 2 {
-		return errors.New("Fast LinearTransform requires q0/q1 ciphertext storage")
+	for d := 0; d < 2; d++ {
+		if len(ctIn.Value[d].Coeffs) < 2 || len(ctOut.Value[d].Coeffs) < 2 {
+			return errors.New("Fast LinearTransform requires q0/q1 ciphertext storage")
+		}
 	}
+	if len(matrix.Vec) == 0 {
+		return errors.New("Fast LinearTransform requires at least one diagonal")
+	}
+	return nil
+}
 
-	ringQ := eval.Parameters.RingQ().AtLevel(ctIn.Level())
-	acc0 := ring.NewPoly(eval.Parameters.N(), 1)
-	acc1 := ring.NewPoly(eval.Parameters.N(), 1)
-	rot0 := ring.NewPoly(eval.Parameters.N(), 1)
-	rot1 := ring.NewPoly(eval.Parameters.N(), 1)
-	term0 := ring.NewPoly(eval.Parameters.N(), 1)
-	term1 := ring.NewPoly(eval.Parameters.N(), 1)
-
+func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
+	acc0, acc1 = ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	rot0, rot1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	term0, term1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
 	first := true
 	slots := 1 << matrix.LogDimensions.Cols
+
 	for diagonal, plaintext := range matrix.Vec {
 		diagonal &= slots - 1
-		if diagonal >= slots {
-			return fmt.Errorf("diagonal %d is outside the matrix slot range", diagonal)
+		if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
+			return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", diagonal, err)
 		}
-		if err := validateFastDiagonal(ringQ, plaintext.Q); err != nil {
-			return fmt.Errorf("diagonal %d: %w", diagonal, err)
+		if err = eval.rotateComponents(ringQ, ctIn, rot0, rot1, diagonal); err != nil {
+			return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d automorphism: %w", diagonal, err)
 		}
-
-		galEl := eval.Parameters.GaloisElement(diagonal)
-		if err := FastAutomorphism(ringQ, ctIn.Value[0], rot0, galEl, ctIn.IsNTT); err != nil {
-			return fmt.Errorf("diagonal %d automorphism(c0): %w", diagonal, err)
-		}
-		if err := FastAutomorphism(ringQ, ctIn.Value[1], rot1, galEl, ctIn.IsNTT); err != nil {
-			return fmt.Errorf("diagonal %d automorphism(c1): %w", diagonal, err)
-		}
-		if err := fastPlaintextMul(ringQ, plaintext.Q, rot0, term0); err != nil {
-			return fmt.Errorf("diagonal %d plaintext multiplication(c0): %w", diagonal, err)
-		}
-		if err := fastPlaintextMul(ringQ, plaintext.Q, rot1, term1); err != nil {
-			return fmt.Errorf("diagonal %d plaintext multiplication(c1): %w", diagonal, err)
-		}
-
+		fastPlaintextMul(ringQ, plaintext.Q, rot0, term0)
+		fastPlaintextMul(ringQ, plaintext.Q, rot1, term1)
 		if first {
 			copyQ01(term0, acc0)
 			copyQ01(term1, acc1)
 			first = false
 		} else {
-			for limb := 0; limb < 2; limb++ {
-				ringQ.SubRings[limb].Add(term0.Coeffs[limb], acc0.Coeffs[limb], acc0.Coeffs[limb])
-				ringQ.SubRings[limb].Add(term1.Coeffs[limb], acc1.Coeffs[limb], acc1.Coeffs[limb])
-			}
+			addQ01(ringQ, term0, acc0)
+			addQ01(ringQ, term1, acc1)
 		}
 	}
-
-	if first {
-		return errors.New("Fast LinearTransform requires at least one diagonal")
-	}
-
-	*ctOut.MetaData = *ctIn.MetaData
-	ctOut.Scale = ctIn.Scale.Mul(matrix.Scale)
-	copyQ01(acc0, ctOut.Value[0])
-	copyQ01(acc1, ctOut.Value[1])
-	return nil
+	return acc0, acc1, nil
 }
 
-// fastPlaintextMul multiplies a q0/q1 plaintext diagonal by a q0/q1
-// ciphertext polynomial. Both operands are in NTT and Montgomery form. Only
-// SubRing operations are used.
-func fastPlaintextMul(ringQ *ring.Ring, plaintext, ciphertext, output ring.Poly) error {
-	if err := validateFastDiagonal(ringQ, plaintext); err != nil {
+func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
+	acc0, acc1 = ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	inner0, inner1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	outer0, outer1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	rot0, rot1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	term0, term1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
+	index, _, _ := matrix.BSGSIndex()
+	slots := 1 << matrix.LogDimensions.Cols
+	firstOuter := true
+
+	for _, j := range utils.GetSortedKeys(index) {
+		firstInner := true
+		for _, i := range index[j] {
+			if err = eval.rotateComponents(ringQ, ctIn, rot0, rot1, i); err != nil {
+				return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", i, err)
+			}
+			key := j + i
+			plaintext, ok := matrix.Vec[key]
+			if !ok {
+				plaintext, ok = matrix.Vec[key-slots]
+			}
+			if !ok {
+				return ring.Poly{}, ring.Poly{}, fmt.Errorf("missing BSGS diagonal %d", key)
+			}
+			if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
+				return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", key, err)
+			}
+			fastPlaintextMul(ringQ, plaintext.Q, rot0, term0)
+			fastPlaintextMul(ringQ, plaintext.Q, rot1, term1)
+			if firstInner {
+				copyQ01(term0, inner0)
+				copyQ01(term1, inner1)
+				firstInner = false
+			} else {
+				addQ01(ringQ, term0, inner0)
+				addQ01(ringQ, term1, inner1)
+			}
+		}
+
+		if j == 0 {
+			copyQ01(inner0, outer0)
+			copyQ01(inner1, outer1)
+		} else {
+			if err = FastAutomorphism(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true); err != nil {
+				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
+			}
+			if err = FastAutomorphism(ringQ, inner1, outer1, eval.Parameters.GaloisElement(j), true); err != nil {
+				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
+			}
+		}
+		if firstOuter {
+			copyQ01(outer0, acc0)
+			copyQ01(outer1, acc1)
+			firstOuter = false
+		} else {
+			addQ01(ringQ, outer0, acc0)
+			addQ01(ringQ, outer1, acc1)
+		}
+	}
+	return acc0, acc1, nil
+}
+
+func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, out0, out1 ring.Poly, rotation int) error {
+	if rotation == 0 {
+		copyQ01(ctIn.Value[0], out0)
+		copyQ01(ctIn.Value[1], out1)
+		return nil
+	}
+	galEl := eval.Parameters.GaloisElement(rotation)
+	if err := FastAutomorphism(ringQ, ctIn.Value[0], out0, galEl, true); err != nil {
 		return err
 	}
-	if ciphertext.N() != ringQ.N() || output.N() != ringQ.N() || len(ciphertext.Coeffs) < 2 || len(output.Coeffs) < 2 {
-		return errors.New("ciphertext/output dimensions do not match ringQ")
+	return FastAutomorphism(ringQ, ctIn.Value[1], out1, galEl, true)
+}
+
+func addQ01(ringQ *ring.Ring, src, dst ring.Poly) {
+	for limb := 0; limb < 2; limb++ {
+		ringQ.SubRings[limb].Add(src.Coeffs[limb], dst.Coeffs[limb], dst.Coeffs[limb])
 	}
+}
+
+// fastPlaintextMul multiplies an NTT/Montgomery plaintext diagonal by an
+// NTT/Montgomery ciphertext polynomial using q0/q1 only.
+func fastPlaintextMul(ringQ *ring.Ring, plaintext, ciphertext, output ring.Poly) {
 	for limb := 0; limb < 2; limb++ {
 		ringQ.SubRings[limb].MulCoeffsMontgomery(plaintext.Coeffs[limb], ciphertext.Coeffs[limb], output.Coeffs[limb])
 	}
-	return nil
 }
 
 func validateFastDiagonal(ringQ *ring.Ring, plaintext ring.Poly) error {
