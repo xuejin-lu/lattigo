@@ -15,16 +15,26 @@ import (
 // and are intended for one execution stream at a time; use separate instances
 // for concurrent evaluation.
 type Evaluator struct {
-	Parameters     ckks.Parameters
-	rescaleScratch fastRescaleScratch
-	nttScratch     [3]ring.Poly
+	Parameters             ckks.Parameters
+	rescaleScratch         fastRescaleScratch
+	nttScratch             [3]ring.Poly
+	automorphismIndexCache map[uint64][]uint64
+	automorphismScratch    [2][]uint64
+	lastBSGSBabyRotations  int
 }
 
 // NewEvaluator creates an explicit q0/q1-authoritative evaluator.
 func NewEvaluator(params ckks.Parameters) *Evaluator {
-	eval := &Evaluator{Parameters: params, rescaleScratch: newFastRescaleScratch(params.RingQ())}
+	eval := &Evaluator{
+		Parameters:             params,
+		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
+		automorphismIndexCache: make(map[uint64][]uint64),
+	}
 	for i := range eval.nttScratch {
 		eval.nttScratch[i] = ring.NewPoly(params.N(), 1)
+	}
+	for i := range eval.automorphismScratch {
+		eval.automorphismScratch[i] = make([]uint64, params.N())
 	}
 	return eval
 }
@@ -74,18 +84,12 @@ func (eval *Evaluator) Automorphism(ctIn, ctOut *rlwe.Ciphertext, galEl uint64) 
 	}
 
 	ringQ := eval.Parameters.RingQ().AtLevel(ctIn.Level())
-	// Keep the source intact until both authoritative components have been
-	// transformed. This also makes ctIn == ctOut safe.
-	tmp0 := ring.NewPoly(eval.Parameters.N(), 1)
-	tmp1 := ring.NewPoly(eval.Parameters.N(), 1)
-	if err := FastAutomorphism(ringQ, ctIn.Value[0], tmp0, galEl, ctIn.IsNTT); err != nil {
+	if err := eval.fastAutomorphism(ringQ, ctIn.Value[0], ctOut.Value[0], galEl, ctIn.IsNTT); err != nil {
 		return fmt.Errorf("FastAutomorphism(c0): %w", err)
 	}
-	if err := FastAutomorphism(ringQ, ctIn.Value[1], tmp1, galEl, ctIn.IsNTT); err != nil {
+	if err := eval.fastAutomorphism(ringQ, ctIn.Value[1], ctOut.Value[1], galEl, ctIn.IsNTT); err != nil {
 		return fmt.Errorf("FastAutomorphism(c1): %w", err)
 	}
-	copyQ01(tmp0, ctOut.Value[0])
-	copyQ01(tmp1, ctOut.Value[1])
 	*ctOut.MetaData = *ctIn.MetaData
 	return nil
 }

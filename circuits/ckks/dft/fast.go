@@ -17,12 +17,28 @@ import (
 type FastEvaluator struct {
 	parameters ckks.Parameters
 	eval       *fastckks.Evaluator
+	scratch    fastDFTScratch
+}
+
+// fastDFTScratch keeps the ordinary ciphertext shape required by the public
+// DFT surface, but allocates the two internal buffers only once. Fast DFT
+// overwrites q0/q1 and never reads dormant limbs.
+type fastDFTScratch struct {
+	copy *rlwe.Ciphertext
+	tmp  *rlwe.Ciphertext
 }
 
 // NewFastEvaluator creates a bounded Fast DFT evaluator for Standard-ring
 // NTT/Montgomery ciphertexts.
 func NewFastEvaluator(params ckks.Parameters) *FastEvaluator {
-	return &FastEvaluator{parameters: params, eval: fastckks.NewEvaluator(params)}
+	return &FastEvaluator{
+		parameters: params,
+		eval:       fastckks.NewEvaluator(params),
+		scratch: fastDFTScratch{
+			copy: ckks.NewCiphertext(params, 1, params.MaxLevel()),
+			tmp:  ckks.NewCiphertext(params, 1, params.MaxLevel()),
+		},
+	}
 }
 
 // FastEvaluator returns the underlying explicit Fast arithmetic evaluator.
@@ -74,7 +90,8 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix,
 			ctImag.Resize(1, zV.Level())
 			tmp = ctImag
 		} else {
-			tmp = ckks.NewCiphertext(eval.parameters, 1, zV.Level())
+			tmp = eval.scratch.tmp
+			tmp.Resize(1, zV.Level())
 			setFastOutputDomain(tmp, zV)
 		}
 		if err = eval.eval.Sub(zV, ctReal, tmp); err != nil {
@@ -175,9 +192,10 @@ func (eval *FastEvaluator) copyActive(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 	if err := eval.validateInput(ct); err != nil {
 		return nil, err
 	}
-	out := ckks.NewCiphertext(eval.parameters, ct.Degree(), ct.Level())
+	out := eval.scratch.copy
+	out.Resize(1, ct.Level())
 	*out.MetaData = *ct.MetaData
-	for d := range ct.Value {
+	for d := 0; d <= 1; d++ {
 		copyQ01ForDFT(ct.Value[d], out.Value[d])
 	}
 	return out, nil

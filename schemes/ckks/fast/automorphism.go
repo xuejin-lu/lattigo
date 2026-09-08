@@ -70,3 +70,46 @@ func FastAutomorphism(ringQ *ring.Ring, polIn, polOut ring.Poly, galEl uint64, i
 	}
 	return nil
 }
+
+// fastAutomorphism is the evaluator-owned hot path. Its index cache and
+// q0/q1 scratch buffers are deliberately scoped to one Evaluator, which is
+// already documented as a single execution stream.
+func (eval *Evaluator) fastAutomorphism(ringQ *ring.Ring, polIn, polOut ring.Poly, galEl uint64, isNTT bool) error {
+	if ringQ == nil {
+		return errors.New("ringQ cannot be nil")
+	}
+	if ringQ.Type() != ring.Standard {
+		return fmt.Errorf("Fast automorphism requires the Standard ring, got %s", ringQ.Type())
+	}
+	if ringQ.Level() < 1 {
+		return errors.New("Fast automorphism requires q0 and q1")
+	}
+	if len(polIn.Coeffs) < 2 || len(polOut.Coeffs) < 2 {
+		return errors.New("Fast automorphism requires q0 and q1 polynomial limbs")
+	}
+	if len(polIn.Coeffs[0]) != ringQ.N() || len(polIn.Coeffs[1]) != ringQ.N() ||
+		len(polOut.Coeffs[0]) != ringQ.N() || len(polOut.Coeffs[1]) != ringQ.N() {
+		return errors.New("Fast automorphism polynomial dimensions do not match ringQ")
+	}
+	if !isNTT {
+		return FastAutomorphism(ringQ, polIn, polOut, galEl, false)
+	}
+
+	index, ok := eval.automorphismIndexCache[galEl]
+	if !ok {
+		var err error
+		index, err = ring.AutomorphismNTTIndex(ringQ.N(), ringQ.NthRoot(), galEl)
+		if err != nil {
+			return fmt.Errorf("compute NTT automorphism index: %w", err)
+		}
+		eval.automorphismIndexCache[galEl] = index
+	}
+	for limb := 0; limb < 2; limb++ {
+		tmp := eval.automorphismScratch[limb]
+		for j, src := range index {
+			tmp[j] = polIn.Coeffs[limb][src]
+		}
+		copy(polOut.Coeffs[limb], tmp)
+	}
+	return nil
+}

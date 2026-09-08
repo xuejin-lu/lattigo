@@ -238,6 +238,45 @@ func TestFastLinearTransformBSGSAndLowerLevel(t *testing.T) {
 	require.Equal(t, in.Scale.Mul(matrix.Scale), out.Scale)
 }
 
+func TestFastLinearTransformBSGSPrecomputesBabyRotationsOnce(t *testing.T) {
+	params := testFastCKKSParameters(t)
+	eval := NewEvaluator(params)
+	matrix := newFastBSGSLinearTransform(params, 3)
+	in := ckks.NewCiphertext(params, 1, 3)
+	out := ckks.NewCiphertext(params, 1, 3)
+	in.IsNTT, in.IsMontgomery, in.IsBatched = true, true, true
+	out.IsNTT, out.IsMontgomery, out.IsBatched = true, true, true
+	fillFastCKKSCiphertext(in, params, nil, 173)
+	r := params.RingQ().AtLevel(in.Level())
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < 2; limb++ {
+			r.SubRings[limb].NTT(in.Value[d].Coeffs[limb], in.Value[d].Coeffs[limb])
+			r.SubRings[limb].MForm(in.Value[d].Coeffs[limb], in.Value[d].Coeffs[limb])
+		}
+	}
+
+	index, _, rotN2 := matrix.BSGSIndex()
+	uniqueNonZero := 0
+	for _, i := range rotN2 {
+		if i != 0 {
+			uniqueNonZero++
+		}
+	}
+	repeatedNonZero := 0
+	for _, rotations := range index {
+		for _, i := range rotations {
+			if i != 0 {
+				repeatedNonZero++
+			}
+		}
+	}
+
+	require.NoError(t, eval.LinearTransform(in, matrix, out))
+	t.Logf("BSGS baby rotations: %d unique nonzero versus %d repeated nonzero uses", uniqueNonZero, repeatedNonZero)
+	require.Equal(t, uniqueNonZero, eval.lastBSGSBabyRotations)
+	require.Greater(t, repeatedNonZero, uniqueNonZero)
+}
+
 func TestFastLinearTransformIgnoresDormantAndSupportsAlias(t *testing.T) {
 	params := testFastCKKSParameters(t)
 	eval := NewEvaluator(params)

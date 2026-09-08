@@ -128,18 +128,28 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 	acc0, acc1 = ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
 	inner0, inner1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
 	outer0, outer1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
-	rot0, rot1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
 	term0, term1 := ring.NewPoly(eval.Parameters.N(), 1), ring.NewPoly(eval.Parameters.N(), 1)
 	index, _, _ := matrix.BSGSIndex()
+	_, _, rotN2 := matrix.BSGSIndex()
+	baby0 := make(map[int]ring.Poly, len(rotN2))
+	baby1 := make(map[int]ring.Poly, len(rotN2))
+	eval.lastBSGSBabyRotations = 0
+	for _, i := range rotN2 {
+		baby0[i] = ring.NewPoly(eval.Parameters.N(), 1)
+		baby1[i] = ring.NewPoly(eval.Parameters.N(), 1)
+		if err = eval.rotateComponents(ringQ, ctIn, baby0[i], baby1[i], i); err != nil {
+			return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", i, err)
+		}
+		if i != 0 {
+			eval.lastBSGSBabyRotations++
+		}
+	}
 	slots := 1 << matrix.LogDimensions.Cols
 	firstOuter := true
 
 	for _, j := range utils.GetSortedKeys(index) {
 		firstInner := true
 		for _, i := range index[j] {
-			if err = eval.rotateComponents(ringQ, ctIn, rot0, rot1, i); err != nil {
-				return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", i, err)
-			}
 			key := j + i
 			plaintext, ok := matrix.Vec[key]
 			if !ok {
@@ -151,8 +161,8 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", key, err)
 			}
-			fastPlaintextMul(ringQ, plaintext.Q, rot0, term0)
-			fastPlaintextMul(ringQ, plaintext.Q, rot1, term1)
+			fastPlaintextMul(ringQ, plaintext.Q, baby0[i], term0)
+			fastPlaintextMul(ringQ, plaintext.Q, baby1[i], term1)
 			if firstInner {
 				copyQ01(term0, inner0)
 				copyQ01(term1, inner1)
@@ -167,10 +177,10 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			copyQ01(inner0, outer0)
 			copyQ01(inner1, outer1)
 		} else {
-			if err = FastAutomorphism(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true); err != nil {
+			if err = eval.fastAutomorphism(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
 			}
-			if err = FastAutomorphism(ringQ, inner1, outer1, eval.Parameters.GaloisElement(j), true); err != nil {
+			if err = eval.fastAutomorphism(ringQ, inner1, outer1, eval.Parameters.GaloisElement(j), true); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
 			}
 		}
@@ -193,10 +203,10 @@ func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext,
 		return nil
 	}
 	galEl := eval.Parameters.GaloisElement(rotation)
-	if err := FastAutomorphism(ringQ, ctIn.Value[0], out0, galEl, true); err != nil {
+	if err := eval.fastAutomorphism(ringQ, ctIn.Value[0], out0, galEl, true); err != nil {
 		return err
 	}
-	return FastAutomorphism(ringQ, ctIn.Value[1], out1, galEl, true)
+	return eval.fastAutomorphism(ringQ, ctIn.Value[1], out1, galEl, true)
 }
 
 func addQ01(ringQ *ring.Ring, src, dst ring.Poly) {

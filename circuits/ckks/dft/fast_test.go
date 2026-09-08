@@ -1,6 +1,7 @@
 package dft
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -174,4 +175,69 @@ func BenchmarkFastDFTSequence(b *testing.B) {
 			}
 		}
 	})
+}
+
+func fastDFTBenchmarkParameters(t testing.TB, logN int) ckks.Parameters {
+	t.Helper()
+	logQ := []int{55, 39, 50, 50, 50}
+	if logN == 16 {
+		logQ[0], logQ[1] = 54, 38
+	}
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            logN,
+		LogQ:            logQ,
+		LogP:            []int{50},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	return params
+}
+
+func fastDFTBenchmarkMatrix(t testing.TB, params ckks.Parameters) Matrix {
+	t.Helper()
+	matrix, err := NewMatrixFromLiteral(params, MatrixLiteral{
+		Type:         HomomorphicEncode,
+		LogSlots:     4,
+		LevelQ:       3,
+		LevelP:       0,
+		Levels:       []int{1, 1},
+		Format:       Standard,
+		LogBSGSRatio: 1,
+	}, ckks.NewEncoder(params))
+	require.NoError(t, err)
+	return matrix
+}
+
+func BenchmarkFastDFTRepresentative(b *testing.B) {
+	for _, logN := range []int{13, 16} {
+		params := fastDFTBenchmarkParameters(b, logN)
+		matrices := fastDFTBenchmarkMatrix(b, params)
+		standardEval := standardDFTEvaluator(b, params, matrices)
+		fastEval := NewFastEvaluator(params)
+		standardInput := fastDFTInput(params, matrices.LevelQ)
+		standardInput.LogDimensions = ring.Dimensions{Cols: matrices.LogSlots}
+		fastInput := fastDFTMontgomeryCopy(params, standardInput)
+		fastOut := ckks.NewCiphertext(params, 1, matrices.LevelQ)
+		standardOut := ckks.NewCiphertext(params, 1, matrices.LevelQ)
+
+		b.Run(fmt.Sprintf("LogN%d/Fast", logN), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				fastOut.Resize(1, matrices.LevelQ)
+				setFastOutputDomain(fastOut, fastInput)
+				if err := fastEval.CoeffsToSlots(fastInput, matrices, fastOut, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("LogN%d/Standard", logN), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				standardOut.Resize(1, matrices.LevelQ)
+				if err := standardEval.CoeffsToSlots(standardInput, matrices, standardOut, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
