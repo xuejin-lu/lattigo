@@ -105,7 +105,7 @@ func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 		if err := eval.Evaluator.Add(out, p.Coeffs[0], out); err != nil {
 			return nil, fmt.Errorf("Fast polynomial constant: %w", err)
 		}
-		return out.CopyNew(), nil
+		return cloneMaintainedResult(eval.Parameters, out), nil
 	}
 
 	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly); err != nil {
@@ -125,7 +125,7 @@ func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 	if err != nil {
 		return nil, err
 	}
-	return result.CopyNew(), nil
+	return cloneMaintainedResult(eval.Parameters, result), nil
 }
 
 type fastPolynomialWorkspace struct {
@@ -543,6 +543,14 @@ func copyMaintainedElement(src, dst *rlwe.Ciphertext) {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
+}
+
+// cloneMaintainedResult creates an independently-owned public ciphertext
+// without reading dormant q2...qL rows from the Fast workspace.
+func cloneMaintainedResult(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Ciphertext {
+	dst := ckks.NewCiphertext(params, src.Degree(), src.Level())
+	copyMaintainedElement(src, dst)
+	return dst
 }
 
 func zeroMaintained(ct *rlwe.Ciphertext) {

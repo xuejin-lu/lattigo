@@ -1,6 +1,7 @@
 package polynomial
 
 import (
+	"math"
 	"math/bits"
 	"testing"
 
@@ -44,8 +45,6 @@ func fastPolynomialTestPoly(degree int) bignum.Polynomial {
 		coeffs[i] = bignum.ToComplex(int64(i+1), 128)
 	}
 	poly := bignum.NewPolynomial(bignum.Chebyshev, coeffs, nil)
-	poly.IsEven = false
-	poly.IsOdd = false
 	return poly
 }
 
@@ -101,6 +100,58 @@ func TestFastPolynomialPowerBasisQ01Oracle(t *testing.T) {
 			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb])
 		}
 	}
+}
+
+func TestFastPolynomialNonPowerOfTwoChebyshevOracle(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{55, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 13)
+	poly := fastPolynomialTestPoly(30)
+
+	_, err = eval.Evaluate(input, poly, params.DefaultScale())
+	require.NoError(t, err)
+	got := eval.workspace.powers[5]
+	fastEval := eval.Evaluator
+
+	t2 := fastPolynomialReferenceCiphertext(params, input)
+	require.NoError(t, fastEval.MulRelin(input, input, t2))
+	require.NoError(t, fastEval.Add(t2, t2, t2))
+	require.NoError(t, fastEval.Add(t2, -1, t2))
+	require.NoError(t, fastEval.Rescale(t2, t2))
+
+	t3 := fastPolynomialReferenceCiphertext(params, input)
+	require.NoError(t, fastEval.MulRelin(t2, input, t3))
+	require.NoError(t, fastEval.Add(t3, t3, t3))
+	require.NoError(t, eval.workspace.subAligned(params, fastEval, t3, input))
+	require.NoError(t, fastEval.Rescale(t3, t3))
+
+	t5 := fastPolynomialReferenceCiphertext(params, input)
+	require.NoError(t, fastEval.MulRelin(t3, t2, t5))
+	require.NoError(t, fastEval.Add(t5, t5, t5))
+	require.NoError(t, eval.workspace.subAligned(params, fastEval, t5, input))
+	require.NoError(t, fastEval.Rescale(t5, t5))
+
+	require.Equal(t, t5.Level(), got.Level())
+	require.Equal(t, t5.Scale, got.Scale)
+	require.Equal(t, t5.Degree(), got.Degree())
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, t5.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb])
+		}
+	}
+}
+
+func fastPolynomialReferenceCiphertext(params ckks.Parameters, input *rlwe.Ciphertext) *rlwe.Ciphertext {
+	ct := ckks.NewCiphertext(params, 1, input.Level())
+	*ct.MetaData = *input.MetaData
+	ct.IsNTT = input.IsNTT
+	ct.IsMontgomery = input.IsMontgomery
+	return ct
 }
 
 func TestFastPolynomialPlannerMetadata(t *testing.T) {
@@ -204,6 +255,38 @@ func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
 	}
 }
 
+func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
+	params := fastPolynomialTestParameters(t)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 37)
+	poly := fastPolynomialTestPoly(3)
+
+	_, err := eval.Evaluate(input, poly, params.DefaultScale())
+	require.NoError(t, err)
+	workspaceResult := eval.workspace.babySteps[0].Value
+	for d := range workspaceResult.Value {
+		for limb := 2; limb <= workspaceResult.Level(); limb++ {
+			for i := range workspaceResult.Value[d].Coeffs[limb] {
+				workspaceResult.Value[d].Coeffs[limb][i] = uint64(0xdead0000 + 101*d + 17*limb + i)
+			}
+		}
+	}
+
+	public := cloneMaintainedResult(params, workspaceResult)
+	require.Equal(t, workspaceResult.Level(), public.Level())
+	require.Equal(t, workspaceResult.Scale, public.Scale)
+	require.Equal(t, workspaceResult.IsNTT, public.IsNTT)
+	require.Equal(t, workspaceResult.IsMontgomery, public.IsMontgomery)
+	for d := range workspaceResult.Value {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
+		}
+		for limb := 2; limb <= public.Level(); limb++ {
+			require.NotEqual(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
+		}
+	}
+}
+
 func TestFastPolynomialRepresentativeDegree30(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            6,
@@ -219,6 +302,78 @@ func TestFastPolynomialRepresentativeDegree30(t *testing.T) {
 	require.Equal(t, input.IsNTT, got.IsNTT)
 	require.Equal(t, input.IsMontgomery, got.IsMontgomery)
 	require.GreaterOrEqual(t, got.Level(), 1)
+}
+
+func TestFastPolynomialPatersonStockmeyerNumericalOracle(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{55, 39, 39, 39, 39, 39, 39, 39},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	encoder := ckks.NewEncoder(params)
+	inputLevel := params.MaxLevel() - 1
+	pt := ckks.NewPlaintext(params, inputLevel)
+	pt.IsNTT = true
+	pt.IsMontgomery = true
+	values := make([]complex128, pt.Slots())
+	for i := range values {
+		values[i] = complex(-0.2+0.01*float64(i), 0.04-0.003*float64(i))
+	}
+	require.NoError(t, encoder.Encode(values, pt))
+
+	input := ckks.NewCiphertext(params, 1, inputLevel)
+	*input.MetaData = *pt.MetaData
+	input.Value[0].Copy(pt.Value)
+	input.Value[1].Zero()
+
+	coeffs := make([]*bignum.Complex, 31)
+	for i := range coeffs {
+		coeffs[i] = bignum.ToComplex(0.08*math.Cos(float64(i+1))/(float64(i)+1), params.EncodingPrecision())
+	}
+	poly := bignum.NewPolynomial(bignum.Chebyshev, coeffs, [2]float64{-1, 1})
+
+	fastEval := NewFastEvaluator(params, nil)
+	got, err := fastEval.Evaluate(input, poly, params.DefaultScale())
+	require.NoError(t, err)
+	require.Equal(t, 1, got.Level())
+	require.True(t, got.Scale.Equal(params.DefaultScale()))
+
+	decoded := decodeFastPolynomialOutput(t, params, encoder, got)
+	want := make([]complex128, len(values))
+	for i := range values {
+		x := bignum.ToComplex(values[i], params.EncodingPrecision())
+		wantComplex := poly.Clone()
+		want[i] = complexFloat64(wantComplex.Evaluate(x))
+	}
+	for i := range want {
+		// The q1=39-bit test chain and five rescaling stages leave a
+		// deliberately modest CKKS tolerance for this execution oracle.
+		require.InDelta(t, real(want[i]), real(decoded[i]), 1e-2)
+		require.InDelta(t, imag(want[i]), imag(decoded[i]), 1e-2)
+	}
+}
+
+func decodeFastPolynomialOutput(t *testing.T, params ckks.Parameters, encoder *ckks.Encoder, ct *rlwe.Ciphertext) []complex128 {
+	t.Helper()
+	pt := ckks.NewPlaintext(params, ct.Level())
+	*pt.MetaData = *ct.MetaData
+	pt.Value.Copy(ct.Value[0])
+	if pt.IsMontgomery {
+		params.RingQ().AtLevel(pt.Level()).INTT(pt.Value, pt.Value)
+		params.RingQ().AtLevel(pt.Level()).IMForm(pt.Value, pt.Value)
+		pt.IsNTT = false
+		pt.IsMontgomery = false
+	}
+	values := make([]complex128, pt.Slots())
+	require.NoError(t, encoder.Decode(pt, values))
+	return values
+}
+
+func complexFloat64(value *bignum.Complex) complex128 {
+	realValue, _ := value[0].Float64()
+	imagValue, _ := value[1].Float64()
+	return complex(realValue, imagValue)
 }
 
 func TestFastPolynomialEvaluatorValidation(t *testing.T) {
