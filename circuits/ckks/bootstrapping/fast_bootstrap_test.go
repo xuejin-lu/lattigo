@@ -384,6 +384,53 @@ func TestFastBootstrapPlanningMatchesStandard(t *testing.T) {
 	require.Zero(t, standardEval.Parameters.SlotsToCoeffsParameters.Scaling.Cmp(fastEval.Parameters.SlotsToCoeffsParameters.Scaling))
 }
 
+func TestFastBootstrapOrdinaryStageAPI(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	sk := rlwe.NewKeyGenerator(params.BootstrappingParameters).GenSecretKeyNew()
+	keys, _, err := params.GenEvaluationKeys(sk)
+	require.NoError(t, err)
+	eval, err := NewEvaluator(params, keys)
+	require.NoError(t, err)
+
+	input := fastBootstrapPlainCiphertext(t, residual, 0, 2)
+	packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2([]rlwe.Ciphertext{*input})
+	require.NoError(t, err)
+	require.Len(t, packed, 1)
+
+	var scaled *rlwe.Ciphertext
+	scaled, _, err = eval.ScaleDown(&packed[0])
+	require.NoError(t, err)
+	packed[0] = *scaled
+	var modded *rlwe.Ciphertext
+	modded, err = eval.ModUp(&packed[0])
+	require.NoError(t, err)
+	packed[0] = *modded
+	ctReal, ctImag, err := eval.CoeffsToSlots(&packed[0])
+	require.NoError(t, err)
+	require.NotNil(t, ctReal)
+	ctReal, err = eval.EvalMod(ctReal)
+	require.NoError(t, err)
+	if ctImag != nil {
+		ctImag, err = eval.EvalMod(ctImag)
+		require.NoError(t, err)
+	}
+	ctOut, err := eval.SlotsToCoeffs(ctReal, ctImag)
+	require.NoError(t, err)
+	outputs, err := eval.UnpackAndSwitchN2ToN1([]rlwe.Ciphertext{*ctOut}, ctxtN1, ctxtN2)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+	require.Equal(t, residual.MaxLevel(), outputs[0].Level())
+	require.True(t, outputs[0].IsNTT)
+	require.False(t, outputs[0].IsMontgomery)
+	require.True(t, outputs[0].Scale.Equal(residual.DefaultScale()))
+
+	full, err := eval.Bootstrap(fastBootstrapPlainCiphertext(t, residual, 0, 2))
+	require.NoError(t, err)
+	require.Equal(t, outputs[0].Level(), full.Level())
+	require.True(t, outputs[0].Scale.Equal(full.Scale))
+}
+
 func TestFastBootstrapMatchesStandardDecodedReference(t *testing.T) {
 	params, residual := fastBootstrapParameters(t, 2, false)
 	params.ResidualParameters = residual

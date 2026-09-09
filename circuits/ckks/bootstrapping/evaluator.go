@@ -543,6 +543,9 @@ func (eval Evaluator) bootstrap(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, 
 // and updates the scale of ctIn accordingly
 // It then rescales the ciphertext down to q if necessary and also returns the rescaling error from this process
 func (eval Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.Scale, error) {
+	if eval.fast != nil {
+		return eval.fast.ScaleDown(ctIn)
+	}
 
 	params := &eval.BootstrappingParameters
 
@@ -593,6 +596,9 @@ func (eval Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.
 
 // ModUp raise the modulus from q to Q, scales the message  and applies the Trace if the ciphertext is sparsely packed.
 func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+	if eval.fast != nil {
+		return eval.fast.ModUp(ctIn)
+	}
 
 	// Switch to the sparse key
 	if eval.EvkDenseToSparse != nil {
@@ -751,11 +757,17 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 
 // CoeffsToSlots applies the homomorphic decoding
 func (eval Evaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext) (ctReal, ctImag *rlwe.Ciphertext, err error) {
+	if eval.fast != nil {
+		return eval.fast.CoeffsToSlots(ctIn)
+	}
 	return eval.DFTEvaluator.CoeffsToSlotsNew(ctIn, eval.C2SDFTMatrix)
 }
 
 // EvalMod applies the homomorphic modular reduction by q.
 func (eval Evaluator) EvalMod(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+	if eval.fast != nil {
+		return eval.fast.EvalMod(ctIn)
+	}
 	if ctOut, err = eval.Mod1Evaluator.EvaluateNew(ctIn); err != nil {
 		return nil, err
 	}
@@ -776,6 +788,9 @@ func (eval Evaluator) EvalModAndScale(ctIn *rlwe.Ciphertext, scaling complex128)
 }
 
 func (eval Evaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+	if eval.fast != nil {
+		return eval.fast.SlotsToCoeffs(ctReal, ctImag)
+	}
 	return eval.DFTEvaluator.SlotsToCoeffsNew(ctReal, ctImag, eval.S2CDFTMatrix)
 }
 
@@ -834,6 +849,9 @@ type packingContext struct {
 // PackAndSwitchN1ToN2 packs the ciphertexts into N1 and switch to N2 if N1 < N2
 // then it packs the ciphertexts into N2.
 func (eval Evaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, *packingContext, *packingContext, error) {
+	if eval.fast != nil {
+		return eval.fast.PackAndSwitchN1ToN2(cts)
+	}
 
 	var err error
 	var packN1, packN2 *packingContext
@@ -869,6 +887,18 @@ func (eval Evaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ciphert
 // UnpackAndSwitchN2ToN1 unpacks the ciphertexts into N2 and, if N1 < N2, it switches the ciphertexts
 // to N1 and unpacks further into N1
 func (eval Evaluator) UnpackAndSwitchN2ToN1(cts []rlwe.Ciphertext, ctxtN1, ctxtN2 *packingContext) ([]rlwe.Ciphertext, error) {
+	if eval.fast != nil {
+		unpacked, err := eval.fast.UnpackAndSwitchN2ToN1(cts, ctxtN1, ctxtN2)
+		if err != nil {
+			return nil, err
+		}
+		for i := range unpacked {
+			if err := eval.fast.finalizeFastPublicCiphertext(&unpacked[i]); err != nil {
+				return nil, err
+			}
+		}
+		return unpacked, nil
+	}
 
 	var ctsOut []rlwe.Ciphertext
 
