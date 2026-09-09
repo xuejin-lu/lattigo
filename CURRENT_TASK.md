@@ -1,4 +1,4 @@
 # Current Task
 
-Task: Implement `specs/008-fast-packing-ring-switch.md`
+Task: Implement `specs/009-end-to-end-fast-bootstrap.md`
 Status: READY
