@@ -33,6 +33,25 @@ func fastScaleDownParameters(t testing.TB, logN int) (Parameters, ckks.Parameter
 	}, params
 }
 
+func fastScaleDownActualLogN16Parameters(t testing.TB) (Parameters, ckks.Parameters) {
+	t.Helper()
+	logQ := []int{55, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56}
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            16,
+		LogQ:            logQ,
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 56, new(big.Int).SetUint64(params.Q()[0]).BitLen())
+	require.Equal(t, 39, new(big.Int).SetUint64(params.Q()[1]).BitLen())
+	return Parameters{
+		BootstrappingParameters: params,
+		Mod1ParametersLiteral: mod1.ParametersLiteral{
+			LogMessageRatio: 10,
+		},
+	}, params
+}
+
 func scaleQ0Div(params ckks.Parameters, divisor int64) rlwe.Scale {
 	value := new(big.Float).SetPrec(256).SetUint64(params.Q()[0])
 	value.Quo(value, new(big.Float).SetInt64(divisor))
@@ -160,6 +179,19 @@ func TestFastScaleDownMontgomeryLevelZero(t *testing.T) {
 		ckksParams.RingQ().SubRings[0].MForm(source.Value[d].Coeffs[0], source.Value[d].Coeffs[0])
 	}
 	source.IsMontgomery = true
+	want, wantErr, err := standardScaleDownReference(params, source.CopyNew())
+	require.NoError(t, err)
+	got, gotErr, err := fastEval.ScaleDown(source)
+	require.NoError(t, err)
+	requireScaleDownMatches(t, want, got, wantErr, gotErr)
+}
+
+func TestFastScaleDownActualLogN16Profile(t *testing.T) {
+	params, ckksParams := fastScaleDownActualLogN16Parameters(t)
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	inputLevel := ckksParams.MaxLevel()
+	source := newScaleDownCiphertext(ckksParams, inputLevel, scaleQ0Div(ckksParams, 2), []int64{1 << 40, -(1 << 40) + 17, 12345})
 	want, wantErr, err := standardScaleDownReference(params, source.CopyNew())
 	require.NoError(t, err)
 	got, gotErr, err := fastEval.ScaleDown(source)

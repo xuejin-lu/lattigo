@@ -10,9 +10,17 @@ import (
 )
 
 const (
-	fastRescaleMaxQ0Bits      = 55
+	// The LogN=16 public parameter builder can generate a 56-bit q0 and a
+	// 39-bit q1. For this supported domain q0 < 2^56 and q1 < 2^39, hence
+	// q0*q1 < 2^95 and the two-word CRT product remains below 128 bits.
+	// The centered magnitude is < 2^94. Since the divisor validator requires
+	// d >= 2^31, roundedMagnitude128 always satisfies hi < d for its first
+	// bits.Div64 call; the second call receives a remainder < d by contract.
+	// In crtQ01, delta*inverse < q1^2 < 2^78, so its high word is below the
+	// actual 39-bit q1 used by the supported profile.
+	fastRescaleMaxQ0Bits      = 56
 	fastRescaleMaxQ1Bits      = 39
-	fastRescaleMaxQ01Bits     = 94
+	fastRescaleMaxQ01Bits     = 95
 	fastRescaleMinDivisorBits = 32
 )
 

@@ -191,7 +191,14 @@ The supplied engineering profile, not a universal CKKS invariant, constructs 17 
 | EvalMod Q | eight 60-bit primes |
 | CoeffsToSlots Q | four 56-bit primes |
 
-Thus `q0 < 2^55`, `q1 < 2^39`, and `q0*q1 < 2^94`. For this profile, per-coefficient r0/r1 reconstruction does not require arbitrary-precision arithmetic and fits in a two-`uint64`/`math/bits` candidate representation. Future parameter sets must be validated rather than assumed to share this bound.
+For LogN=13, the generated profile normally has `q0 < 2^55`, `q1 < 2^39`,
+and `q0*q1 < 2^94`. The N=65536/LogN=16 NTT-prime generator can select a
+56-bit q0 while retaining a 39-bit q1. The supported fixed-width domain is
+therefore `q0 < 2^56`, `q1 < 2^39`, and `q0*q1 < 2^95`. In both cases,
+per-coefficient r0/r1 reconstruction does not require arbitrary-precision
+arithmetic and fits in a two-`uint64`/`math/bits` candidate representation.
+Future parameter sets must be validated rather than assumed to share this
+bound.
 
 Production direction:
 

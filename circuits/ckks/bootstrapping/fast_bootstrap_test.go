@@ -62,6 +62,45 @@ func fastBootstrapParametersProfileAt(t testing.TB, logN, logSlots int, factorTw
 	return params, residual
 }
 
+func actualLogN16BootstrapParameters(t testing.TB) (Parameters, ckks.Parameters) {
+	t.Helper()
+	residual, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            16,
+		LogQ:            []int{55, 39},
+		LogDefaultScale: 45,
+		Xs:              ring.Ternary{H: 192},
+	})
+	require.NoError(t, err)
+	logN := 16
+	logSlots := residual.LogMaxSlots()
+	evalModScale := 60
+	mod1Degree := 30
+	doubleAngle := 3
+	k := 16
+	logMessageRatio := 10
+	invDegree := 0
+	zero := 0
+	params, err := NewParametersFromLiteral(residual, ParametersLiteral{
+		LogN:     &logN,
+		LogP:     []int{61, 61, 61, 61, 61},
+		Xs:       ring.Ternary{H: 192},
+		LogSlots: &logSlots,
+		CoeffsToSlotsFactorizationDepthAndLogScales: [][]int{{56}, {56}, {56}, {56}},
+		SlotsToCoeffsFactorizationDepthAndLogScales: [][]int{{39}, {39}, {39}},
+		EvalModLogScale:       &evalModScale,
+		EphemeralSecretWeight: &zero,
+		Mod1Type:              mod1.CosDiscrete,
+		LogMessageRatio:       &logMessageRatio,
+		K:                     &k,
+		Mod1Degree:            &mod1Degree,
+		DoubleAngle:           &doubleAngle,
+		Mod1InvDegree:         &invDegree,
+	})
+	require.NoError(t, err)
+	params.CircuitOrder = ModUpThenEncode
+	return params, residual
+}
+
 func fastBootstrapPlainCiphertext(t testing.TB, params ckks.Parameters, level, logSlots int) *rlwe.Ciphertext {
 	t.Helper()
 	ct := ckks.NewCiphertext(params, 1, level)
@@ -235,6 +274,24 @@ func TestFastBootstrapFullSlotRealImagEndToEnd(t *testing.T) {
 	require.Equal(t, residual.MaxLevel(), out.Level())
 	require.True(t, out.Scale.Equal(residual.DefaultScale()))
 	fastBootstrapDecode(t, residual, out, values)
+}
+
+func TestFastBootstrapActualLogN16FullSlotProfile(t *testing.T) {
+	params, residual := actualLogN16BootstrapParameters(t)
+	params.ResidualParameters = residual
+	require.Equal(t, 15, params.LogMaxSlots())
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	values := make([]complex128, residual.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)/16, float64((i%5)-2)/32)
+	}
+	ct := fastBootstrapEncodedCiphertext(t, residual, params.LogMaxSlots(), values)
+	out, err := eval.Bootstrap(ct)
+	require.NoError(t, err)
+	require.Equal(t, residual.MaxLevel(), out.Level())
+	require.True(t, out.IsNTT)
+	require.False(t, out.IsMontgomery)
 }
 
 func TestFastBootstrapSparseRepackedPath(t *testing.T) {

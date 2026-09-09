@@ -2,6 +2,7 @@ package fast
 
 import (
 	"math/big"
+	"math/bits"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,117 @@ func rescaleTestParameters(t *testing.T) ckks.Parameters {
 	})
 	require.NoError(t, err)
 	return params
+}
+
+func generatedLogN16RescaleParameters(t *testing.T) ckks.Parameters {
+	t.Helper()
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            16,
+		LogQ:            []int{55, 39, 50},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 56, bits.Len64(params.Q()[0]))
+	require.Equal(t, 39, bits.Len64(params.Q()[1]))
+	return params
+}
+
+func TestFastRescaleAcceptsGeneratedLogN16Range(t *testing.T) {
+	params := generatedLogN16RescaleParameters(t)
+	require.NoError(t, validateFastRescaleRange(params.Q()[0], params.Q()[1], params.Q()[2]))
+}
+
+func TestFixedWidthCRTMatchesBigIntGeneratedLogN16(t *testing.T) {
+	params := generatedLogN16RescaleParameters(t)
+	q0, q1 := params.Q()[0], params.Q()[1]
+	inv, ok := inverseMod(q0%q1, q1)
+	require.True(t, ok)
+	Q := new(big.Int).Mul(new(big.Int).SetUint64(q0), new(big.Int).SetUint64(q1))
+	half := new(big.Int).Rsh(new(big.Int).Set(Q), 1)
+	values := []*big.Int{
+		big.NewInt(0), big.NewInt(1), big.NewInt(-1),
+		new(big.Int).Sub(new(big.Int).Set(half), big.NewInt(1)),
+		new(big.Int).Set(half),
+		new(big.Int).Neg(new(big.Int).Set(half)),
+		new(big.Int).Add(new(big.Int).Neg(new(big.Int).Set(half)), big.NewInt(1)),
+	}
+	for _, want := range values {
+		r0 := new(big.Int).Mod(new(big.Int).Set(want), new(big.Int).SetUint64(q0)).Uint64()
+		r1 := new(big.Int).Mod(new(big.Int).Set(want), new(big.Int).SetUint64(q1)).Uint64()
+		lo, hi := crtQ01(r0, r1, q0, q1, inv)
+		got := new(big.Int).Lsh(new(big.Int).SetUint64(hi), 64)
+		got.Add(got, new(big.Int).SetUint64(lo))
+		if got.Cmp(half) > 0 {
+			got.Sub(got, Q)
+		}
+		require.Equal(t, want, got)
+	}
+}
+
+func TestFixedWidthRoundedDivisionMatchesGeneratedLogN16(t *testing.T) {
+	params := generatedLogN16RescaleParameters(t)
+	q0, q1, divisor := params.Q()[0], params.Q()[1], params.Q()[2]
+	q01 := new(big.Int).Mul(new(big.Int).SetUint64(q0), new(big.Int).SetUint64(q1))
+	q01Lo := q01.Uint64()
+	q01Hi := new(big.Int).Rsh(new(big.Int).Set(q01), 64).Uint64()
+	half := new(big.Int).Rsh(new(big.Int).Set(q01), 1)
+	halfLo := half.Uint64()
+	halfHi := new(big.Int).Rsh(new(big.Int).Set(half), 64).Uint64()
+	for _, k := range []uint64{1, 3, 17} {
+		for _, delta := range []int64{-1, 0, 1} {
+			m := k * divisor
+			if delta < 0 {
+				m -= uint64(-delta)
+			} else {
+				m += uint64(delta)
+			}
+			want := m / divisor
+			if m%divisor > divisor/2 {
+				want++
+			}
+			got, negative := roundedMagnitude128(m, 0, q01Lo, q01Hi, halfLo, halfHi, divisor)
+			require.False(t, negative)
+			require.Equal(t, want, got)
+
+			negativeValue := new(big.Int).Sub(q01, new(big.Int).SetUint64(m))
+			got, negative = roundedMagnitude128(negativeValue.Uint64(), new(big.Int).Rsh(new(big.Int).Set(negativeValue), 64).Uint64(), q01Lo, q01Hi, halfLo, halfHi, divisor)
+			require.True(t, negative)
+			require.Equal(t, want, got)
+		}
+	}
+}
+
+func TestFastRescaleMatchesStandardGeneratedLogN16(t *testing.T) {
+	params := generatedLogN16RescaleParameters(t)
+	standard := ckks.NewEvaluator(params, nil)
+	fastEval := NewEvaluator(params)
+	in := makeFastRescaleCiphertext(params, 2, []int64{1, -2, 12345, -67890}, 0)
+	standardOut := ckks.NewCiphertext(params, 1, 1)
+	fastOut := ckks.NewCiphertext(params, 1, 1)
+	require.NoError(t, standard.Rescale(in, standardOut))
+	require.NoError(t, fastEval.Rescale(in, fastOut))
+	require.Equal(t, standardOut.Scale, fastOut.Scale)
+	require.Equal(t, standardOut.Level(), fastOut.Level())
+	for component := range fastOut.Value {
+		for limb := 0; limb <= fastOut.Level(); limb++ {
+			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
+		}
+	}
+
+	in = makeFastRescaleCiphertext(params, 2, []int64{1, -2, 12345, -67890}, 0)
+	in.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 120))
+	standardOut = ckks.NewCiphertext(params, 1, 2)
+	fastOut = ckks.NewCiphertext(params, 1, 2)
+	minScale := rlwe.NewScale(1)
+	require.NoError(t, standard.RescaleTo(in, minScale, standardOut))
+	require.NoError(t, fastEval.RescaleTo(in, minScale, fastOut))
+	require.Equal(t, standardOut.Scale, fastOut.Scale)
+	require.Equal(t, standardOut.Level(), fastOut.Level())
+	for component := range fastOut.Value {
+		for limb := 0; limb <= fastOut.Level() && limb < 2; limb++ {
+			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
+		}
+	}
 }
 
 func TestFixedWidthCRTMatchesBigInt(t *testing.T) {
