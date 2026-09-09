@@ -22,6 +22,13 @@ type FastEvaluator struct {
 	Mod1Parameters      mod1.Parameters
 	PolynomialEvaluator *ckkspolynomial.FastEvaluator
 	Mod1Evaluator       *mod1.FastEvaluator
+
+	fastPackingInitialized bool
+	fastPackingErr         error
+	xPow2N1                []ring.Poly
+	xPow2N2                []ring.Poly
+	xPow2InvN1             []ring.Poly
+	xPow2InvN2             []ring.Poly
 }
 
 // NewFastEvaluator creates the Fast ScaleDown boundary without constructing
