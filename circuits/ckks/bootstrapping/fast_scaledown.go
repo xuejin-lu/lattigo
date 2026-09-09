@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/tuneinsight/lattigo/v6/circuits/ckks/dft"
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/mod1"
 	ckkspolynomial "github.com/tuneinsight/lattigo/v6/circuits/ckks/polynomial"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
@@ -12,23 +13,26 @@ import (
 	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
-// FastEvaluator is the narrow Fast Bootstrap boundary. It deliberately does
-// not embed a Standard CKKS evaluator or accept Bootstrap evaluation keys.
-// ScaleDown and the Stage-A ModUp boundary are implemented here; full
-// Bootstrap orchestration remains a future stage.
+// FastEvaluator is the explicit Stage-A Fast Bootstrap boundary. It does not
+// embed a Standard CKKS evaluator or accept Bootstrap evaluation keys.
 type FastEvaluator struct {
 	Parameters          Parameters
 	FastCKKS            *fastckks.Evaluator
 	Mod1Parameters      mod1.Parameters
 	PolynomialEvaluator *ckkspolynomial.FastEvaluator
 	Mod1Evaluator       *mod1.FastEvaluator
+	DFTEvaluator        *dft.FastEvaluator
+	C2SDFTMatrix        dft.Matrix
+	S2CDFTMatrix        dft.Matrix
 
-	fastPackingInitialized bool
-	fastPackingErr         error
-	xPow2N1                []ring.Poly
-	xPow2N2                []ring.Poly
-	xPow2InvN1             []ring.Poly
-	xPow2InvN2             []ring.Poly
+	fastPackingInitialized   bool
+	fastPackingErr           error
+	fastBootstrapInitialized bool
+	fastBootstrapErr         error
+	xPow2N1                  []ring.Poly
+	xPow2N2                  []ring.Poly
+	xPow2InvN1               []ring.Poly
+	xPow2InvN2               []ring.Poly
 }
 
 // NewFastEvaluator creates the Fast ScaleDown boundary without constructing

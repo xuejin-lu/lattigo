@@ -155,64 +155,16 @@ func (eval Evaluator) checkKeys(evk *EvaluationKeys) (err error) {
 }
 
 func (eval *Evaluator) initialize(btpParams Parameters) (err error) {
-	eval.Parameters = btpParams
-	params := btpParams.BootstrappingParameters
-
-	if eval.Mod1Parameters, err = mod1.NewParametersFromLiteral(params, btpParams.Mod1ParametersLiteral); err != nil {
-		return
+	adjusted, mod1Params, c2s, s2c, err := buildBootstrapCircuitData(btpParams)
+	if err != nil {
+		return err
 	}
+	eval.Parameters = adjusted
+	eval.Mod1Parameters = mod1Params
+	eval.C2SDFTMatrix = c2s
+	eval.S2CDFTMatrix = s2c
+	return nil
 
-	// [-K, K]
-	K := eval.Mod1Parameters.K
-
-	// Correcting factor for approximate division by Q
-	// The second correcting factor for approximate multiplication by Q is included in the coefficients of the EvalMod polynomials
-	qDiff := eval.Mod1Parameters.QDiff
-
-	// If the scale used during the EvalMod step is smaller than Q0, then we cannot increase the scale during
-	// the EvalMod step to get a free division by MessageRatio, and we need to do this division (totally or partly)
-	// during the CoeffstoSlots step
-	qDiv := eval.Mod1Parameters.ScalingFactor().Float64() / math.Exp2(math.Round(math.Log2(float64(params.Q()[0]))))
-
-	// Sets qDiv to 1 if there is enough room for the division to happen using scale manipulation.
-	if qDiv > 1 {
-		qDiv = 1
-	}
-
-	encoder := ckks.NewEncoder(params)
-
-	// CoeffsToSlots vectors
-	// Change of variable for the evaluation of the Chebyshev polynomial + cancelling factor for the DFT and SubSum + eventual scaling factor for the double angle formula
-
-	scale := eval.BootstrappingParameters.DefaultScale().Float64()
-	offset := eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()
-
-	C2SScaling := new(big.Float).SetFloat64(qDiv / (K * qDiff))
-	StCScaling := new(big.Float).SetFloat64(scale / offset)
-
-	if btpParams.CoeffsToSlotsParameters.Scaling == nil {
-		eval.CoeffsToSlotsParameters.Scaling = C2SScaling
-	} else {
-		eval.CoeffsToSlotsParameters.Scaling = new(big.Float).Mul(btpParams.CoeffsToSlotsParameters.Scaling, C2SScaling)
-	}
-
-	if btpParams.SlotsToCoeffsParameters.Scaling == nil {
-		eval.SlotsToCoeffsParameters.Scaling = StCScaling
-	} else {
-		eval.SlotsToCoeffsParameters.Scaling = new(big.Float).Mul(btpParams.SlotsToCoeffsParameters.Scaling, StCScaling)
-	}
-
-	if eval.C2SDFTMatrix, err = dft.NewMatrixFromLiteral(params, eval.CoeffsToSlotsParameters, encoder); err != nil {
-		return
-	}
-
-	if eval.S2CDFTMatrix, err = dft.NewMatrixFromLiteral(params, eval.SlotsToCoeffsParameters, encoder); err != nil {
-		return
-	}
-
-	encoder = nil // For the GC
-
-	return
 }
 
 // Bootstrap bootstraps a single ciphertext and returns the bootstrapped ciphertext.

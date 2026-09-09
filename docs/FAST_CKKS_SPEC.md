@@ -219,20 +219,46 @@ This branch does not start from Phase 0. The status below is derived from the cu
 | Fast automorphism/rotation | Implemented | First-two-limb Standard-ring path; no evaluation-key use in the helper |
 | Ring-degree conversion | Implemented | r0/r1-maintaining N1/N2 conversion |
 | Fast LinearTransform | Implemented | direct and BSGS NTT/Montgomery first-two-limb paths without evaluation-key, QP, or level transition; accepts matrices encoded at a higher LevelQ |
-| Fast DFT adapter | Implemented, not wired | `circuits/ckks/dft/fast.go` executes CoeffsToSlots/SlotsToCoeffs factor groups with Fast LinearTransform, Conjugate, scalar arithmetic, and Rescale; Bootstrap orchestration remains deferred |
+| Fast DFT adapter | Implemented and wired | `circuits/ckks/dft/fast.go` executes CoeffsToSlots/SlotsToCoeffs factor groups with Fast LinearTransform, Conjugate, scalar arithmetic, and Rescale; bounded Stage-A Bootstrap owns the matrices and uses the same Standard scaling preparation |
 | Fast polynomial execution | Implemented for the bounded single-polynomial CKKS path required by EvalMod | `circuits/ckks/polynomial/fast.go` evaluates Chebyshev polynomials with Fast q0/q1 arithmetic, reusable power/baby-step workspace, and the existing Paterson-Stockmeyer planner |
 | Fast EvalMod / Mod1 | Implemented for Stage-A CosDiscrete, no-inverse, scaling=1 path | `circuits/ckks/mod1/fast.go` preserves Standard normalization, cosine offset, target-scale schedule, and DoubleAngle using Fast q0/q1 arithmetic; SinContinuous, CosContinuous, inverse/ArcSine, non-unit scaling, and iterative paths remain unsupported |
 | Fast Bootstrap key support | Implemented | `circuits/ckks/bootstrapping/fast_keys.go` generates Fast evaluation-key material |
 | Fast Rescale | Implemented | `schemes/ckks/fast/rescale.go` provides fixed-width q0/q1 arithmetic with Standard Scale/Level semantics; targeted tests pass |
-| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; full Bootstrap remains incomplete |
+| Fast ScaleDown | Implemented | `circuits/ckks/bootstrapping/fast_scaledown.go` preserves Standard cheap DropLevel, Level-0 integer alignment, and Fast RescaleTo semantics; it is the first stage of the bounded public Fast Bootstrap path |
 | Fast ModUp basis raise / scale alignment | Implemented | `circuits/ckks/bootstrapping/fast_modup.go` restores MaxLevel structure, computes only maintained q0/q1, and feeds the Fast Trace boundary |
 | Fast Trace | Implemented | `schemes/ckks/fast/trace.go` performs q0/q1-only inverse normalization, automorphism/add stages, and logN=0 final order-two stage with evaluator-owned scratch/cache |
-| Fast ModUp boundary | Implemented for Stage-A no-key Standard-ring path | `FastEvaluator.ModUp` performs basis raise, Fast Trace, and q0/q1-only Montgomery handoff; Dense/Sparse switching and full Bootstrap remain incomplete |
-| Fast ModDown, KeySwitch, and full Bootstrap execution | Not implemented | Fast ModUp basis raise, Trace, ScaleDown, and the bounded EvalMod boundary are implemented; full Fast Bootstrap orchestration, ModDown, and key switching remain deferred |
+| Fast Pack/Unpack and ring boundary | Implemented for bounded Stage-A path | `fast_packing.go` maintains q0 at Level 0 and q0/q1 at higher levels, supports same-ring and factor-two ring-degree conversion, and copies caller-owned maintained state |
+| Fast ModUp boundary | Implemented for Stage-A no-key Standard-ring path | `FastEvaluator.ModUp` performs basis raise, Fast Trace, and q0/q1-only Montgomery handoff; dense/sparse switching and key switching remain intentionally out of scope |
+| Fast Bootstrap orchestration | Implemented for bounded Stage-A Standard-ring path | `FastEvaluator.Bootstrap` and `BootstrapMany` run ScaleDown → ModUp/Trace → C2S → EvalMod → S2C → unpack → public Montgomery exit without Standard/QP/key-switch fallback |
 
 The current implementation status is not a permanent architecture claim. In particular, current zero-secret behavior and current evaluation-key material are implementation modes that future experiments may extend.
 
-## 7. Current implementation versus permanent architecture
+## 7. Current bounded Fast Bootstrap contract
+
+The Stage-A public Bootstrap path currently supports only:
+
+```text
+ring.Standard
+CircuitOrder = ModUpThenEncode
+non-iterative parameters
+EphemeralSecretWeight = 0
+Mod1Type = CosDiscrete
+no Mod1 inverse polynomial
+degree-one NTT input in ordinary (non-Montgomery) representation
+N2 = N1 or N2 = 2*N1
+input Level >= 0
+Residual MaxLevel <= 1
+```
+
+Fast preserves the full configured modulus chain in parameter objects, but the
+active execution state maintains only q0 at Level 0 and q0/q1 at higher
+levels. The public finalization converts those maintained limbs out of
+Montgomery form, restores the residual default scale and metadata, and leaves
+dormant higher limbs untouched. Generic Standard-Bootstrap feature parity,
+iterative correction, inverse/continuous Mod1 variants, ephemeral switching,
+and arbitrary ring-degree ratios are not implied.
+
+## 8. Current implementation versus permanent architecture
 
 ### CURRENT IMPLEMENTATION
 
@@ -244,7 +270,7 @@ These are current implementation facts, not permanent scientific assumptions. Do
 
 The durable boundaries are: preserve Normal behavior and public structure where practical; maintain only the minimum sufficient residue subset for each Fast operation; permit normal Level/Scale progression through Level 0; avoid hidden Standard/full-RNS fallback on stale residue storage; preserve the full CKKS parameter chain; and leave localized extension points for alternate secrets, key models, and equivalent-noise experiments.
 
-## 8. Key policy and future experimental knobs
+## 9. Key policy and future experimental knobs
 
 Fast mode intentionally removes or elides computational contributions of relevant key material in its current implementation. The exact semantics of future nonzero-secret evaluation keys require a dedicated source-level and mathematical audit.
 
@@ -267,7 +293,7 @@ Initially, later experiments should vary Public Key error only. Do not make eval
 
 For future nonzero-secret experiments, do not assume that setting the `a` polynomial to zero means all secret-dependent terms may be removed, auxiliary P moduli may be removed, or Gadget/RNS decomposition has no relevance. The roles of P, secret-dependent gadget terms, key switching, relinearization, and Galois keys require explicit audit.
 
-## 9. Two development stages
+## 10. Two development stages
 
 ### Stage A — Fast Engine
 
@@ -279,13 +305,13 @@ After the Fast Engine works end-to-end, use the experimental knobs and, if neede
 
 Removing security-related work may alter numerical-noise propagation in key switching, relinearization, rotation, ModDown, rescaling, and bootstrapping. A later operation-specific equivalent-noise model may inject the omitted effect efficiently. Do not add guessed Gaussian noise or implement this model during Stage A.
 
-## 10. Operations and Bootstrap audit
+## 11. Operations and Bootstrap audit
 
 Before implementing additional behavior, independently trace `Mul`, `MulRelin`, `Relinearize`, `Rotate`, `Rescale`, and `Bootstrap`. Record the CKKS entry point, downstream functions, ciphertext degree, components read/written, keys used, key-switch location, RNS/level behavior, implementation layer, and smallest modification point.
 
 Bootstrap is the highest-risk integration stage. Trace the actual current Lattigo flow before implementation, including rotations, key switching, relinearization, multiplication, rescaling, modulus/level transitions, evaluation keys, and degree changes. Do not copy the complete Standard Bootstrap implementation merely to create a Fast version; prefer the smallest reusable operation boundary.
 
-## 11. Validation terminology and methods
+## 12. Validation terminology and methods
 
 Use three domains precisely:
 
@@ -323,7 +349,7 @@ within expected CKKS tolerance.
 
 The target workload uses polynomial ring degree `N = 65536`; this is not 65,536 CKKS slots. Standard complex CKKS normally has at most `N/2` slots. Derive slot counts from the active parameter configuration rather than hard-coding them.
 
-## 12. Performance and testing
+## 13. Performance and testing
 
 Performance is a first-class acceptance criterion during development. Each major Fast primitive should eventually be measurable against its Normal equivalent. Do not defer all performance measurement until semantics are complete, but do not prematurely micro-optimize before the complete Fast execution path exists. After coverage is complete, profile allocation, domain-conversion, and scratch-buffer hotspots.
 
@@ -335,7 +361,7 @@ Testing should include:
 4. Bootstrap integration and continued supported use of its result.
 5. Application compatibility without Fast-specific application changes.
 
-## 13. Known Performance Questions
+## 14. Known Performance Questions
 
 Non-binding questions for investigation after Fast coverage is complete:
 
@@ -347,7 +373,7 @@ Non-binding questions for investigation after Fast coverage is complete:
 
 These are not requests to optimize code in this documentation task.
 
-## 14. Hard prohibitions
+## 15. Hard prohibitions
 
 - [ ] Do not modify application/model architecture or add frontend Fast/Normal flags.
 - [ ] Do not reduce the configured CKKS parameter chain to two levels.
@@ -361,7 +387,7 @@ These are not requests to optimize code in this documentation task.
 - [ ] Do not create repository-wide refactors.
 - [ ] Do not start Bootstrap implementation before tracing its actual source path.
 
-## 15. Definition of done
+## 16. Definition of done
 
 The overall project eventually satisfies:
 

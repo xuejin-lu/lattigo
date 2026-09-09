@@ -35,8 +35,8 @@ func fastRingDegreeConversion(ringIn, ringOut *ring.Ring, ctIn, ctOut *rlwe.Ciph
 	if ringIn.Type() != ring.Standard || ringOut.Type() != ring.Standard {
 		return errors.New("Fast ring-degree conversion requires Standard rings")
 	}
-	if ringIn.Level() < 1 || ringOut.Level() < 1 {
-		return errors.New("Fast ring-degree conversion requires q0 and q1")
+	if ringIn.Level() < 0 || ringOut.Level() < 0 {
+		return errors.New("Fast ring-degree conversion requires q0")
 	}
 	if ringIn.Level() != ringOut.Level() {
 		return errors.New("Fast ring-degree conversion requires equal ring levels")
@@ -48,9 +48,13 @@ func fastRingDegreeConversion(ringIn, ringOut *ring.Ring, ctIn, ctOut *rlwe.Ciph
 	} else if ringIn.N() != 2*ringOut.N() {
 		return errors.New("FastN2ToN1 requires input degree twice the output degree")
 	}
-	for i := 0; i <= 1; i++ {
+	maintained := ringIn.Level() + 1
+	if maintained > 2 {
+		maintained = 2
+	}
+	for i := 0; i < maintained; i++ {
 		if ringIn.SubRings[i].Modulus != ringOut.SubRings[i].Modulus {
-			return errors.New("Fast ring-degree conversion requires matching q0/q1 moduli")
+			return errors.New("Fast ring-degree conversion requires matching maintained moduli")
 		}
 	}
 	if ctIn == nil || ctOut == nil {
@@ -76,23 +80,32 @@ func fastRingDegreeConversion(ringIn, ringOut *ring.Ring, ctIn, ctOut *rlwe.Ciph
 	}
 	for name, ct := range map[string]*rlwe.Ciphertext{"ctIn": ctIn, "ctOut": ctOut} {
 		for d := 0; d <= 1; d++ {
-			if len(ct.Value[d].Coeffs) < 2 || len(ct.Value[d].Coeffs[0]) != ct.N() || len(ct.Value[d].Coeffs[1]) != ct.N() {
-				return fmt.Errorf("%s has invalid q0/q1 storage", name)
+			if len(ct.Value[d].Coeffs) < maintained || len(ct.Value[d].Coeffs[0]) != ct.N() {
+				return fmt.Errorf("%s has invalid maintained storage", name)
+			}
+			for limb := 1; limb < maintained; limb++ {
+				if len(ct.Value[d].Coeffs[limb]) != ct.N() {
+					return fmt.Errorf("%s has invalid maintained storage", name)
+				}
 			}
 		}
 	}
 
 	for d := 0; d <= 1; d++ {
 		if ctIn.IsNTT {
-			inCoeff := ring.NewPoly(ringIn.N(), 1)
-			outCoeff := ring.NewPoly(ringOut.N(), 1)
-			if err := FastPartialINTT(ringIn, ctIn.Value[d], inCoeff); err != nil {
+			inCoeff := ring.NewPoly(ringIn.N(), maintained)
+			outCoeff := ring.NewPoly(ringOut.N(), maintained)
+			if maintained == 1 {
+				ringIn.SubRings[0].INTT(ctIn.Value[d].Coeffs[0], inCoeff.Coeffs[0])
+			} else if err := FastPartialINTT(ringIn, ctIn.Value[d], inCoeff); err != nil {
 				return fmt.Errorf("FastPartialINTT(%s): %w", componentName(d), err)
 			}
 			if err := mapRingDegreeCoefficient(inCoeff, outCoeff, expand); err != nil {
 				return fmt.Errorf("map %s: %w", componentName(d), err)
 			}
-			if err := FastPartialNTT(ringOut, outCoeff, ctOut.Value[d]); err != nil {
+			if maintained == 1 {
+				ringOut.SubRings[0].NTT(outCoeff.Coeffs[0], ctOut.Value[d].Coeffs[0])
+			} else if err := FastPartialNTT(ringOut, outCoeff, ctOut.Value[d]); err != nil {
 				return fmt.Errorf("FastPartialNTT(%s): %w", componentName(d), err)
 			}
 		} else if err := mapRingDegreeCoefficient(ctIn.Value[d], ctOut.Value[d], expand); err != nil {
@@ -108,14 +121,22 @@ func fastRingDegreeConversion(ringIn, ringOut *ring.Ring, ctIn, ctOut *rlwe.Ciph
 
 func mapRingDegreeCoefficient(in, out ring.Poly, expand bool) error {
 	if expand {
-		for limb := 0; limb < 2; limb++ {
+		maintained := len(in.Coeffs)
+		if maintained > 2 {
+			maintained = 2
+		}
+		for limb := 0; limb < maintained; limb++ {
 			for i, value := range in.Coeffs[limb] {
 				out.Coeffs[limb][2*i] = value
 				out.Coeffs[limb][2*i+1] = 0
 			}
 		}
 	} else {
-		for limb := 0; limb < 2; limb++ {
+		maintained := len(out.Coeffs)
+		if maintained > 2 {
+			maintained = 2
+		}
+		for limb := 0; limb < maintained; limb++ {
 			for i := range out.Coeffs[limb] {
 				out.Coeffs[limb][i] = in.Coeffs[limb][2*i]
 			}

@@ -45,26 +45,31 @@ func (eval *FastEvaluator) ensureFastPackingTables() error {
 		eval.fastPackingErr = fmt.Errorf("Fast packing supports at most N2=2*N1: N1=%d N2=%d", paramsN1.N(), paramsN2.N())
 		return eval.fastPackingErr
 	}
-	if paramsN2.RingQ().MaxLevel() < 1 {
-		eval.fastPackingErr = errors.New("Fast packing requires q0/q1 in BootstrappingParameters")
+	if paramsN2.RingQ().MaxLevel() < 0 {
+		eval.fastPackingErr = errors.New("Fast packing requires q0 in BootstrappingParameters")
 		return eval.fastPackingErr
 	}
-	if paramsN2.N() != paramsN1.N() && paramsN1.RingQ().MaxLevel() < 1 {
-		eval.fastPackingErr = errors.New("Fast packing requires q0/q1 in ResidualParameters")
+	if paramsN2.N() != paramsN1.N() && paramsN1.RingQ().MaxLevel() < 0 {
+		eval.fastPackingErr = errors.New("Fast packing requires q0 in ResidualParameters")
 		return eval.fastPackingErr
 	}
-	if paramsN1.RingQ() != nil && (paramsN1.RingQ().SubRings[0].Modulus != paramsN2.RingQ().SubRings[0].Modulus ||
-		paramsN1.RingQ().SubRings[1].Modulus != paramsN2.RingQ().SubRings[1].Modulus) {
-		eval.fastPackingErr = errors.New("Fast packing requires matching q0/q1 moduli across N1/N2")
-		return eval.fastPackingErr
+	if paramsN1.RingQ() != nil {
+		maintained := utils.Min(paramsN1.RingQ().MaxLevel(), paramsN2.RingQ().MaxLevel()) + 1
+		maintained = utils.Min(maintained, 2)
+		for limb := 0; limb < maintained; limb++ {
+			if paramsN1.RingQ().SubRings[limb].Modulus != paramsN2.RingQ().SubRings[limb].Modulus {
+				eval.fastPackingErr = errors.New("Fast packing requires matching maintained moduli across N1/N2")
+				return eval.fastPackingErr
+			}
+		}
 	}
 
-	paramsN2Q01 := paramsN2.RingQ().AtLevel(1)
+	paramsN2Q01 := paramsN2.RingQ().AtLevel(utils.Min(1, paramsN2.RingQ().MaxLevel()))
 	eval.xPow2N2 = rlwe.GenXPow2NTT(paramsN2Q01, paramsN2.LogN(), false)
 	eval.xPow2InvN2 = rlwe.GenXPow2NTT(paramsN2Q01, paramsN2.LogN(), true)
 
 	if paramsN1.N() != paramsN2.N() {
-		paramsN1Q01 := paramsN1.RingQ().AtLevel(1)
+		paramsN1Q01 := paramsN1.RingQ().AtLevel(utils.Min(1, paramsN1.RingQ().MaxLevel()))
 		// Standard uses paramsN2.LogN() for the forward N1 table and
 		// paramsN1.LogN() for its inverse table.
 		eval.xPow2N1 = rlwe.GenXPow2NTT(paramsN1Q01, paramsN2.LogN(), false)
@@ -86,16 +91,22 @@ func validateFastPackingCiphertext(ct *rlwe.Ciphertext, params ckks.Parameters) 
 	if ct.Degree() != 1 {
 		return fmt.Errorf("Fast packing requires degree-one ciphertexts, got degree %d", ct.Degree())
 	}
-	if ct.Level() < 1 || ct.Level() > params.RingQ().MaxLevel() {
-		return fmt.Errorf("Fast packing requires ciphertext level in [1, %d], got %d", params.RingQ().MaxLevel(), ct.Level())
+	if ct.Level() < 0 || ct.Level() > params.RingQ().MaxLevel() {
+		return fmt.Errorf("Fast packing requires ciphertext level in [0, %d], got %d", params.RingQ().MaxLevel(), ct.Level())
 	}
 	if !ct.IsNTT {
 		return errors.New("Fast packing requires NTT-domain ciphertexts")
 	}
+	maintained := maintainedLimbs(ct.Level())
 	for d := 0; d <= 1; d++ {
-		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < 2 ||
-			len(ct.Value[d].Coeffs[0]) != params.N() || len(ct.Value[d].Coeffs[1]) != params.N() {
-			return errors.New("Fast packing requires q0/q1 ciphertext storage")
+		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < maintained ||
+			len(ct.Value[d].Coeffs[0]) != params.N() {
+			return errors.New("Fast packing requires maintained ciphertext storage")
+		}
+		for limb := 1; limb < maintained; limb++ {
+			if len(ct.Value[d].Coeffs[limb]) != params.N() {
+				return errors.New("Fast packing requires maintained ciphertext storage")
+			}
 		}
 	}
 	return nil
@@ -133,8 +144,9 @@ func validateFastPackingSlice(cts []rlwe.Ciphertext, params ckks.Parameters) err
 func copyFastPackingCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) rlwe.Ciphertext {
 	dst := ckks.NewCiphertext(params, 1, src.Level())
 	*dst.MetaData = *src.MetaData
+	maintained := maintainedLimbs(src.Level())
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintained; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
@@ -161,6 +173,7 @@ func (eval *FastEvaluator) fastPack(cts []rlwe.Ciphertext, ctxt packingContext, 
 	}
 	logPackCTs := ctxt.LogMaxDimensions.Cols - ctxt.LogSlots
 	logGap := ctxt.Params.LogMaxSlots() - ctxt.LogSlots - 1
+	maintained := maintainedLimbs(packed[0].Level())
 	for i := 0; i < logPackCTs; i++ {
 		for j := 0; j < len(packed)>>1; j++ {
 			even := &packed[j*2]
@@ -175,7 +188,7 @@ func (eval *FastEvaluator) fastPack(cts []rlwe.Ciphertext, ctxt packingContext, 
 			monomial := xPow2[monomialIndex]
 			ringQ := ctxt.Params.RingQ()
 			for d := 0; d <= 1; d++ {
-				for limb := 0; limb < 2; limb++ {
+				for limb := 0; limb < maintained; limb++ {
 					ringQ.SubRings[limb].MulCoeffsMontgomeryThenAdd(
 						odd.Value[d].Coeffs[limb], monomial.Coeffs[limb], even.Value[d].Coeffs[limb])
 				}
@@ -221,6 +234,7 @@ func (eval *FastEvaluator) fastUnpack(ct *rlwe.Ciphertext, ctxt packingContext, 
 	}
 
 	logGap := ctxt.Params.LogMaxSlots() - ctxt.LogSlots - 1
+	maintained := maintainedLimbs(ct.Level())
 	for i := 0; i < utils.Min(bitsLen64(uint64(n-1)), logPackCTs); i++ {
 		step := 1 << (i + 1)
 		monomialIndex := logGap - i
@@ -231,7 +245,7 @@ func (eval *FastEvaluator) fastUnpack(ct *rlwe.Ciphertext, ctxt packingContext, 
 		for j := 0; j < n; j += step {
 			for k := step >> 1; k < step && j+k < n; k++ {
 				for d := 0; d <= 1; d++ {
-					for limb := 0; limb < 2; limb++ {
+					for limb := 0; limb < maintained; limb++ {
 						ctPoly := cts[j+k].Value[d].Coeffs[limb]
 						ctxt.Params.RingQ().SubRings[limb].MulCoeffsMontgomery(ctPoly, monomial.Coeffs[limb], ctPoly)
 					}
@@ -240,6 +254,10 @@ func (eval *FastEvaluator) fastUnpack(ct *rlwe.Ciphertext, ctxt packingContext, 
 		}
 	}
 	return cts, nil
+}
+
+func maintainedLimbs(level int) int {
+	return utils.Min(level+1, 2)
 }
 
 func bitsLen64(value uint64) int {

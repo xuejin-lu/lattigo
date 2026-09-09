@@ -1,6 +1,7 @@
 package bootstrapping
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -43,21 +44,51 @@ func newFastPackingCiphertext(params ckks.Parameters, level, logSlots int, seed 
 	ct.IsBitReversed = true
 	ct.Scale = rlwe.NewScale(1 << 30)
 	ct.LogDimensions = ring.Dimensions{Rows: 0, Cols: logSlots}
+	maintained := level + 1
+	if maintained > 2 {
+		maintained = 2
+	}
 	for d := 0; d <= 1; d++ {
-		for limb, subring := range params.RingQ().SubRings[:2] {
+		for limb, subring := range params.RingQ().SubRings[:maintained] {
 			for i := range ct.Value[d].Coeffs[limb] {
 				value := (seed + uint64(17*d+31*limb+i)) % subring.Modulus
 				ct.Value[d].Coeffs[limb][i] = ring.MForm(value, subring.Modulus, subring.BRedConstant)
 			}
 		}
-		for limb, subring := range params.RingQ().SubRings[2 : level+1] {
-			for i := range ct.Value[d].Coeffs[limb+2] {
-				ct.Value[d].Coeffs[limb+2][i] = ^uint64(0) - seed - uint64(d+limb+i)
-				ct.Value[d].Coeffs[limb+2][i] %= subring.Modulus
+		if level >= 2 {
+			for limb, subring := range params.RingQ().SubRings[2 : level+1] {
+				for i := range ct.Value[d].Coeffs[limb+2] {
+					ct.Value[d].Coeffs[limb+2][i] = ^uint64(0) - seed - uint64(d+limb+i)
+					ct.Value[d].Coeffs[limb+2][i] %= subring.Modulus
+				}
 			}
 		}
 	}
 	return ct
+}
+
+func TestFastPackingLevelZero(t *testing.T) {
+	for _, factorTwo := range []bool{false, true} {
+		t.Run(fmt.Sprintf("factorTwo=%t", factorTwo), func(t *testing.T) {
+			params, n1, _ := fastPackingParameters(t, factorTwo)
+			eval, err := NewFastEvaluator(params)
+			require.NoError(t, err)
+			input := *newFastPackingCiphertext(n1, 0, 1, 901)
+			original := input.CopyNew()
+			packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2([]rlwe.Ciphertext{input})
+			require.NoError(t, err)
+			require.Len(t, packed, 1)
+			if factorTwo {
+				require.NotNil(t, ctxtN1)
+			} else {
+				require.Nil(t, ctxtN1)
+			}
+			unpacked, err := eval.UnpackAndSwitchN2ToN1(packed, ctxtN1, ctxtN2)
+			require.NoError(t, err)
+			require.Len(t, unpacked, 1)
+			require.Equal(t, original.Value[0].Coeffs[0], unpacked[0].Value[0].Coeffs[0])
+		})
+	}
 }
 
 func cloneFastPackingInputs(cts []rlwe.Ciphertext) []rlwe.Ciphertext {

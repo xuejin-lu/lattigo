@@ -46,6 +46,49 @@ func TestFastN1ToN2CoefficientDomain(t *testing.T) {
 	}
 }
 
+func TestFastRingDegreeLevelZero(t *testing.T) {
+	n1, n2 := testFastRingPair(t, 0)
+	for _, expand := range []bool{true, false} {
+		inRing, outRing := n1, n2
+		if !expand {
+			inRing, outRing = n2, n1
+		}
+		in := newFastTestCiphertext(t, inRing, 1, 0)
+		out := newFastTestCiphertext(t, outRing, 1, 0)
+		fillFastCiphertext(in, inRing, 17)
+		in.IsNTT, out.IsNTT = false, false
+		in.IsMontgomery, out.IsMontgomery = false, false
+		if expand {
+			require.NoError(t, FastN1ToN2(n1, n2, in, out))
+		} else {
+			require.NoError(t, FastN2ToN1(n2, n1, in, out))
+		}
+		for d := 0; d <= 1; d++ {
+			if expand {
+				for i, value := range in.Value[d].Coeffs[0] {
+					require.Equal(t, value, out.Value[d].Coeffs[0][2*i])
+					require.Zero(t, out.Value[d].Coeffs[0][2*i+1])
+				}
+			} else {
+				for i, value := range out.Value[d].Coeffs[0] {
+					require.Equal(t, value, in.Value[d].Coeffs[0][2*i])
+				}
+			}
+		}
+	}
+
+	in := newFastTestCiphertext(t, n1, 1, 0)
+	out := newFastTestCiphertext(t, n2, 1, 0)
+	fillFastCiphertext(in, n1, 23)
+	in.IsNTT, out.IsNTT = true, true
+	in.IsMontgomery, out.IsMontgomery = true, true
+	n1.SubRings[0].NTT(in.Value[0].Coeffs[0], in.Value[0].Coeffs[0])
+	n1.SubRings[0].NTT(in.Value[1].Coeffs[0], in.Value[1].Coeffs[0])
+	require.NoError(t, FastN1ToN2(n1, n2, in, out))
+	require.True(t, out.IsNTT)
+	require.True(t, out.IsMontgomery)
+}
+
 func TestFastN2ToN1CoefficientDomain(t *testing.T) {
 	for _, level := range []int{1, 2, 4} {
 		n1, n2 := testFastRingPair(t, level)

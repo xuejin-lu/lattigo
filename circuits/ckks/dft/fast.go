@@ -221,6 +221,7 @@ func setFastOutputDomain(out, reference *rlwe.Ciphertext) {
 	out.IsNTT = reference.IsNTT
 	out.IsMontgomery = reference.IsMontgomery
 	out.IsBatched = reference.IsBatched
+	out.IsBitReversed = reference.IsBitReversed
 }
 
 func copyQ01ForDFT(src, dst ring.Poly) {
