@@ -44,12 +44,24 @@ type Evaluator struct {
 	SkDebug *rlwe.SecretKey
 
 	pool *rlwe.BufferPool
+
+	// fast is populated only by the backend compatibility constructor path.
+	// Standard construction leaves it nil and retains the existing evaluator.
+	fast *FastEvaluator
 }
 
 // NewEvaluator creates a new [Evaluator].
 func NewEvaluator(btpParams Parameters, evk *EvaluationKeys) (eval *Evaluator, err error) {
 
 	eval = &Evaluator{}
+
+	if evk != nil && evk.fastCompatible {
+		fastEval, fastErr := NewFastEvaluator(btpParams)
+		if fastErr != nil {
+			return nil, fastErr
+		}
+		return &Evaluator{Parameters: btpParams, EvaluationKeys: evk, fast: fastEval}, nil
+	}
 
 	paramsN1 := btpParams.ResidualParameters
 	paramsN2 := btpParams.BootstrappingParameters
@@ -169,6 +181,9 @@ func (eval *Evaluator) initialize(btpParams Parameters) (err error) {
 
 // Bootstrap bootstraps a single ciphertext and returns the bootstrapped ciphertext.
 func (eval Evaluator) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if eval.fast != nil {
+		return eval.fast.Bootstrap(ct)
+	}
 	cts := []rlwe.Ciphertext{*ct}
 	cts, err := eval.BootstrapMany(cts)
 	if err != nil {
@@ -179,6 +194,9 @@ func (eval Evaluator) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
 
 // BootstrapMany bootstraps a list of ciphertexts and returns the list of bootstrapped ciphertexts.
 func (eval Evaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {
+	if eval.fast != nil {
+		return eval.fast.BootstrapMany(cts)
+	}
 
 	var err error
 
@@ -237,16 +255,25 @@ func (eval Evaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, e
 
 // Depth returns the multiplicative depth (number of levels consumed) of the bootstrapping circuit.
 func (eval Evaluator) Depth() int {
+	if eval.fast != nil {
+		return eval.fast.Depth()
+	}
 	return eval.BootstrappingParameters.MaxLevel() - eval.ResidualParameters.MaxLevel()
 }
 
 // OutputLevel returns the output level after the evaluation of the bootstrapping circuit.
 func (eval Evaluator) OutputLevel() int {
+	if eval.fast != nil {
+		return eval.fast.OutputLevel()
+	}
 	return eval.ResidualParameters.MaxLevel()
 }
 
 // MinimumInputLevel returns the minimum level at which a ciphertext must be to be bootstrapped.
 func (eval Evaluator) MinimumInputLevel() int {
+	if eval.fast != nil {
+		return eval.fast.MinimumInputLevel()
+	}
 	return eval.BootstrappingParameters.LevelsConsumedPerRescaling()
 }
 

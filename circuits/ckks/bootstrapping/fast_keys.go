@@ -73,6 +73,7 @@ func (p Parameters) GenFastEvaluationKeys(skN1 *rlwe.SecretKey) (btpkeys *Evalua
 		return nil, nil, err
 	}
 	return &EvaluationKeys{
+		fastCompatible: true,
 		EvkN1ToN2: n1n2, EvkN2ToN1: n2n1,
 		EvkRealToCmplx: realToCmplx, EvkCmplxToReal: cmplxToReal,
 		EvkDenseToSparse: denseToSparse, EvkSparseToDense: sparseToDense,

@@ -13,6 +13,10 @@ import (
 // EvaluationKeys is a struct storing the different
 // evaluation keys required by the bootstrapper.
 type EvaluationKeys struct {
+	// fastCompatible is an internal construction marker used by the Fast
+	// backend compatibility path. It is intentionally not exported: frontend
+	// code selects the ordinary bootstrapping API in both backends.
+	fastCompatible bool
 
 	// EvkN1ToN2 is the evaluation key to switch from the residual parameters'
 	// ring degree (N1) to the bootstrapping parameters' ring degree (N2)
@@ -67,6 +71,11 @@ type EvaluationKeys struct {
 //   - !WARNING! The bootstrapping parameters use their own and independent cryptographic parameters (i.e. float.Parameters)
 //     and it is the user's responsibility to ensure that these parameters meet the target security and tweak them if necessary.
 func (p Parameters) GenEvaluationKeys(skN1 *rlwe.SecretKey) (btpkeys *EvaluationKeys, skN2 *rlwe.SecretKey, err error) {
+	if skN1 != nil && p.ResidualParameters.RingType() == ring.Standard &&
+		p.ResidualParameters.MaxLevel() <= 1 && p.BootstrappingParameters.MaxLevel() >= 1 &&
+		p.CircuitOrder == ModUpThenEncode && skN1.LevelP() < 0 {
+		return p.GenFastEvaluationKeys(skN1)
+	}
 
 	var EvkN1ToN2, EvkN2ToN1 *rlwe.EvaluationKey
 	var EvkRealToCmplx *rlwe.EvaluationKey
