@@ -83,3 +83,35 @@ func TestFastEvalModRepeatedEvaluationDoesNotContaminateResults(t *testing.T) {
 		}
 	}
 }
+
+func TestFastEvalModDefaultLikeWrapperScale(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            4,
+		LogQ:            []int{55, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	bootstrapParams := Parameters{
+		BootstrappingParameters: params,
+		Mod1ParametersLiteral: mod1.ParametersLiteral{
+			LevelQ:          9,
+			LogScale:        60,
+			Mod1Type:        mod1.CosDiscrete,
+			LogMessageRatio: 2,
+			K:               16,
+			Mod1Degree:      30,
+			DoubleAngle:     3,
+			Mod1InvDegree:   0,
+		},
+	}
+	eval, err := NewFastEvaluator(bootstrapParams)
+	require.NoError(t, err)
+	input := newFastEvalModInput(params, eval.Mod1Parameters)
+	out, err := eval.EvalMod(input)
+	require.NoError(t, err)
+	require.Equal(t, 1, out.Degree())
+	require.Equal(t, 1, out.Level())
+	require.True(t, out.Scale.Equal(params.DefaultScale()))
+	require.True(t, out.IsNTT)
+	require.True(t, out.IsMontgomery)
+}

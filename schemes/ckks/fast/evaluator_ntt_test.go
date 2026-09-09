@@ -247,6 +247,46 @@ func TestFastEvaluatorScalarMulThenAdd(t *testing.T) {
 	requireQ01Equal(t, nonIntegerWant, nonIntegerAlias)
 }
 
+func TestFastEvaluatorScalarMulThenAddScalePromotion(t *testing.T) {
+	params := testFastCKKSParameters(t)
+	eval := NewEvaluator(params)
+	standard := ckks.NewEvaluator(params, nil)
+
+	for _, tc := range []struct {
+		name        string
+		coefficient complex128
+	}{
+		{name: "integer", coefficient: 3},
+		{name: "noninteger", coefficient: 1.25 - 0.5i},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newNTTFastCiphertext(params, 1, 3, 181)
+			x.Scale = rlwe.NewScale(1 << 35)
+			fastOut := newNTTFastCiphertext(params, 1, 3, 227)
+			fastOut.Scale = rlwe.NewScale(1 << 30)
+			stdLow := fastOut.CopyNew()
+			poisonDormant(fastOut, 401)
+			poisonDormant(stdLow, 401)
+			dormant := cloneDormant(fastOut, 2)
+
+			// Standard MulThenAdd rejects op0.Scale > opOut.Scale. Promote
+			// the reference accumulator first; this is the operation the Fast
+			// branch performs internally on the maintained q0/q1 rows.
+			stdOut := ckks.NewCiphertext(params, 1, 3)
+			stdOut.IsNTT = true
+			stdOut.Scale = x.Scale
+			require.NoError(t, standard.ScaleUp(stdLow, rlwe.NewScale(32), stdOut))
+			require.NoError(t, standard.MulThenAdd(x, tc.coefficient, stdOut))
+
+			require.NoError(t, eval.MulThenAdd(x, tc.coefficient, fastOut))
+			requireQ01Equal(t, stdOut, fastOut)
+			require.Equal(t, stdOut.Scale, fastOut.Scale)
+			require.Equal(t, stdOut.Level(), fastOut.Level())
+			require.Equal(t, dormant, cloneDormant(fastOut, 2))
+		})
+	}
+}
+
 func TestFastEvaluatorScalarAndPlaintextMul(t *testing.T) {
 	params := testFastCKKSParameters(t)
 	eval := NewEvaluator(params)
