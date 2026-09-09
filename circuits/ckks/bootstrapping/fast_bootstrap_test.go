@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/tuneinsight/lattigo/v6/circuits/ckks/dft"
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/mod1"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
@@ -20,6 +21,10 @@ func fastBootstrapParameters(t testing.TB, logSlots int, factorTwo bool) (Parame
 }
 
 func fastBootstrapParametersAt(t testing.TB, logN, logSlots int, factorTwo bool) (Parameters, ckks.Parameters) {
+	return fastBootstrapParametersProfileAt(t, logN, logSlots, factorTwo, 4, 30, 2)
+}
+
+func fastBootstrapParametersProfileAt(t testing.TB, logN, logSlots int, factorTwo bool, k, mod1Degree, doubleAngle int) (Parameters, ckks.Parameters) {
 	t.Helper()
 	residualLogN := logN
 	if factorTwo {
@@ -45,9 +50,9 @@ func fastBootstrapParametersAt(t testing.TB, logN, logSlots int, factorTwo bool)
 		SlotsToCoeffsFactorizationDepthAndLogScales: factorization,
 		CoeffsToSlotsFactorizationDepthAndLogScales: factorization,
 		EvalModLogScale:       utils.Pointy(45),
-		Mod1Degree:            utils.Pointy(30),
-		DoubleAngle:           utils.Pointy(2),
-		K:                     utils.Pointy(4),
+		Mod1Degree:            utils.Pointy(mod1Degree),
+		DoubleAngle:           utils.Pointy(doubleAngle),
+		K:                     utils.Pointy(k),
 		LogMessageRatio:       utils.Pointy(2),
 		Mod1InvDegree:         &zero,
 		EphemeralSecretWeight: &zero,
@@ -183,12 +188,53 @@ func TestFastBootstrapLevelOneInput(t *testing.T) {
 	params.ResidualParameters = residual
 	eval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
-	ct := fastBootstrapEncodedCiphertextAtLevel(t, residual, 1, 2, []complex128{0.125 + 0.25i, -0.25 + 0.0625i, 0.375 - 0.125i, -0.0625 - 0.1875i})
+	values := []complex128{0.125 + 0.25i, -0.25 + 0.0625i, 0.375 - 0.125i, -0.0625 - 0.1875i}
+	ct := fastBootstrapEncodedCiphertextAtLevel(t, residual, 1, 2, values)
 	source := ct.CopyNew()
 	out, err := eval.Bootstrap(ct)
 	require.NoError(t, err)
 	require.Equal(t, residual.MaxLevel(), out.Level())
 	require.Equal(t, source.Value[0].Coeffs[:2], ct.Value[0].Coeffs[:2])
+	fastBootstrapDecode(t, residual, out, values)
+}
+
+func TestFastBootstrapFullSlotRealImagEndToEnd(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 3, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	values := []complex128{
+		0.03125 + 0.0625i,
+		-0.0625 + 0.09375i,
+		0.125 - 0.03125i,
+		-0.15625 - 0.125i,
+		0.1875 + 0.15625i,
+		-0.21875 + 0.1875i,
+		0.25 - 0.21875i,
+		-0.28125 - 0.25i,
+	}
+	ct := fastBootstrapEncodedCiphertext(t, residual, 3, values)
+	require.NoError(t, eval.ensureFastBootstrapCircuit())
+
+	// Exercise the same public-input boundary as Bootstrap before the public
+	// call and verify that the full-slot C2S branch produces both outputs.
+	coreInput := ct.CopyNew()
+	coreInput, _, err = eval.ScaleDown(coreInput)
+	require.NoError(t, err)
+	coreInput, err = eval.ModUp(coreInput)
+	require.NoError(t, err)
+	ctReal, ctImag, err := eval.DFTEvaluator.CoeffsToSlotsNew(coreInput, eval.C2SDFTMatrix)
+	require.NoError(t, err)
+	require.NotNil(t, ctReal)
+	require.NotNil(t, ctImag)
+
+	out, err := eval.Bootstrap(ct)
+	require.NoError(t, err)
+	require.True(t, out.IsNTT)
+	require.False(t, out.IsMontgomery)
+	require.Equal(t, residual.MaxLevel(), out.Level())
+	require.True(t, out.Scale.Equal(residual.DefaultScale()))
+	fastBootstrapDecode(t, residual, out, values)
 }
 
 func TestFastBootstrapSparseRepackedPath(t *testing.T) {
@@ -208,19 +254,77 @@ func TestFastBootstrapManyOddCount(t *testing.T) {
 	params.ResidualParameters = residual
 	eval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
-	cts := make([]rlwe.Ciphertext, 3)
+	values := make([][]complex128, 3)
+	cts := make([]rlwe.Ciphertext, len(values))
 	for i := range cts {
-		values := []complex128{complex(0.05*float64(i+1), 0.01), complex(-0.04*float64(i+1), -0.02), complex(0.03, 0.05), complex(-0.02, -0.04)}
-		cts[i] = *fastBootstrapEncodedCiphertext(t, residual, 2, values)
+		values[i] = []complex128{complex(0.05*float64(i+1), 0.01), complex(-0.04*float64(i+1), -0.02), complex(0.03+0.01*float64(i), 0.05), complex(-0.02, -0.04-0.01*float64(i))}
+		cts[i] = *fastBootstrapEncodedCiphertext(t, residual, 2, values[i])
 	}
 	outputs, err := eval.BootstrapMany(cts)
 	require.NoError(t, err)
 	require.Len(t, outputs, 3)
-	for _, out := range outputs {
+	for i, out := range outputs {
 		require.Equal(t, 2, out.LogSlots())
 		require.False(t, out.IsMontgomery)
 		require.Equal(t, residual.MaxLevel(), out.Level())
+		fastBootstrapDecode(t, residual, &out, values[i])
 	}
+	other := outputs[1].Value[0].Coeffs[0][0]
+	outputs[0].Value[0].Coeffs[0][0]++
+	require.Equal(t, other, outputs[1].Value[0].Coeffs[0][0], "BootstrapMany outputs must not alias")
+}
+
+func TestFastBootstrapOrdinaryDecryptorDecode(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	values := []complex128{0.125 + 0.25i, -0.25 + 0.0625i, 0.375 - 0.125i, -0.0625 - 0.1875i}
+	input := fastBootstrapEncodedCiphertext(t, residual, 2, values)
+	out, err := eval.Bootstrap(input)
+	require.NoError(t, err)
+
+	zeroSK := rlwe.NewSecretKey(residual)
+	zeroSK.Value.Q.Zero()
+	decryptor := rlwe.NewDecryptor(residual, zeroSK)
+	plaintext := decryptor.DecryptNew(out)
+	decoded := make([]complex128, len(values))
+	require.NoError(t, ckks.NewEncoder(residual).Decode(plaintext, decoded))
+	for i := range values {
+		require.InDelta(t, real(values[i]), real(decoded[i]), 1e-2, "real slot %d", i)
+		require.InDelta(t, imag(values[i]), imag(decoded[i]), 1e-2, "imag slot %d", i)
+	}
+}
+
+func TestFastBootstrapPlanningMatchesStandard(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	require.NoError(t, fastEval.ensureFastBootstrapCircuit())
+
+	sk := rlwe.NewKeyGenerator(params.BootstrappingParameters).GenSecretKeyNew()
+	keys, _, err := params.GenEvaluationKeys(sk)
+	require.NoError(t, err)
+	standardEval, err := NewEvaluator(params, keys)
+	require.NoError(t, err)
+
+	require.Equal(t, standardEval.Mod1Parameters.LevelQ, fastEval.Mod1Parameters.LevelQ)
+	require.Equal(t, standardEval.Mod1Parameters.QDiff, fastEval.Mod1Parameters.QDiff)
+	for _, matrices := range [][2]dft.Matrix{{standardEval.C2SDFTMatrix, fastEval.C2SDFTMatrix}, {standardEval.S2CDFTMatrix, fastEval.S2CDFTMatrix}} {
+		require.Equal(t, matrices[0].LevelQ, matrices[1].LevelQ)
+		require.Equal(t, matrices[0].Levels, matrices[1].Levels)
+		require.Equal(t, matrices[0].LogSlots, matrices[1].LogSlots)
+		require.NotNil(t, matrices[0].Scaling)
+		require.NotNil(t, matrices[1].Scaling)
+		require.Zero(t, matrices[0].Scaling.Cmp(matrices[1].Scaling))
+	}
+	require.NotNil(t, standardEval.Parameters.CoeffsToSlotsParameters.Scaling)
+	require.NotNil(t, fastEval.Parameters.CoeffsToSlotsParameters.Scaling)
+	require.Zero(t, standardEval.Parameters.CoeffsToSlotsParameters.Scaling.Cmp(fastEval.Parameters.CoeffsToSlotsParameters.Scaling))
+	require.NotNil(t, standardEval.Parameters.SlotsToCoeffsParameters.Scaling)
+	require.NotNil(t, fastEval.Parameters.SlotsToCoeffsParameters.Scaling)
+	require.Zero(t, standardEval.Parameters.SlotsToCoeffsParameters.Scaling.Cmp(fastEval.Parameters.SlotsToCoeffsParameters.Scaling))
 }
 
 func TestFastBootstrapMatchesStandardDecodedReference(t *testing.T) {
