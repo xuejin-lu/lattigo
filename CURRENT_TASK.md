@@ -1,4 +1,4 @@
 # Current Task
 
-Task: Implement `specs/009-P-end-to-end-fast-bootstrap-review-fix.md`
+Task: Implement `specs/010-final-fast-bootstrap-profiling.md`
 Status: READY
