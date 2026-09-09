@@ -80,7 +80,7 @@ func (eval *FastEvaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *
 	r := params.RingQ()
 
 	for ctIn.Level() != 0 && checkMessageRatio(ctIn, eval.Mod1Parameters.MessageRatio(), r) {
-		ctIn.Resize(ctIn.Degree(), ctIn.Level()-1)
+		fastckks.Resize(ctIn, ctIn.Degree(), ctIn.Level()-1, params.N())
 	}
 
 	currentMessageRatio := rlwe.NewScale(r.ModulusAtLevel[ctIn.Level()])

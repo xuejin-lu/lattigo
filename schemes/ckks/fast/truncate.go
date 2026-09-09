@@ -43,7 +43,7 @@ func FastTruncateDegree2To1(ctIn, ctOut *rlwe.Ciphertext) error {
 
 	// Resize only drops the c2 component. It does not inspect any polynomial
 	// coefficients, which makes this safe when ctIn and ctOut alias.
-	ctOut.Resize(1, ctIn.Level())
+	Resize(ctOut, 1, ctIn.Level(), ctIn.N())
 	if ctOut != ctIn {
 		copyQ01(ctIn.Value[0], ctOut.Value[0])
 		copyQ01(ctIn.Value[1], ctOut.Value[1])

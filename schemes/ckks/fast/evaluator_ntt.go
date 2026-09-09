@@ -7,7 +7,6 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
-	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"github.com/tuneinsight/lattigo/v6/utils"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
@@ -30,7 +29,7 @@ func (eval *Evaluator) AddNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlwe.Cip
 	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
 		degree, level = utils.Max(degree, el.Degree()), utils.Min(level, el.Level())
 	}
-	out := ckks.NewCiphertext(eval.Parameters, degree, level)
+	out := NewCiphertext(eval.Parameters, degree, level)
 	return out, eval.Add(op0, op1, out)
 }
 
@@ -44,7 +43,7 @@ func (eval *Evaluator) SubNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlwe.Cip
 	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
 		degree, level = utils.Max(degree, el.Degree()), utils.Min(level, el.Level())
 	}
-	out := ckks.NewCiphertext(eval.Parameters, degree, level)
+	out := NewCiphertext(eval.Parameters, degree, level)
 	return out, eval.Sub(op0, op1, out)
 }
 
@@ -60,7 +59,7 @@ func (eval *Evaluator) addSub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlw
 		return err
 	}
 	level := utils.Min(op0.Level(), opOut.Level())
-	opOut.Resize(op0.Degree(), level)
+	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	if op0 != opOut {
 		for d := range op0.Value {
@@ -91,7 +90,7 @@ func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[rin
 	}
 	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
 	maxDegree, minDegree := utils.Max(op0.Degree(), op1.Degree()), utils.Min(op0.Degree(), op1.Degree())
-	opOut.Resize(maxDegree, level)
+	Resize(opOut, maxDegree, level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	opOut.LogDimensions.Rows = utils.Max(op0.LogDimensions.Rows, op1.LogDimensions.Rows)
 	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
@@ -141,7 +140,7 @@ func (eval *Evaluator) MulNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlwe.Cip
 	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
 		degree, level = op0.Degree()+el.Degree(), utils.Min(level, el.Level())
 	}
-	out := ckks.NewCiphertext(eval.Parameters, degree, level)
+	out := NewCiphertext(eval.Parameters, degree, level)
 	return out, eval.Mul(op0, op1, out)
 }
 
@@ -161,7 +160,7 @@ func (eval *Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlw
 	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
 		level = utils.Min(level, el.Level())
 	}
-	out := ckks.NewCiphertext(eval.Parameters, 1, level)
+	out := NewCiphertext(eval.Parameters, 1, level)
 	return out, eval.MulRelin(op0, op1, out)
 }
 
@@ -192,7 +191,7 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 		if !relin {
 			eval.pointMul(op0.Value[1], op1.Value[1], t2, op0.IsMontgomery)
 		}
-		opOut.Resize(degree, level)
+		Resize(opOut, degree, level, eval.Parameters.N())
 		copyQ01(t0, opOut.Value[0])
 		copyQ01(t1, opOut.Value[1])
 		if !relin {
@@ -209,7 +208,7 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 		for d := range ct {
 			eval.pointMul(pt, ct[d], eval.nttScratch[d], op0.IsMontgomery)
 		}
-		opOut.Resize(degree, level)
+		Resize(opOut, degree, level, eval.Parameters.N())
 		for d := range ct {
 			copyQ01(eval.nttScratch[d], opOut.Value[d])
 		}
@@ -250,7 +249,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		if !opOut.Scale.Equal(op0.Scale.Mul(el.El().Scale)) {
 			return errors.New("Fast MulThenAdd RLWE requires output scale equal to product scale")
 		}
-		opOut.Resize(opOut.Degree(), utils.Min(utils.Min(op0.Level(), el.Level()), opOut.Level()))
+		Resize(opOut, opOut.Degree(), utils.Min(utils.Min(op0.Level(), el.Level()), opOut.Level()), eval.Parameters.N())
 		return eval.mulElementThenAdd(op0, el.El(), opOut)
 	}
 	c, err := eval.scalar(op1)
@@ -369,7 +368,7 @@ func (eval *Evaluator) mulScalar(op0 *rlwe.Ciphertext, c *bignum.Complex, out *r
 func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex, scale rlwe.Scale, out *rlwe.Ciphertext) error {
 	level := utils.Min(op0.Level(), out.Level())
 	values := eval.scalarNTT(c, &scale.Value, false)
-	out.Resize(op0.Degree(), level)
+	Resize(out, op0.Degree(), level, eval.Parameters.N())
 	for d := range op0.Value {
 		for limb := 0; limb < 2; limb++ {
 			s := eval.Parameters.RingQ().SubRings[limb]

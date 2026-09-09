@@ -81,7 +81,7 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	// Resize only changes level/degree metadata and allocation. It does not
 	// cause dormant limbs to be read; the arithmetic below explicitly touches
 	// q0 and q1 only.
-	opOut.Resize(maxDegree, level)
+	Resize(opOut, maxDegree, level, ringQ.N())
 	*opOut.MetaData = *op0.MetaData
 	opOut.Scale = op0.Scale
 	opOut.IsNTT = op0.IsNTT

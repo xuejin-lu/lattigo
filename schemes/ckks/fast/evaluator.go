@@ -74,7 +74,7 @@ func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.In
 	if opOut.Level() < level {
 		level = opOut.Level()
 	}
-	opOut.Resize(op0.Degree(), level)
+	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	ringQ := eval.Parameters.RingQ()
 	var scalarMontgomery [2]uint64
@@ -154,7 +154,7 @@ func (eval *Evaluator) RotateNew(ctIn *rlwe.Ciphertext, k int) (*rlwe.Ciphertext
 	if eval == nil || ctIn == nil {
 		return nil, errors.New("evaluator and ciphertext cannot be nil")
 	}
-	ctOut := ckks.NewCiphertext(eval.Parameters, 1, ctIn.Level())
+	ctOut := NewCiphertext(eval.Parameters, 1, ctIn.Level())
 	ctOut.IsNTT = ctIn.IsNTT
 	ctOut.IsMontgomery = ctIn.IsMontgomery
 	return ctOut, eval.Rotate(ctIn, ctOut, k)
@@ -178,7 +178,7 @@ func (eval *Evaluator) ConjugateNew(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 	if eval == nil || ctIn == nil {
 		return nil, errors.New("evaluator and ciphertext cannot be nil")
 	}
-	ctOut := ckks.NewCiphertext(eval.Parameters, 1, ctIn.Level())
+	ctOut := NewCiphertext(eval.Parameters, 1, ctIn.Level())
 	ctOut.IsNTT = ctIn.IsNTT
 	ctOut.IsMontgomery = ctIn.IsMontgomery
 	return ctOut, eval.Conjugate(ctIn, ctOut)

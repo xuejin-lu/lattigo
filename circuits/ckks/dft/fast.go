@@ -35,8 +35,8 @@ func NewFastEvaluator(params ckks.Parameters) *FastEvaluator {
 		parameters: params,
 		eval:       fastckks.NewEvaluator(params),
 		scratch: fastDFTScratch{
-			copy: ckks.NewCiphertext(params, 1, params.MaxLevel()),
-			tmp:  ckks.NewCiphertext(params, 1, params.MaxLevel()),
+			copy: fastckks.NewCiphertext(params, 1, params.MaxLevel()),
+			tmp:  fastckks.NewCiphertext(params, 1, params.MaxLevel()),
 		},
 	}
 }
@@ -49,10 +49,10 @@ func (eval *FastEvaluator) CoeffsToSlotsNew(ctIn *rlwe.Ciphertext, matrices Matr
 	if err = eval.validateInput(ctIn); err != nil {
 		return nil, nil, err
 	}
-	ctReal = ckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
+	ctReal = fastckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
 	setFastOutputDomain(ctReal, ctIn)
 	if matrices.LogSlots == eval.parameters.LogMaxSlots() {
-		ctImag = ckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
+		ctImag = fastckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
 		setFastOutputDomain(ctImag, ctIn)
 	}
 	err = eval.CoeffsToSlots(ctIn, matrices, ctReal, ctImag)
@@ -80,18 +80,18 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix,
 		if err = eval.dft(zV, matrices, zV); err != nil {
 			return fmt.Errorf("cannot Fast CoeffsToSlots DFT: %w", err)
 		}
-		ctReal.Resize(1, zV.Level())
+		fastckks.Resize(ctReal, 1, zV.Level(), eval.parameters.N())
 		if err = eval.eval.Conjugate(zV, ctReal); err != nil {
 			return fmt.Errorf("cannot Fast CoeffsToSlots Conjugate: %w", err)
 		}
 
 		var tmp *rlwe.Ciphertext
 		if ctImag != nil {
-			ctImag.Resize(1, zV.Level())
+			fastckks.Resize(ctImag, 1, zV.Level(), eval.parameters.N())
 			tmp = ctImag
 		} else {
 			tmp = eval.scratch.tmp
-			tmp.Resize(1, zV.Level())
+			fastckks.Resize(tmp, 1, zV.Level(), eval.parameters.N())
 			setFastOutputDomain(tmp, zV)
 		}
 		if err = eval.eval.Sub(zV, ctReal, tmp); err != nil {
@@ -127,7 +127,7 @@ func (eval *FastEvaluator) SlotsToCoeffsNew(ctReal, ctImag *rlwe.Ciphertext, mat
 			return nil, err
 		}
 	}
-	opOut := ckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
+	opOut := fastckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
 	setFastOutputDomain(opOut, ctReal)
 	return opOut, eval.SlotsToCoeffs(ctReal, ctImag, matrices, opOut)
 }
@@ -193,7 +193,7 @@ func (eval *FastEvaluator) copyActive(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 		return nil, err
 	}
 	out := eval.scratch.copy
-	out.Resize(1, ct.Level())
+	fastckks.Resize(out, 1, ct.Level(), eval.parameters.N())
 	*out.MetaData = *ct.MetaData
 	for d := 0; d <= 1; d++ {
 		copyQ01ForDFT(ct.Value[d], out.Value[d])

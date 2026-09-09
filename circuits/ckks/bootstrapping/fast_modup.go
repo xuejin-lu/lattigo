@@ -132,7 +132,10 @@ func restoreFastModUpLevel(poly *ring.Poly, level, N int) error {
 	} else {
 		poly.Coeffs = poly.Coeffs[:level+1]
 	}
-	for i := 1; i <= level; i++ {
+	// Fast ModUp only restores the maintained q0/q1 rows. Higher logical
+	// rows remain nil so the bootstrap basis raise does not materialize the
+	// dormant full-RNS storage.
+	for i := 1; i <= level && i < 2; i++ {
 		if len(poly.Coeffs[i]) != N {
 			poly.Coeffs[i] = make([]uint64, N)
 		}

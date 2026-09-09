@@ -92,7 +92,7 @@ func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.Li
 	}
 
 	level := ringQ.Level()
-	ctOut.Resize(1, level)
+	Resize(ctOut, 1, level, eval.Parameters.N())
 	*ctOut.MetaData = *ctIn.MetaData
 	ctOut.Scale = ctIn.Scale.Mul(matrix.Scale)
 	copyQ01(acc0, ctOut.Value[0])

@@ -142,7 +142,7 @@ func validateFastPackingSlice(cts []rlwe.Ciphertext, params ckks.Parameters) err
 }
 
 func copyFastPackingCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) rlwe.Ciphertext {
-	dst := ckks.NewCiphertext(params, 1, src.Level())
+	dst := fastckks.NewCiphertext(params, 1, src.Level())
 	*dst.MetaData = *src.MetaData
 	maintained := maintainedLimbs(src.Level())
 	for d := 0; d <= 1; d++ {
@@ -295,7 +295,7 @@ func (eval *FastEvaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ci
 			return nil, nil, nil, fmt.Errorf("cannot PackAndSwitchN1ToN2: PackN1: %w", err)
 		}
 		for i := range cts {
-			out := ckks.NewCiphertext(paramsN2, 1, cts[i].Level())
+			out := fastckks.NewCiphertext(paramsN2, 1, cts[i].Level())
 			out.IsNTT = cts[i].IsNTT
 			out.IsMontgomery = cts[i].IsMontgomery
 			if err := fastckks.FastN1ToN2(paramsN1.RingQ().AtLevel(cts[i].Level()), paramsN2.RingQ().AtLevel(cts[i].Level()), &cts[i], out); err != nil {
@@ -345,7 +345,7 @@ func (eval *FastEvaluator) UnpackAndSwitchN2ToN1(cts []rlwe.Ciphertext, ctxtN1, 
 		paramsN1 := eval.Parameters.ResidualParameters
 		paramsN2 := eval.Parameters.BootstrappingParameters
 		for i := range ctsOut {
-			out := ckks.NewCiphertext(paramsN1, 1, ctsOut[i].Level())
+			out := fastckks.NewCiphertext(paramsN1, 1, ctsOut[i].Level())
 			out.IsNTT = ctsOut[i].IsNTT
 			out.IsMontgomery = ctsOut[i].IsMontgomery
 			if err := fastckks.FastN2ToN1(paramsN2.RingQ().AtLevel(ctsOut[i].Level()), paramsN1.RingQ().AtLevel(ctsOut[i].Level()), &ctsOut[i], out); err != nil {

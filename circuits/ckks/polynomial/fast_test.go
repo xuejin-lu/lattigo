@@ -282,7 +282,7 @@ func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
 			require.Equal(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
 		}
 		for limb := 2; limb <= public.Level(); limb++ {
-			require.NotEqual(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
+			require.Empty(t, public.Value[d].Coeffs[limb])
 		}
 	}
 }

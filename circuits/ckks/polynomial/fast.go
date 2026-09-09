@@ -145,7 +145,7 @@ type fastBabyStep struct {
 
 func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Ciphertext) {
 	ws.x1 = ws.ensureCiphertext(params, ws.x1, 1, input.Level())
-	copyMaintained(input, ws.x1)
+	copyMaintained(params, input, ws.x1)
 	for key := range ws.powers {
 		delete(ws.powers, key)
 	}
@@ -154,9 +154,9 @@ func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Cip
 
 func (ws *fastPolynomialWorkspace) ensureCiphertext(params ckks.Parameters, ct *rlwe.Ciphertext, degree, level int) *rlwe.Ciphertext {
 	if ct == nil {
-		ct = ckks.NewCiphertext(params, degree, level)
+		ct = fastckks.NewCiphertext(params, degree, level)
 	} else {
-		ct.Resize(degree, level)
+		fastckks.Resize(ct, degree, level, params.N())
 	}
 	return ct
 }
@@ -439,8 +439,8 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	return nil
 }
 
-func copyMaintained(src, dst *rlwe.Ciphertext) {
-	dst.Resize(1, src.Level())
+func copyMaintained(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
+	fastckks.Resize(dst, 1, src.Level(), params.N())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
@@ -488,7 +488,7 @@ func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fast
 	if err := eval.Sub(ws.scaleScratch, sub, ws.scaleScratch); err != nil {
 		return err
 	}
-	copyMaintainedElement(ws.scaleScratch, out)
+	copyMaintainedElement(params, ws.scaleScratch, out)
 	return nil
 }
 
@@ -528,12 +528,12 @@ func (ws *fastPolynomialWorkspace) addAligned(params ckks.Parameters, eval *fast
 	if err := eval.Add(ws.scaleScratch, a, ws.scaleScratch); err != nil {
 		return err
 	}
-	copyMaintainedElement(ws.scaleScratch, b)
+	copyMaintainedElement(params, ws.scaleScratch, b)
 	return nil
 }
 
-func copyMaintainedElement(src, dst *rlwe.Ciphertext) {
-	dst.Resize(src.Degree(), src.Level())
+func copyMaintainedElement(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
+	fastckks.Resize(dst, src.Degree(), src.Level(), params.N())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
@@ -545,11 +545,11 @@ func copyMaintainedElement(src, dst *rlwe.Ciphertext) {
 	}
 }
 
-// cloneMaintainedResult creates an independently-owned public ciphertext
-// without reading dormant q2...qL rows from the Fast workspace.
+// cloneMaintainedResult creates an independently-owned Fast ciphertext
+// without reading or materializing dormant q2...qL rows from the workspace.
 func cloneMaintainedResult(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Ciphertext {
-	dst := ckks.NewCiphertext(params, src.Degree(), src.Level())
-	copyMaintainedElement(src, dst)
+	dst := fastckks.NewCiphertext(params, src.Degree(), src.Level())
+	copyMaintainedElement(params, src, dst)
 	return dst
 }
 

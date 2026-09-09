@@ -146,7 +146,7 @@ func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext) error {
 // ciphertext remains structurally compatible at the logical input level, but
 // dormant higher rows are never read from the Fast input.
 func cloneFastCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Ciphertext {
-	dst := ckks.NewCiphertext(params, 1, src.Level())
+	dst := fastckks.NewCiphertext(params, 1, src.Level())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery

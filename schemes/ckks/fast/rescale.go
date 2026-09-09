@@ -120,7 +120,7 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 
 	targetLevel := op0.Level() - nbRescales
 	if op0 != opOut {
-		opOut.Resize(op0.Degree(), targetLevel)
+		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
 	}
 
 	ringQ := eval.Parameters.RingQ()
@@ -150,7 +150,7 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 		*opOut.MetaData = *op0.MetaData
 		opOut.Scale = op0.Scale.Div(rlwe.NewScale(ringQ.SubRings[1].Modulus))
 		if op0 == opOut {
-			opOut.Resize(op0.Degree(), 0)
+			Resize(opOut, op0.Degree(), 0, eval.Parameters.N())
 		}
 		return nil
 	}
@@ -200,7 +200,7 @@ func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlw
 		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(ringQ.SubRings[op0.Level()-step].Modulus))
 	}
 	if op0 == opOut {
-		opOut.Resize(op0.Degree(), targetLevel)
+		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
 	}
 	return nil
 }
