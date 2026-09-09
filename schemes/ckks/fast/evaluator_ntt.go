@@ -287,7 +287,36 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 	} else if cmp < 0 {
 		scale = opOut.Scale.Div(op0.Scale)
 	} else {
-		return errors.New("Fast MulThenAdd does not support op0.Scale > opOut.Scale")
+		// Promote the accumulator to the term scale before the fused add.
+		// Mod1's Standard target-scale schedule can produce a higher-scale
+		// power term; multiplying the maintained residues and updating the
+		// metadata preserves the represented value without a level transition.
+		ratio := op0.Scale.Div(opOut.Scale).BigInt()
+		if ratio.Sign() <= 0 {
+			return errors.New("invalid Fast MulThenAdd scale promotion ratio")
+		}
+		if err := eval.MulIntegerMaintained(opOut, ratio, opOut); err != nil {
+			return err
+		}
+		opOut.Scale = op0.Scale
+		if c.IsInt() {
+			scale = rlwe.NewScale(1)
+		} else {
+			if op0 == opOut {
+				for d := range op0.Value {
+					copyQ01(op0.Value[d], eval.nttScratch[d])
+				}
+				source = eval.nttScratch[:len(op0.Value)]
+			}
+			scale, err = eval.coefficientScale(level)
+			if err != nil {
+				return err
+			}
+			if err = eval.mulScalarAtScale(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut); err != nil {
+				return err
+			}
+			opOut.Scale = opOut.Scale.Mul(scale)
+		}
 	}
 	values := eval.scalarNTT(c, &scale.Value, false)
 	for d := range source {

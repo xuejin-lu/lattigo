@@ -6,6 +6,7 @@ import (
 	"math/big"
 
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/mod1"
+	ckkspolynomial "github.com/tuneinsight/lattigo/v6/circuits/ckks/polynomial"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
@@ -16,9 +17,11 @@ import (
 // ScaleDown and the Stage-A ModUp boundary are implemented here; full
 // Bootstrap orchestration remains a future stage.
 type FastEvaluator struct {
-	Parameters     Parameters
-	FastCKKS       *fastckks.Evaluator
-	Mod1Parameters mod1.Parameters
+	Parameters          Parameters
+	FastCKKS            *fastckks.Evaluator
+	Mod1Parameters      mod1.Parameters
+	PolynomialEvaluator *ckkspolynomial.FastEvaluator
+	Mod1Evaluator       *mod1.FastEvaluator
 }
 
 // NewFastEvaluator creates the Fast ScaleDown boundary without constructing
@@ -27,13 +30,32 @@ func NewFastEvaluator(params Parameters) (*FastEvaluator, error) {
 	if params.BootstrappingParameters.RingType() != ring.Standard {
 		return nil, fmt.Errorf("Fast Bootstrap ScaleDown requires the Standard ring")
 	}
+	fastEval := fastckks.NewEvaluator(params.BootstrappingParameters)
+	literal := params.Mod1ParametersLiteral
+	var mod1Params mod1.Parameters
+	if literal.K != 0 || literal.Mod1Degree != 0 || literal.DoubleAngle != 0 || literal.Mod1InvDegree != 0 {
+		var err error
+		mod1Params, err = mod1.NewParametersFromLiteral(params.BootstrappingParameters, literal)
+		if err != nil {
+			return nil, fmt.Errorf("cannot construct Fast Mod1 parameters: %w", err)
+		}
+	} else {
+		// The existing ScaleDown-only boundary is also used with a deliberately
+		// minimal literal that has no EvalMod polynomial configuration. Preserve
+		// that narrow construction for callers that do not request EvalMod.
+		mod1Params = mod1.Parameters{LogDefaultScale: literal.LogScale, LogMessageRatio: literal.LogMessageRatio}
+	}
+	polyEval := ckkspolynomial.NewFastEvaluator(params.BootstrappingParameters, fastEval)
+	var mod1Eval *mod1.FastEvaluator
+	if len(mod1Params.Mod1Poly.Coeffs) != 0 {
+		mod1Eval = mod1.NewFastEvaluator(fastEval, polyEval, mod1Params)
+	}
 	return &FastEvaluator{
-		Parameters: params,
-		FastCKKS:   fastckks.NewEvaluator(params.BootstrappingParameters),
-		Mod1Parameters: mod1.Parameters{
-			LogDefaultScale: params.Mod1ParametersLiteral.LogScale,
-			LogMessageRatio: params.Mod1ParametersLiteral.LogMessageRatio,
-		},
+		Parameters:          params,
+		FastCKKS:            fastEval,
+		Mod1Parameters:      mod1Params,
+		PolynomialEvaluator: polyEval,
+		Mod1Evaluator:       mod1Eval,
 	}, nil
 }
 
