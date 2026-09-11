@@ -183,19 +183,31 @@ Chebyshev power generation has an additional capacity constraint. q0/q1
 centered reconstruction determines a unique centered integer only while its
 magnitude is below `q0*q1/2`; the high-scale Standard ordering is therefore
 not automatically valid for the two-limb Fast backend. When an operation
-creates a value beyond that range, it must reduce scale before adding or
-subtracting a correction term when the algebra permits. Fast Chebyshev power
-generation consequently shifts the planner-required Rescale to an independently
-owned maintained copy of one operand before multiplication, so the unsafe
-high-scale product is never formed. The operand is structurally aligned to the
-exact common logical level before Rescale; the deterministic choice prefers the
-larger Scale and uses the right operand on ties. The recurrence correction is
-then applied at the already-rescaled product scale, for both the scalar-one
-and generated-power correction cases. The final logical Level, Scale, and
-single rescale depth remain equivalent to the original post-product schedule,
-and stored power-basis operands remain immutable with respect to this
-pre-Rescale step. This is not a universal theorem for arbitrary Fast CKKS
-multiplication outside the tested polynomial surface.
+creates a value beyond that range, one-sided pre-Rescale is unsuitable when
+the operand scale is only about the rescale divisor because it collapses that
+operand's precision. For the bounded Fast polynomial surface, high-scale
+power generation instead uses independently owned maintained copies of both
+operands:
+
+```text
+left'  = Rescale(m1 * left)
+right' = Rescale(m2 * right)
+out    = left' * right'
+```
+
+The factors are deterministic, modulus-derived, content-independent, and
+chosen near `sqrt(q_L)`. The balanced branch is supported when one modulus is
+consumed per Rescale and both predicted post-Rescale operand scales remain at
+least `2^20`. It performs two physical Rescale operations but consumes only
+one logical level. Low-scale inputs retain the established post-product
+Rescale schedule when that precision floor is not met. Before correction, the
+actual product Scale is checked with CKKS `Scale.InDelta` semantics against
+the exact old planner target and is then normalized to that target; metadata
+is never silently relabeled after a failed closeness check. The recurrence
+correction is applied at the normalized product scale for both the scalar-one
+and generated-power correction cases. Stored power-basis operands remain
+immutable and q2+ rows remain dormant. This is a bounded Fast polynomial rule,
+not a universal theorem for arbitrary Fast CKKS multiplication.
 
 ### 5.4 Target parameter profile
 

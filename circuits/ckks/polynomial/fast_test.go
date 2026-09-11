@@ -474,7 +474,7 @@ func TestFastPolynomialFormalScaleT3CapacitySafe(t *testing.T) {
 	}
 }
 
-func TestFastPolynomialPreRescaleLazyMetadata(t *testing.T) {
+func TestFastPolynomialBalancedLazyMetadata(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            6,
 		LogQ:            []int{55, 39, 39, 39, 39, 39},
@@ -494,6 +494,104 @@ func TestFastPolynomialPreRescaleLazyMetadata(t *testing.T) {
 	wantScale = wantScale.Div(rlwe.NewScale(params.Q()[input.Level()]))
 	wantScale = wantScale.Div(rlwe.NewScale(params.Q()[input.Level()-1]))
 	require.True(t, got.Scale.Equal(wantScale), "unexpected lazy T3 scale: got=%v want=%v", got.Scale.Float64(), wantScale.Float64())
+}
+
+func TestBalancedFactorPairDeterministic(t *testing.T) {
+	formalQ := uint64(1152921504607191041)
+	factors, err := balancedFactorPair(formalQ)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1073741824), factors.left)
+	require.Equal(t, uint64(1073741824), factors.right)
+
+	for _, q := range []uint64{(uint64(1) << 60) - 33, (uint64(1) << 60) + 344065, (uint64(1) << 61) - 12345} {
+		factors, err := balancedFactorPair(q)
+		require.NoError(t, err)
+		product := new(big.Int).Mul(new(big.Int).SetUint64(factors.left), new(big.Int).SetUint64(factors.right))
+		require.True(t, rlwe.NewScale(product).InDelta(rlwe.NewScale(q), balancedScaleToleranceBits))
+	}
+}
+
+func TestBalancedScheduleBranchSelection(t *testing.T) {
+	params := fastPolynomialTestParameters(t)
+	eval := NewFastEvaluator(params, nil)
+	left := fastPolynomialTestCiphertext(params, 7)
+	right := fastPolynomialTestCiphertext(params, 11)
+	left.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	right.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	pb := fastPowerBasis{params: params, eval: eval.Evaluator}
+	high, err := pb.balancedScheduleFor(left, right, left.Level())
+	require.NoError(t, err)
+	require.True(t, high.balanced)
+	require.GreaterOrEqual(t, high.leftScale.Cmp(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), balancedMinScaleBits))), 0)
+
+	left.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 30))
+	right.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 30))
+	low, err := pb.balancedScheduleFor(left, right, left.Level())
+	require.NoError(t, err)
+	require.False(t, low.balanced)
+}
+
+func TestBalancedPowerSourceImmutabilityAndScratchOwnership(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{55, 39, 39, 39, 39, 39},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 7)
+	input.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	eval.workspace.reset(params, input)
+	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+	require.NoError(t, pb.genPower(2, false))
+	leftBefore := eval.workspace.powers[1].CopyNew()
+	rightBefore := eval.workspace.powers[2].CopyNew()
+	require.NoError(t, pb.genPower(3, false))
+	for d := range leftBefore.Value {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, leftBefore.Value[d].Coeffs[limb], eval.workspace.powers[1].Value[d].Coeffs[limb])
+			require.Equal(t, rightBefore.Value[d].Coeffs[limb], eval.workspace.powers[2].Value[d].Coeffs[limb])
+		}
+	}
+	require.NotSame(t, eval.workspace.balancedLeft, eval.workspace.balancedRight)
+	require.NotSame(t, eval.workspace.balancedLeft, eval.workspace.powers[1])
+	require.NotSame(t, eval.workspace.balancedRight, eval.workspace.powers[2])
+	require.Equal(t, 1, eval.workspace.powers[3].Degree())
+	require.Equal(t, input.Level()-2, eval.workspace.powers[3].Level())
+	require.True(t, eval.workspace.powers[3].Scale.Equal(input.Scale.Mul(input.Scale).Mul(input.Scale).Div(rlwe.NewScale(params.Q()[input.Level()])).Div(rlwe.NewScale(params.Q()[input.Level()-1]))))
+}
+
+func TestBalancedPowerIgnoresDormantResidues(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{55, 39, 39, 39, 39, 39},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	inputA := fastPolynomialTestCiphertext(params, 17)
+	inputA.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	inputB := inputA.CopyNew()
+	for d := range inputB.Value {
+		for limb := 2; limb <= inputB.Level(); limb++ {
+			for i := range inputB.Value[d].Coeffs[limb] {
+				inputB.Value[d].Coeffs[limb][i] ^= uint64(0x9e3779b9) + uint64(13*d+limb+i)
+			}
+		}
+	}
+	run := func(input *rlwe.Ciphertext) *rlwe.Ciphertext {
+		eval := NewFastEvaluator(params, nil)
+		eval.workspace.reset(params, input)
+		pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+		require.NoError(t, pb.genPower(3, false))
+		return eval.workspace.powers[3]
+	}
+	gotA := run(inputA)
+	gotB := run(inputB)
+	for d := range gotA.Value {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, gotA.Value[d].Coeffs[limb], gotB.Value[d].Coeffs[limb])
+		}
+	}
 }
 
 func decodeFastPolynomialOutput(t *testing.T, params ckks.Parameters, encoder *ckks.Encoder, ct *rlwe.Ciphertext) []complex128 {

@@ -3,6 +3,7 @@ package polynomial
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"math/bits"
 
 	commonpolynomial "github.com/tuneinsight/lattigo/v6/circuits/common/polynomial"
@@ -129,14 +130,15 @@ func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 }
 
 type fastPolynomialWorkspace struct {
-	x1           *rlwe.Ciphertext
-	powers       map[int]*rlwe.Ciphertext
-	powerBuffers map[int]*rlwe.Ciphertext
-	preRescale   *rlwe.Ciphertext
-	babyBuffers  []*rlwe.Ciphertext
-	babySteps    []*fastBabyStep
-	giantSteps   []int
-	scaleScratch *rlwe.Ciphertext
+	x1            *rlwe.Ciphertext
+	powers        map[int]*rlwe.Ciphertext
+	powerBuffers  map[int]*rlwe.Ciphertext
+	balancedLeft  *rlwe.Ciphertext
+	balancedRight *rlwe.Ciphertext
+	babyBuffers   []*rlwe.Ciphertext
+	babySteps     []*fastBabyStep
+	giantSteps    []int
+	scaleScratch  *rlwe.Ciphertext
 }
 
 type fastBabyStep struct {
@@ -205,6 +207,118 @@ type fastPowerBasis struct {
 	eval      *fastckks.Evaluator
 }
 
+const (
+	balancedMinScaleBits     = 20
+	balancedScaleMarginBits  = 112
+	balancedFactorCandidates = 2
+)
+
+type balancedFactors struct {
+	left  uint64
+	right uint64
+}
+
+// balancedScaleToleranceBits intentionally leaves a fixed precision margin
+// for the integer near-square factorization. It is checked with Scale.InDelta,
+// not a float64 comparison, and retains at least 16 relative bits under the
+// 128-bit CKKS scale representation.
+const balancedScaleToleranceBits = float64(rlwe.ScalePrecision - balancedScaleMarginBits)
+
+func integerSqrt(value uint64) uint64 {
+	if value < 2 {
+		return value
+	}
+	root := uint64(1) << ((bits.Len64(value) + 1) / 2)
+	for {
+		next := (root + value/root) >> 1
+		if next >= root {
+			break
+		}
+		root = next
+	}
+	for (root + 1) <= value/(root+1) {
+		root++
+	}
+	for root > value/root {
+		root--
+	}
+	return root
+}
+
+func balancedFactorPair(q uint64) (balancedFactors, error) {
+	if q < 2 {
+		return balancedFactors{}, errors.New("balanced factor divisor must be at least two")
+	}
+	root := integerSqrt(q)
+	var best balancedFactors
+	var bestAbs *big.Int
+	var bestMax uint64
+	for delta := -balancedFactorCandidates; delta <= balancedFactorCandidates; delta++ {
+		candidate := int64(root) + int64(delta)
+		if candidate <= 0 {
+			continue
+		}
+		m1 := uint64(candidate)
+		quotient, remainder := q/m1, q%m1
+		candidates := []uint64{quotient}
+		if remainder != 0 {
+			candidates = append(candidates, quotient+1)
+		}
+		for _, m2 := range candidates {
+			for _, pair := range [][2]uint64{{m1, m2}, {m2, m1}} {
+				product := new(big.Int).Mul(new(big.Int).SetUint64(pair[0]), new(big.Int).SetUint64(pair[1]))
+				difference := new(big.Int).Sub(new(big.Int).Set(product), new(big.Int).SetUint64(q))
+				absDifference := new(big.Int).Abs(difference)
+				pairMax := pair[0]
+				if pair[1] > pairMax {
+					pairMax = pair[1]
+				}
+				better := bestAbs == nil || absDifference.Cmp(bestAbs) < 0
+				if !better && bestAbs != nil && absDifference.Cmp(bestAbs) == 0 {
+					better = pairMax < bestMax || (pairMax == bestMax && (pair[0] < best.left || (pair[0] == best.left && pair[1] < best.right)))
+				}
+				if better {
+					best = balancedFactors{left: pair[0], right: pair[1]}
+					bestAbs = absDifference
+					bestMax = pairMax
+				}
+			}
+		}
+	}
+	if bestAbs == nil || best.left == 0 || best.right == 0 {
+		return balancedFactors{}, fmt.Errorf("cannot select balanced factors for divisor %d", q)
+	}
+	return best, nil
+}
+
+type balancedSchedule struct {
+	factors     balancedFactors
+	leftScale   rlwe.Scale
+	rightScale  rlwe.Scale
+	targetScale rlwe.Scale
+	balanced    bool
+}
+
+func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, commonLevel int) (balancedSchedule, error) {
+	levelsConsumed := pb.params.LevelsConsumedPerRescaling()
+	if commonLevel < levelsConsumed {
+		return balancedSchedule{}, fmt.Errorf("common level %d is too low for %d rescale levels", commonLevel, levelsConsumed)
+	}
+	if levelsConsumed != 1 {
+		return balancedSchedule{}, nil
+	}
+	factors, err := balancedFactorPair(pb.params.Q()[commonLevel])
+	if err != nil {
+		return balancedSchedule{}, err
+	}
+	qScale := rlwe.NewScale(pb.params.Q()[commonLevel])
+	leftScale := left.Scale.Mul(rlwe.NewScale(factors.left)).Div(qScale)
+	rightScale := right.Scale.Mul(rlwe.NewScale(factors.right)).Div(qScale)
+	targetScale := left.Scale.Mul(right.Scale).Div(qScale)
+	minimumScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), balancedMinScaleBits))
+	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
+}
+
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
 	if pb.values[n] != nil {
 		return nil
@@ -230,16 +344,6 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	degree := 1
 	var err error
 	if lazy {
-		if left.Degree() == 2 {
-			if err := pb.eval.Relinearize(left, left); err != nil {
-				return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
-			}
-		}
-		if right.Degree() == 2 {
-			if err := pb.eval.Relinearize(right, right); err != nil {
-				return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
-			}
-		}
 		degree = 2
 	} else {
 		if left.Degree() > 1 || right.Degree() > 1 {
@@ -251,44 +355,72 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		degree = 1
 	}
 	commonLevel := utils.Min(left.Level(), right.Level())
-	// The q0/q1 Fast backend cannot safely form the old high-scale product
-	// when its centered value may exceed q0*q1/2. Rescale a maintained copy
-	// of one operand first, using the same common-level divisor the old
-	// post-product Rescale would have consumed. Prefer the larger scale and
-	// use the right operand as the stable tie-breaker.
-	chosen, other := right, left
-	if left.Scale.Cmp(right.Scale) > 0 {
-		chosen, other = left, right
+	schedule, err := pb.balancedScheduleFor(left, right, commonLevel)
+	if err != nil {
+		return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
 	}
-	levelsConsumed := pb.params.LevelsConsumedPerRescaling()
-	if commonLevel < levelsConsumed {
-		return fmt.Errorf("Fast power %d: common level %d is too low for %d rescale levels", n, commonLevel, levelsConsumed)
-	}
-	rescaleFactor := rlwe.NewScale(1)
-	for step := 0; step < levelsConsumed; step++ {
-		rescaleFactor = rescaleFactor.Mul(rlwe.NewScale(pb.params.Q()[commonLevel-step]))
-	}
-	preRescaleThreshold := rescaleFactor.Mul(rlwe.NewScale(1 << 10))
-	preRescale := chosen.Scale.Cmp(preRescaleThreshold) > 0
 	var out *rlwe.Ciphertext
-	if preRescale {
-		rescaled := pb.workspace.preRescaleBuffer(pb.params, chosen, commonLevel)
-		if err := copyMaintainedAtLevel(pb.params, chosen, rescaled, commonLevel); err != nil {
-			return fmt.Errorf("Fast power %d: copy operand at common level: %w", n, err)
+	balanced := schedule.balanced
+	if balanced {
+		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, true)
+		if err != nil {
+			return fmt.Errorf("Fast power %d: copy balanced left: %w", n, err)
 		}
-		if err := pb.eval.Rescale(rescaled, rescaled); err != nil {
-			return fmt.Errorf("Fast power %d: pre-rescale operand: %w", n, err)
+		rightCopy, err := pb.workspace.balancedCopy(pb.params, right, commonLevel, false)
+		if err != nil {
+			return fmt.Errorf("Fast power %d: copy balanced right: %w", n, err)
 		}
-		out = pb.workspace.powerBuffer(pb.params, n, degree, rescaled.Level(), pb.values[1])
 		if lazy {
-			err = pb.eval.Mul(other, rescaled, out)
+			if leftCopy.Degree() == 2 {
+				if err := pb.eval.Relinearize(leftCopy, leftCopy); err != nil {
+					return fmt.Errorf("Fast power %d: relinearize balanced left: %w", n, err)
+				}
+			}
+			if rightCopy.Degree() == 2 {
+				if err := pb.eval.Relinearize(rightCopy, rightCopy); err != nil {
+					return fmt.Errorf("Fast power %d: relinearize balanced right: %w", n, err)
+				}
+			}
+		}
+		if err := pb.eval.MulIntegerMaintained(leftCopy, new(big.Int).SetUint64(schedule.factors.left), leftCopy); err != nil {
+			return fmt.Errorf("Fast power %d: scale balanced left: %w", n, err)
+		}
+		if err := pb.eval.MulIntegerMaintained(rightCopy, new(big.Int).SetUint64(schedule.factors.right), rightCopy); err != nil {
+			return fmt.Errorf("Fast power %d: scale balanced right: %w", n, err)
+		}
+		leftCopy.Scale = left.Scale.Mul(rlwe.NewScale(schedule.factors.left))
+		rightCopy.Scale = right.Scale.Mul(rlwe.NewScale(schedule.factors.right))
+		if err := pb.eval.Rescale(leftCopy, leftCopy); err != nil {
+			return fmt.Errorf("Fast power %d: balanced left rescale: %w", n, err)
+		}
+		if err := pb.eval.Rescale(rightCopy, rightCopy); err != nil {
+			return fmt.Errorf("Fast power %d: balanced right rescale: %w", n, err)
+		}
+		if leftCopy.Level() != commonLevel-1 || rightCopy.Level() != commonLevel-1 {
+			return fmt.Errorf("Fast power %d: balanced operands consumed unexpected levels", n)
+		}
+		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel-1, pb.values[1])
+		if lazy {
+			err = pb.eval.Mul(leftCopy, rightCopy, out)
 		} else {
-			err = pb.eval.MulRelin(other, rescaled, out)
+			err = pb.eval.MulRelin(leftCopy, rightCopy, out)
 		}
 	} else {
-		// If the operand scale is not sufficiently above the required divisor,
-		// pre-Rescale would collapse too much encoding precision. Keep the
-		// existing low-scale schedule for this compatibility surface.
+		// Low-scale inputs retain the established post-product schedule because
+		// balanced pre-Rescale would otherwise take an operand below the
+		// documented precision floor.
+		if lazy {
+			if left.Degree() == 2 {
+				if err := pb.eval.Relinearize(left, left); err != nil {
+					return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
+				}
+			}
+			if right.Degree() == 2 {
+				if err := pb.eval.Relinearize(right, right); err != nil {
+					return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
+				}
+			}
+		}
 		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
 		if lazy {
 			err = pb.eval.Mul(left, right, out)
@@ -305,7 +437,12 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			return fmt.Errorf("Fast power %d: double: %w", n, err)
 		}
 	}
-	if !preRescale {
+	if balanced {
+		if !out.Scale.InDelta(schedule.targetScale, balancedScaleToleranceBits) {
+			return fmt.Errorf("Fast power %d: balanced scale discrepancy: actual=%v target=%v", n, &out.Scale.Value, &schedule.targetScale.Value)
+		}
+		out.Scale = schedule.targetScale
+	} else {
 		if err := pb.eval.Rescale(out, out); err != nil {
 			return fmt.Errorf("Fast power %d: rescale: %w", n, err)
 		}
@@ -484,9 +621,19 @@ func copyMaintainedAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, le
 	return nil
 }
 
-func (ws *fastPolynomialWorkspace) preRescaleBuffer(params ckks.Parameters, src *rlwe.Ciphertext, level int) *rlwe.Ciphertext {
-	ws.preRescale = ws.ensureCiphertext(params, ws.preRescale, src.Degree(), level)
-	return ws.preRescale
+func (ws *fastPolynomialWorkspace) balancedCopy(params ckks.Parameters, src *rlwe.Ciphertext, level int, left bool) (*rlwe.Ciphertext, error) {
+	if left {
+		ws.balancedLeft = ws.ensureCiphertext(params, ws.balancedLeft, src.Degree(), level)
+		if err := copyMaintainedAtLevel(params, src, ws.balancedLeft, level); err != nil {
+			return nil, err
+		}
+		return ws.balancedLeft, nil
+	}
+	ws.balancedRight = ws.ensureCiphertext(params, ws.balancedRight, src.Degree(), level)
+	if err := copyMaintainedAtLevel(params, src, ws.balancedRight, level); err != nil {
+		return nil, err
+	}
+	return ws.balancedRight, nil
 }
 
 func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fastckks.Evaluator, out, sub *rlwe.Ciphertext) error {
