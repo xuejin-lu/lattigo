@@ -208,68 +208,41 @@ func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
 	if pb.values[n] != nil {
 		return nil
 	}
-	if _, err := pb.genPowerInternal(n, lazy, true); err != nil {
-		return err
-	}
-	if err := pb.eval.Rescale(pb.values[n], pb.values[n]); err != nil {
-		return fmt.Errorf("Fast power %d: rescale: %w", n, err)
-	}
-	return nil
+	return pb.genPowerInternal(n, lazy)
 }
 
-func (pb *fastPowerBasis) genPowerInternal(n int, lazy, rescale bool) (bool, error) {
+func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	if pb.values[n] != nil {
-		return false, nil
+		return nil
 	}
 	a, b := commonpolynomial.SplitDegree(n)
 	isPow2 := n&(n-1) == 0
 
-	rescaleA, err := pb.genPowerInternal(a, lazy && !isPow2, rescale)
-	if err != nil {
-		return false, fmt.Errorf("Fast power %d: power %d: %w", n, a, err)
+	if err := pb.genPowerInternal(a, lazy && !isPow2); err != nil {
+		return fmt.Errorf("Fast power %d: power %d: %w", n, a, err)
 	}
-	rescaleB, err := pb.genPowerInternal(b, lazy && !isPow2, rescale)
-	if err != nil {
-		return false, fmt.Errorf("Fast power %d: power %d: %w", n, b, err)
+	if err := pb.genPowerInternal(b, lazy && !isPow2); err != nil {
+		return fmt.Errorf("Fast power %d: power %d: %w", n, b, err)
 	}
 
 	left, right := pb.values[a], pb.values[b]
 	degree := 1
+	var err error
 	if lazy {
 		if left.Degree() == 2 {
 			if err := pb.eval.Relinearize(left, left); err != nil {
-				return false, fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
+				return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
 			}
 		}
 		if right.Degree() == 2 {
 			if err := pb.eval.Relinearize(right, right); err != nil {
-				return false, fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
-			}
-		}
-		if rescaleA {
-			if err := pb.eval.Rescale(left, left); err != nil {
-				return false, fmt.Errorf("Fast power %d: rescale left: %w", n, err)
-			}
-		}
-		if rescaleB {
-			if err := pb.eval.Rescale(right, right); err != nil {
-				return false, fmt.Errorf("Fast power %d: rescale right: %w", n, err)
+				return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
 			}
 		}
 		degree = 2
 	} else {
-		if rescaleA {
-			if err := pb.eval.Rescale(left, left); err != nil {
-				return false, fmt.Errorf("Fast power %d: rescale left: %w", n, err)
-			}
-		}
-		if rescaleB {
-			if err := pb.eval.Rescale(right, right); err != nil {
-				return false, fmt.Errorf("Fast power %d: rescale right: %w", n, err)
-			}
-		}
 		if left.Degree() > 1 || right.Degree() > 1 {
-			return false, fmt.Errorf("Fast power %d: non-relinearized operand reached strict multiplication", n)
+			return fmt.Errorf("Fast power %d: non-relinearized operand reached strict multiplication", n)
 		}
 	}
 
@@ -284,7 +257,20 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy, rescale bool) (bool, err
 		err = pb.eval.MulRelin(left, right, out)
 	}
 	if err != nil {
-		return false, fmt.Errorf("Fast power %d: multiply: %w", n, err)
+		return fmt.Errorf("Fast power %d: multiply: %w", n, err)
+	}
+
+	if pb.basis == bignum.Chebyshev {
+		if err = pb.eval.Add(out, out, out); err != nil {
+			return fmt.Errorf("Fast power %d: double: %w", n, err)
+		}
+	}
+
+	// Fast maintains only q0/q1. Rescale before injecting the Chebyshev
+	// correction so that a high-scale value which exceeds the centered q0*q1
+	// capacity is never passed through Fast centered-CRT Rescale.
+	if err := pb.eval.Rescale(out, out); err != nil {
+		return fmt.Errorf("Fast power %d: rescale: %w", n, err)
 	}
 
 	if pb.basis == bignum.Chebyshev {
@@ -292,25 +278,22 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy, rescale bool) (bool, err
 		if c < 0 {
 			c = -c
 		}
-		if err = pb.eval.Add(out, out, out); err != nil {
-			return false, fmt.Errorf("Fast power %d: double: %w", n, err)
-		}
 		if c == 0 {
 			if err = pb.eval.Add(out, -1, out); err != nil {
-				return false, fmt.Errorf("Fast power %d: subtract one: %w", n, err)
+				return fmt.Errorf("Fast power %d: subtract one: %w", n, err)
 			}
 		} else {
 			if err = pb.genPower(c, lazy); err != nil {
-				return false, fmt.Errorf("Fast power %d: difference power %d: %w", n, c, err)
+				return fmt.Errorf("Fast power %d: difference power %d: %w", n, c, err)
 			}
 			if err = pb.workspace.subAligned(pb.params, pb.eval, out, pb.values[c]); err != nil {
-				return false, fmt.Errorf("Fast power %d: subtract difference power: %w", n, err)
+				return fmt.Errorf("Fast power %d: subtract difference power: %w", n, err)
 			}
 		}
 	}
 
 	pb.values[n] = out
-	return true, nil
+	return nil
 }
 
 func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fastckks.Evaluator, plan commonpolynomial.PatersonStockmeyerPolynomial, powers map[int]*rlwe.Ciphertext) (*rlwe.Ciphertext, error) {

@@ -179,6 +179,15 @@ Standard Lattigo maintains all active residues and uses the residue for the drop
 
 The existing per-coefficient `big.Int` reconstruction is a reference oracle, not a production Rescale implementation. Production Stage A should investigate allocation-free fixed-width 64/128-bit reconstruction and rounded division, validate its supported modulus-size contract, avoid stale high residues, and leave Normal Rescale unchanged.
 
+Chebyshev power generation has an additional capacity constraint. q0/q1
+centered reconstruction determines a unique centered integer only while its
+magnitude is below `q0*q1/2`; the high-scale Standard ordering is therefore
+not automatically valid for the two-limb Fast backend. When an operation
+creates a value beyond that range, it must reduce scale before adding or
+subtracting a correction term when the algebra permits. Fast Chebyshev power
+generation consequently applies the recurrence correction after the required
+product Rescale, for both the scalar-one and generated-power correction cases.
+
 ### 5.4 Target parameter profile
 
 The supplied engineering profile, not a universal CKKS invariant, constructs 17 Q primes (`MaxLevel = 16`) in this order:

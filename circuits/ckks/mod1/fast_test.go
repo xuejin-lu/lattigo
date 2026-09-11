@@ -171,6 +171,79 @@ func TestFastMod1MatchesStandardCosDiscrete(t *testing.T) {
 	}
 }
 
+func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	mod1Params, err := NewParametersFromLiteral(params, ParametersLiteral{
+		LevelQ:          12,
+		LogScale:        60,
+		Mod1Type:        CosDiscrete,
+		LogMessageRatio: 10,
+		K:               16,
+		Mod1Degree:      30,
+		DoubleAngle:     3,
+	})
+	require.NoError(t, err)
+
+	values := make([]complex128, params.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)*1e-5, float64((i%5)-2)*1e-5)
+	}
+	fastInput := newFastMod1EncodedInput(t, params, mod1Params.LevelQ, rlwe.NewScale(math.Exp2(60)), values)
+	standardInput := fastInput.CopyNew()
+	params.RingQ().AtLevel(standardInput.Level()).IMForm(standardInput.Value[0], standardInput.Value[0])
+	params.RingQ().AtLevel(standardInput.Level()).IMForm(standardInput.Value[1], standardInput.Value[1])
+	standardInput.IsMontgomery = false
+
+	kgen := rlwe.NewKeyGenerator(params)
+	sk := kgen.GenSecretKeyNew()
+	standardEval := ckks.NewEvaluator(params, rlwe.NewMemEvaluationKeySet(kgen.GenRelinearizationKeyNew(sk)))
+	standard, err := NewEvaluator(standardEval, ckkspolynomial.NewEvaluator(params, standardEval), mod1Params).EvaluateNew(standardInput)
+	require.NoError(t, err)
+	fast, err := NewFastEvaluator(fastckks.NewEvaluator(params), ckkspolynomial.NewFastEvaluator(params, nil), mod1Params).EvaluateNew(fastInput)
+	require.NoError(t, err)
+	require.Equal(t, standard.Level(), fast.Level())
+	require.True(t, standard.Scale.Equal(fast.Scale))
+
+	standardValues := decodeFastMod1Plaintext(t, params, standard)
+	fastValues := decodeFastMod1MaintainedPlaintext(t, params, fast)
+	for i := range values {
+		require.InDelta(t, real(standardValues[i]), real(fastValues[i]), 1e-2, "real slot %d", i)
+		require.InDelta(t, imag(standardValues[i]), imag(fastValues[i]), 1e-2, "imag slot %d", i)
+	}
+}
+
+func decodeFastMod1MaintainedPlaintext(t *testing.T, params ckks.Parameters, ct *rlwe.Ciphertext) []complex128 {
+	t.Helper()
+	level := 1
+	source := params.RingQ().AtLevel(level).NewPoly()
+	for limb := 0; limb < 2; limb++ {
+		copy(source.Coeffs[limb], ct.Value[0].Coeffs[limb])
+	}
+	params.RingQ().AtLevel(level).INTT(source, source)
+	params.RingQ().AtLevel(level).IMForm(source, source)
+
+	q01Params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            params.LogN(),
+		Q:               append([]uint64(nil), params.Q()[:2]...),
+		LogDefaultScale: params.LogDefaultScale(),
+	})
+	require.NoError(t, err)
+	encoder := ckks.NewEncoder(q01Params)
+	pt := ckks.NewPlaintext(q01Params, level)
+	*pt.MetaData = *ct.MetaData
+	pt.Value.Copy(source)
+	pt.IsNTT = false
+	pt.IsMontgomery = false
+	decoded := make([]complex128, pt.Slots())
+	require.NoError(t, encoder.Decode(pt, decoded))
+	return decoded
+}
+
 func TestFastMod1IgnoresDormantResiduesAndPreservesInput(t *testing.T) {
 	params, mod1Params := fastMod1TestParameters(t)
 	input := newFastMod1PlaintextInput(t, params, mod1Params.LevelQ)
