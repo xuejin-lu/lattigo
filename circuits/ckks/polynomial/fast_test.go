@@ -12,6 +12,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
 
@@ -95,7 +96,7 @@ func TestFastPolynomialPowerBasisQ01Oracle(t *testing.T) {
 	require.NoError(t, fastEval.Add(reference, -1, reference))
 
 	require.Equal(t, reference.Level(), got.Level())
-	require.Equal(t, reference.Scale, got.Scale)
+	require.True(t, reference.Scale.Equal(got.Scale), "reference scale=%v got=%v", reference.Scale.Float64(), got.Scale.Float64())
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb < 2; limb++ {
 			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb])
@@ -138,7 +139,7 @@ func TestFastPolynomialNonPowerOfTwoChebyshevOracle(t *testing.T) {
 	require.NoError(t, eval.workspace.subAligned(params, fastEval, t5, input))
 
 	require.Equal(t, t5.Level(), got.Level())
-	require.Equal(t, t5.Scale, got.Scale)
+	require.True(t, t5.Scale.Equal(got.Scale), "reference scale=%v got=%v", t5.Scale.Float64(), got.Scale.Float64())
 	require.Equal(t, t5.Degree(), got.Degree())
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb < 2; limb++ {
@@ -254,6 +255,37 @@ func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
 			require.Equal(t, gotA.Value[d].Coeffs[limb], gotB.Value[d].Coeffs[limb])
 		}
 	}
+}
+
+func TestFastPolynomialMaintainedCopyAtLevel(t *testing.T) {
+	params := fastPolynomialTestParameters(t)
+	src := fastPolynomialTestCiphertext(params, 29)
+	for d := range src.Value {
+		for limb := 2; limb <= src.Level(); limb++ {
+			for i := range src.Value[d].Coeffs[limb] {
+				src.Value[d].Coeffs[limb][i] = uint64(0xfeed0000 + 19*d + 7*limb + i)
+			}
+		}
+	}
+	srcBefore := src.CopyNew()
+	dst := fastckks.NewCiphertext(params, 1, 1)
+	require.NoError(t, copyMaintainedAtLevel(params, src, dst, 1))
+
+	require.Equal(t, 1, dst.Level())
+	require.Equal(t, src.Scale, dst.Scale)
+	require.Equal(t, src.IsNTT, dst.IsNTT)
+	require.Equal(t, src.IsMontgomery, dst.IsMontgomery)
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, src.Value[d].Coeffs[limb], dst.Value[d].Coeffs[limb])
+		}
+	}
+	for d := range src.Value {
+		for limb := range src.Value[d].Coeffs {
+			require.Equal(t, srcBefore.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
+		}
+	}
+	require.Len(t, dst.Value[0].Coeffs, 2)
 }
 
 func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
@@ -416,7 +448,7 @@ func TestFastPolynomialFormalScaleT3CapacitySafe(t *testing.T) {
 	pt.IsMontgomery = true
 	values := make([]complex128, pt.Slots())
 	for i := range values {
-		values[i] = complex(float64((i%5)-2)*1e-5, float64((i%3)-1)*1e-5)
+		values[i] = complex(float64((i%5)-2)/8192, float64((i%3)-1)/8192)
 	}
 	require.NoError(t, encoder.Encode(values, pt))
 
@@ -440,6 +472,28 @@ func TestFastPolynomialFormalScaleT3CapacitySafe(t *testing.T) {
 		require.InDelta(t, real(want), real(decoded[i]), 1e-2)
 		require.InDelta(t, imag(want), imag(decoded[i]), 1e-2)
 	}
+}
+
+func TestFastPolynomialPreRescaleLazyMetadata(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{55, 39, 39, 39, 39, 39},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 47)
+	input.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	eval.workspace.reset(params, input)
+	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+	require.NoError(t, pb.genPower(3, true))
+	got := eval.workspace.powers[3]
+	require.Equal(t, 2, got.Degree())
+	require.Equal(t, input.Level()-2, got.Level())
+	wantScale := input.Scale.Mul(input.Scale).Mul(input.Scale)
+	wantScale = wantScale.Div(rlwe.NewScale(params.Q()[input.Level()]))
+	wantScale = wantScale.Div(rlwe.NewScale(params.Q()[input.Level()-1]))
+	require.True(t, got.Scale.Equal(wantScale), "unexpected lazy T3 scale: got=%v want=%v", got.Scale.Float64(), wantScale.Float64())
 }
 
 func decodeFastPolynomialOutput(t *testing.T, params ckks.Parameters, encoder *ckks.Encoder, ct *rlwe.Ciphertext) []complex128 {

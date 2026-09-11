@@ -185,8 +185,17 @@ magnitude is below `q0*q1/2`; the high-scale Standard ordering is therefore
 not automatically valid for the two-limb Fast backend. When an operation
 creates a value beyond that range, it must reduce scale before adding or
 subtracting a correction term when the algebra permits. Fast Chebyshev power
-generation consequently applies the recurrence correction after the required
-product Rescale, for both the scalar-one and generated-power correction cases.
+generation consequently shifts the planner-required Rescale to an independently
+owned maintained copy of one operand before multiplication, so the unsafe
+high-scale product is never formed. The operand is structurally aligned to the
+exact common logical level before Rescale; the deterministic choice prefers the
+larger Scale and uses the right operand on ties. The recurrence correction is
+then applied at the already-rescaled product scale, for both the scalar-one
+and generated-power correction cases. The final logical Level, Scale, and
+single rescale depth remain equivalent to the original post-product schedule,
+and stored power-basis operands remain immutable with respect to this
+pre-Rescale step. This is not a universal theorem for arbitrary Fast CKKS
+multiplication outside the tested polynomial surface.
 
 ### 5.4 Target parameter profile
 

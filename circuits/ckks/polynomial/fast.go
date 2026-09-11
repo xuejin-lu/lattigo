@@ -132,6 +132,7 @@ type fastPolynomialWorkspace struct {
 	x1           *rlwe.Ciphertext
 	powers       map[int]*rlwe.Ciphertext
 	powerBuffers map[int]*rlwe.Ciphertext
+	preRescale   *rlwe.Ciphertext
 	babyBuffers  []*rlwe.Ciphertext
 	babySteps    []*fastBabyStep
 	giantSteps   []int
@@ -249,12 +250,51 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	if !lazy {
 		degree = 1
 	}
-	level := utils.Min(left.Level(), right.Level())
-	out := pb.workspace.powerBuffer(pb.params, n, degree, level, pb.values[1])
-	if lazy {
-		err = pb.eval.Mul(left, right, out)
+	commonLevel := utils.Min(left.Level(), right.Level())
+	// The q0/q1 Fast backend cannot safely form the old high-scale product
+	// when its centered value may exceed q0*q1/2. Rescale a maintained copy
+	// of one operand first, using the same common-level divisor the old
+	// post-product Rescale would have consumed. Prefer the larger scale and
+	// use the right operand as the stable tie-breaker.
+	chosen, other := right, left
+	if left.Scale.Cmp(right.Scale) > 0 {
+		chosen, other = left, right
+	}
+	levelsConsumed := pb.params.LevelsConsumedPerRescaling()
+	if commonLevel < levelsConsumed {
+		return fmt.Errorf("Fast power %d: common level %d is too low for %d rescale levels", n, commonLevel, levelsConsumed)
+	}
+	rescaleFactor := rlwe.NewScale(1)
+	for step := 0; step < levelsConsumed; step++ {
+		rescaleFactor = rescaleFactor.Mul(rlwe.NewScale(pb.params.Q()[commonLevel-step]))
+	}
+	preRescaleThreshold := rescaleFactor.Mul(rlwe.NewScale(1 << 10))
+	preRescale := chosen.Scale.Cmp(preRescaleThreshold) > 0
+	var out *rlwe.Ciphertext
+	if preRescale {
+		rescaled := pb.workspace.preRescaleBuffer(pb.params, chosen, commonLevel)
+		if err := copyMaintainedAtLevel(pb.params, chosen, rescaled, commonLevel); err != nil {
+			return fmt.Errorf("Fast power %d: copy operand at common level: %w", n, err)
+		}
+		if err := pb.eval.Rescale(rescaled, rescaled); err != nil {
+			return fmt.Errorf("Fast power %d: pre-rescale operand: %w", n, err)
+		}
+		out = pb.workspace.powerBuffer(pb.params, n, degree, rescaled.Level(), pb.values[1])
+		if lazy {
+			err = pb.eval.Mul(other, rescaled, out)
+		} else {
+			err = pb.eval.MulRelin(other, rescaled, out)
+		}
 	} else {
-		err = pb.eval.MulRelin(left, right, out)
+		// If the operand scale is not sufficiently above the required divisor,
+		// pre-Rescale would collapse too much encoding precision. Keep the
+		// existing low-scale schedule for this compatibility surface.
+		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
+		if lazy {
+			err = pb.eval.Mul(left, right, out)
+		} else {
+			err = pb.eval.MulRelin(left, right, out)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("Fast power %d: multiply: %w", n, err)
@@ -265,12 +305,10 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			return fmt.Errorf("Fast power %d: double: %w", n, err)
 		}
 	}
-
-	// Fast maintains only q0/q1. Rescale before injecting the Chebyshev
-	// correction so that a high-scale value which exceeds the centered q0*q1
-	// capacity is never passed through Fast centered-CRT Rescale.
-	if err := pb.eval.Rescale(out, out); err != nil {
-		return fmt.Errorf("Fast power %d: rescale: %w", n, err)
+	if !preRescale {
+		if err := pb.eval.Rescale(out, out); err != nil {
+			return fmt.Errorf("Fast power %d: rescale: %w", n, err)
+		}
 	}
 
 	if pb.basis == bignum.Chebyshev {
@@ -423,16 +461,32 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 }
 
 func copyMaintained(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
-	fastckks.Resize(dst, 1, src.Level(), params.N())
+	_ = copyMaintainedAtLevel(params, src, dst, src.Level())
+}
+
+func copyMaintainedAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, level int) error {
+	if src == nil || dst == nil {
+		return errors.New("Fast polynomial maintained copy operands cannot be nil")
+	}
+	if level < 0 || level > src.Level() {
+		return fmt.Errorf("Fast polynomial maintained copy level %d is outside source level %d", level, src.Level())
+	}
+	fastckks.Resize(dst, src.Degree(), level, params.N())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
 	dst.Scale = src.Scale
-	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+	for d := range src.Value {
+		for limb := 0; limb < 2 && limb <= level; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
+	return nil
+}
+
+func (ws *fastPolynomialWorkspace) preRescaleBuffer(params ckks.Parameters, src *rlwe.Ciphertext, level int) *rlwe.Ciphertext {
+	ws.preRescale = ws.ensureCiphertext(params, ws.preRescale, src.Degree(), level)
+	return ws.preRescale
 }
 
 func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fastckks.Evaluator, out, sub *rlwe.Ciphertext) error {
