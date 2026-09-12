@@ -119,7 +119,7 @@ func normalizedLogN13Profile(params *ckks.Parameters, mod1Params Parameters) boo
 	for i, logQ := range params.LogQi() {
 		valid := (i == 0 && logQ == 55) ||
 			(i >= 1 && i <= 3 && logQ >= 39 && logQ <= 40) ||
-			(i == 4 && logQ >= 40 && logQ <= 45) ||
+			(i == 4 && logQ >= 39 && logQ <= 45) ||
 			(i >= 5 && i <= 12 && logQ >= 60 && logQ <= 61) ||
 			(i >= 13 && i <= 16 && logQ >= 56 && logQ <= 57)
 		if !valid {
