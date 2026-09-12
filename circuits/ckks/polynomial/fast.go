@@ -47,6 +47,21 @@ func NewFastEvaluator(params ckks.Parameters, eval *fastckks.Evaluator) *FastEva
 // polynomial surface accepts Chebyshev polynomials in the Standard ring with
 // NTT/Montgomery degree-one input at a level containing q0 and q1.
 func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale) (*rlwe.Ciphertext, error) {
+	return eval.evaluate(input, p, targetScale, nil)
+}
+
+// EvaluateWithPlanScale evaluates the same Paterson-Stockmeyer plan as
+// Evaluate while overriding only the planned polynomial-value scales. The
+// planner still receives targetScale and evaluatePlan retains its existing
+// final relinearization and single Rescale boundary.
+func (eval *FastEvaluator) EvaluateWithPlanScale(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale, planScale rlwe.Scale) (*rlwe.Ciphertext, error) {
+	if planScale.Value.Sign() <= 0 {
+		return nil, errors.New("Fast polynomial plan scale must be positive")
+	}
+	return eval.evaluate(input, p, targetScale, &planScale)
+}
+
+func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, planScale *rlwe.Scale) (*rlwe.Ciphertext, error) {
 	if eval == nil || eval.Evaluator == nil {
 		return nil, errors.New("Fast polynomial evaluator cannot be nil")
 	}
@@ -122,6 +137,12 @@ func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 		targetScale,
 		simEvaluator{params: eval.Parameters, levelsConsumedPerRescaling: levelsConsumed},
 	)
+	if planScale != nil {
+		ws.planScaleOverride = true
+		for i := range plan.Value {
+			plan.Value[i].Scale = *planScale
+		}
+	}
 	result, err := ws.evaluatePlan(eval.Parameters, eval.Evaluator, plan, ws.powers)
 	if err != nil {
 		return nil, err
@@ -130,15 +151,16 @@ func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 }
 
 type fastPolynomialWorkspace struct {
-	x1            *rlwe.Ciphertext
-	powers        map[int]*rlwe.Ciphertext
-	powerBuffers  map[int]*rlwe.Ciphertext
-	balancedLeft  *rlwe.Ciphertext
-	balancedRight *rlwe.Ciphertext
-	babyBuffers   []*rlwe.Ciphertext
-	babySteps     []*fastBabyStep
-	giantSteps    []int
-	scaleScratch  *rlwe.Ciphertext
+	x1                *rlwe.Ciphertext
+	powers            map[int]*rlwe.Ciphertext
+	powerBuffers      map[int]*rlwe.Ciphertext
+	balancedLeft      *rlwe.Ciphertext
+	balancedRight     *rlwe.Ciphertext
+	babyBuffers       []*rlwe.Ciphertext
+	babySteps         []*fastBabyStep
+	giantSteps        []int
+	scaleScratch      *rlwe.Ciphertext
+	planScaleOverride bool
 }
 
 type fastBabyStep struct {
@@ -147,6 +169,7 @@ type fastBabyStep struct {
 }
 
 func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Ciphertext) {
+	ws.planScaleOverride = false
 	ws.x1 = ws.ensureCiphertext(params, ws.x1, 1, input.Level())
 	copyMaintained(params, input, ws.x1)
 	for key := range ws.powers {
@@ -588,7 +611,11 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	if err := eval.Mul(b, xpow, b); err != nil {
 		return fmt.Errorf("multiply: %w", err)
 	}
-	if !a.Scale.InDelta(b.Scale, float64(rlwe.ScalePrecision-12)) {
+	toleranceBits := float64(rlwe.ScalePrecision - 12)
+	if ws.planScaleOverride {
+		toleranceBits = 32
+	}
+	if !a.Scale.InDelta(b.Scale, toleranceBits) {
 		return fmt.Errorf("scale discrepancy: (rescale(b) * X^n).Scale = %v != a.Scale = %v", &b.Scale.Value, &a.Scale.Value)
 	}
 	if err := ws.addAligned(params, eval, a, b); err != nil {

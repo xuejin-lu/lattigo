@@ -233,6 +233,27 @@ func TestFastPolynomialPlannerMetadata(t *testing.T) {
 	require.True(t, final.Scale.Equal(got.Scale), "planned scale=%v got=%v", final.Scale.Float64(), got.Scale.Float64())
 }
 
+func TestFastPolynomialPlanScaleOverrideKeepsInputAndFinalRescale(t *testing.T) {
+	params := fastPolynomialTestParameters(t)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 23)
+	before := input.CopyNew()
+	poly := fastPolynomialTestPoly(1)
+	planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 29))
+	got, err := eval.EvaluateWithPlanScale(input, poly, params.DefaultScale(), planScale)
+	require.NoError(t, err)
+	require.Equal(t, 1, got.Degree())
+	require.Equal(t, input.Level()-1, got.Level())
+	require.True(t, got.IsNTT)
+	require.True(t, got.IsMontgomery)
+	require.True(t, got.Scale.Cmp(params.DefaultScale()) < 0)
+	for d := range input.Value {
+		for limb := 0; limb <= input.Level(); limb++ {
+			require.Equal(t, before.Value[d].Coeffs[limb], input.Value[d].Coeffs[limb])
+		}
+	}
+}
+
 func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
 	params := fastPolynomialTestParameters(t)
 	poly := fastPolynomialTestPoly(3)

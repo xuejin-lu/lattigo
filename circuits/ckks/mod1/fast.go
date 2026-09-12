@@ -23,6 +23,8 @@ type FastEvaluator struct {
 	PolynomialEvaluator *ckkspolynomial.FastEvaluator
 }
 
+const normalizedLogN13PlanScaleBits = 91
+
 // NewFastEvaluator creates a bounded Fast Mod1 evaluator.
 func NewFastEvaluator(eval *fastckks.Evaluator, evalPoly *ckkspolynomial.FastEvaluator, params Parameters) *FastEvaluator {
 	return &FastEvaluator{Parameters: params, FastCKKS: eval, PolynomialEvaluator: evalPoly}
@@ -68,6 +70,15 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 		return nil, fmt.Errorf("Fast Mod1 cosine offset: %w", err)
 	}
 
+	if normalizedLogN13Profile(params, mod1Params) {
+		planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), normalizedLogN13PlanScaleBits))
+		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScale(res, mod1Params.Mod1Poly, targetScale, planScale)
+		if err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial evaluation: %w", err)
+		}
+		return eval.evaluateNormalizedLogN13(polynomialResult, inputScale, targetScale, mod1Params, planScale)
+	}
+
 	polynomialResult, err := eval.PolynomialEvaluator.Evaluate(res, mod1Params.Mod1Poly, targetScale)
 	if err != nil {
 		return nil, fmt.Errorf("Fast Mod1 polynomial evaluation: %w", err)
@@ -95,6 +106,131 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 	}
 
 	res.Scale = inputScale
+	return res, nil
+}
+
+func normalizedLogN13Profile(params *ckks.Parameters, mod1Params Parameters) bool {
+	if params.LogN() != 13 || mod1Params.Mod1Poly.Degree() != 30 || mod1Params.DoubleAngle != 3 || mod1Params.Mod1Type != CosDiscrete || mod1Params.Mod1InvPoly != nil || params.LevelsConsumedPerRescaling() != 1 {
+		return false
+	}
+	if mod1Params.LevelQ != 12 || mod1Params.LogMessageRatio != 10 || len(params.Q()) != 17 {
+		return false
+	}
+	for i, logQ := range params.LogQi() {
+		valid := (i == 0 && logQ == 55) ||
+			(i >= 1 && i <= 3 && logQ >= 39 && logQ <= 40) ||
+			(i == 4 && logQ >= 40 && logQ <= 45) ||
+			(i >= 5 && i <= 12 && logQ >= 60 && logQ <= 61) ||
+			(i >= 13 && i <= 16 && logQ >= 56 && logQ <= 57)
+		if !valid {
+			return false
+		}
+	}
+	return true
+}
+
+func nearestPowerOfTwoExponent(scale rlwe.Scale) (int, error) {
+	if scale.Value.Sign() <= 0 {
+		return 0, errors.New("scale ratio must be positive")
+	}
+	mantissa := new(big.Float).SetPrec(256)
+	exponent := scale.Value.MantExp(mantissa)
+	threshold := new(big.Float).SetPrec(256).SetFloat64(0.75)
+	if mantissa.Cmp(threshold) >= 0 {
+		return exponent, nil
+	}
+	return exponent - 1, nil
+}
+
+func maintainedComponentZero(ct *rlwe.Ciphertext, component int) bool {
+	if ct == nil || component < 0 || component >= len(ct.Value) || len(ct.Value[component].Coeffs) < 2 {
+		return false
+	}
+	for limb := 0; limb < 2; limb++ {
+		for _, value := range ct.Value[component].Coeffs[limb] {
+			if value != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputScale, targetScale rlwe.Scale, mod1Params Parameters, planScale rlwe.Scale) (*rlwe.Ciphertext, error) {
+	params := eval.FastCKKS.GetParameters()
+	workingScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 31))
+	if res.Level() != 7 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(workingScale, 32) || !maintainedComponentZero(res, 1) {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial output invariant failed: level=%d degree=%d scale=%s isNTT=%t isMontgomery=%t", res.Level(), res.Degree(), res.Scale.Value.Text('e', 20), res.IsNTT, res.IsMontgomery)
+	}
+	if !planScale.Equal(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), normalizedLogN13PlanScaleBits))) {
+		return nil, errors.New("Fast Mod1 normalized LogN13 plan scale changed unexpectedly")
+	}
+	kIn, err := nearestPowerOfTwoExponent(targetScale.Div(res.Scale))
+	if err != nil {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 scale ratio: %w", err)
+	}
+	if kIn != 29 {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 k exponent = %d, want 29", kIn)
+	}
+	kValue := new(big.Int).Lsh(big.NewInt(1), uint(kIn))
+	coherentScale := res.Scale.Mul(rlwe.NewScale(kValue))
+	if !coherentScale.InDelta(targetScale, 32) {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 coherent scale is not close to target: coherent=%s target=%s", coherentScale.Value.Text('e', 20), targetScale.Value.Text('e', 20))
+	}
+	res.Scale = coherentScale
+	currentExponent := kIn
+	sqrt2pi := mod1Params.Sqrt2Pi
+	for round := 0; round < mod1Params.DoubleAngle; round++ {
+		beforeLevel := res.Level()
+		if beforeLevel < 1 {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d has insufficient level %d", round, beforeLevel)
+		}
+		nextScale := res.Scale.Mul(res.Scale).Div(rlwe.NewScale(params.Q()[beforeLevel]))
+		nextExponent, err := nearestPowerOfTwoExponent(nextScale.Div(workingScale))
+		if err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d next scale: %w", round, err)
+		}
+		if nextExponent != 29 {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d k exponent = %d, want 29", round, nextExponent)
+		}
+		aExponent := 1 + 2*currentExponent - nextExponent
+		if aExponent != 30 {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d multiplier exponent = %d, want 30", round, aExponent)
+		}
+		factor := new(big.Int).Lsh(big.NewInt(1), uint(aExponent))
+		sqrt2pi *= sqrt2pi
+		constant, _ := new(big.Float).Quo(new(big.Float).SetFloat64(sqrt2pi), new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(nextExponent)))).Float64()
+		if err := eval.FastCKKS.MulRelin(res, res, res); err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d multiply: %w", round, err)
+		}
+		if err := eval.FastCKKS.MulIntegerMaintained(res, factor, res); err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d multiplier: %w", round, err)
+		}
+		if err := eval.FastCKKS.Add(res, -constant, res); err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d constant: %w", round, err)
+		}
+		if err := eval.FastCKKS.Rescale(res, res); err != nil {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d rescale: %w", round, err)
+		}
+		if res.Level() != beforeLevel-1 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(nextScale, 32) || !maintainedComponentZero(res, 1) {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d invariant failed: level=%d scale=%s", round, res.Level(), res.Scale.Value.Text('e', 20))
+		}
+		currentExponent = nextExponent
+	}
+	if currentExponent != 29 || res.Level() != 4 {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final recurrence state invalid: level=%d k=%d", res.Level(), currentExponent)
+	}
+	beforeRestoreScale := res.Scale
+	if err := eval.FastCKKS.MulIntegerMaintained(res, new(big.Int).Lsh(big.NewInt(1), uint(currentExponent)), res); err != nil {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final restore: %w", err)
+	}
+	if !res.Scale.Equal(beforeRestoreScale) || res.Level() != 4 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !maintainedComponentZero(res, 1) {
+		return nil, errors.New("Fast Mod1 normalized LogN13 final restore invariant failed")
+	}
+	res.Scale = inputScale
+	if !res.Scale.Equal(inputScale) {
+		return nil, errors.New("Fast Mod1 normalized LogN13 final scale reset failed")
+	}
 	return res, nil
 }
 

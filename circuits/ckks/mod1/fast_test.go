@@ -174,7 +174,7 @@ func TestFastMod1MatchesStandardCosDiscrete(t *testing.T) {
 func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            13,
-		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60},
+		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
 		LogDefaultScale: 45,
 	})
 	require.NoError(t, err)
@@ -188,12 +188,14 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 		DoubleAngle:     3,
 	})
 	require.NoError(t, err)
+	require.True(t, normalizedLogN13Profile(&params, mod1Params))
 
 	values := make([]complex128, params.MaxSlots())
 	for i := range values {
 		values[i] = complex(float64((i%7)-3)*1e-5, float64((i%5)-2)*1e-5)
 	}
 	fastInput := newFastMod1EncodedInput(t, params, mod1Params.LevelQ, rlwe.NewScale(math.Exp2(60)), values)
+	fastBefore := fastInput.CopyNew()
 	standardInput := fastInput.CopyNew()
 	params.RingQ().AtLevel(standardInput.Level()).IMForm(standardInput.Value[0], standardInput.Value[0])
 	params.RingQ().AtLevel(standardInput.Level()).IMForm(standardInput.Value[1], standardInput.Value[1])
@@ -207,7 +209,16 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	fast, err := NewFastEvaluator(fastckks.NewEvaluator(params), ckkspolynomial.NewFastEvaluator(params, nil), mod1Params).EvaluateNew(fastInput)
 	require.NoError(t, err)
 	require.Equal(t, standard.Level(), fast.Level())
+	require.Equal(t, 4, fast.Level())
+	require.Equal(t, 1, fast.Degree())
 	require.True(t, standard.Scale.Equal(fast.Scale))
+	require.True(t, fast.IsNTT)
+	require.True(t, fast.IsMontgomery)
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < 2; limb++ {
+			require.Equal(t, fastBefore.Value[d].Coeffs[limb], fastInput.Value[d].Coeffs[limb])
+		}
+	}
 
 	standardValues := decodeFastMod1Plaintext(t, params, standard)
 	fastValues := decodeFastMod1MaintainedPlaintext(t, params, fast)
