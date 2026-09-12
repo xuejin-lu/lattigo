@@ -618,6 +618,10 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	if !a.Scale.InDelta(b.Scale, toleranceBits) {
 		return fmt.Errorf("scale discrepancy: (rescale(b) * X^n).Scale = %v != a.Scale = %v", &b.Scale.Value, &a.Scale.Value)
 	}
+	if ws.planScaleOverride && !a.Scale.Equal(b.Scale) {
+		b.Scale = a.Scale
+		return eval.Add(b, a, b)
+	}
 	if err := ws.addAligned(params, eval, a, b); err != nil {
 		return fmt.Errorf("add: %w", err)
 	}
