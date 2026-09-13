@@ -16,14 +16,16 @@ import (
 // FastEvaluator is the explicit Stage-A Fast Bootstrap boundary. It does not
 // embed a Standard CKKS evaluator or accept Bootstrap evaluation keys.
 type FastEvaluator struct {
-	Parameters          Parameters
-	FastCKKS            *fastckks.Evaluator
-	Mod1Parameters      mod1.Parameters
-	PolynomialEvaluator *ckkspolynomial.FastEvaluator
-	Mod1Evaluator       *mod1.FastEvaluator
-	DFTEvaluator        *dft.FastEvaluator
-	C2SDFTMatrix        dft.Matrix
-	S2CDFTMatrix        dft.Matrix
+	Parameters           Parameters
+	FastCKKS             *fastckks.Evaluator
+	Mod1Parameters       mod1.Parameters
+	PolynomialEvaluator  *ckkspolynomial.FastEvaluator
+	Mod1Evaluator        *mod1.FastEvaluator
+	DFTEvaluator         *dft.FastEvaluator
+	C2SDFTMatrix         dft.Matrix
+	S2CDFTMatrix         dft.Matrix
+	C2SRestorePlan       []int
+	C2SCompressionActive bool
 
 	fastPackingInitialized   bool
 	fastPackingErr           error

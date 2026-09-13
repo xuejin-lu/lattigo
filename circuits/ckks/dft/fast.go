@@ -3,6 +3,7 @@ package dft
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	ltcommon "github.com/tuneinsight/lattigo/v6/circuits/common/lintrans"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
@@ -46,7 +47,17 @@ func (eval *FastEvaluator) FastEvaluator() *fastckks.Evaluator { return eval.eva
 
 // CoeffsToSlotsNew applies Fast factorized CoeffsToSlots and returns its outputs.
 func (eval *FastEvaluator) CoeffsToSlotsNew(ctIn *rlwe.Ciphertext, matrices Matrix) (ctReal, ctImag *rlwe.Ciphertext, err error) {
+	return eval.CoeffsToSlotsNewWithRestorePlan(ctIn, matrices, nil)
+}
+
+// CoeffsToSlotsNewWithRestorePlan applies Fast factorized CoeffsToSlots and
+// restores the maintained integer domain after the specified factor groups.
+// A nil plan selects the ordinary Fast path.
+func (eval *FastEvaluator) CoeffsToSlotsNewWithRestorePlan(ctIn *rlwe.Ciphertext, matrices Matrix, restorePlan []int) (ctReal, ctImag *rlwe.Ciphertext, err error) {
 	if err = eval.validateInput(ctIn); err != nil {
+		return nil, nil, err
+	}
+	if err = validateRestorePlan(matrices, restorePlan); err != nil {
 		return nil, nil, err
 	}
 	ctReal = fastckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
@@ -55,13 +66,26 @@ func (eval *FastEvaluator) CoeffsToSlotsNew(ctIn *rlwe.Ciphertext, matrices Matr
 		ctImag = fastckks.NewCiphertext(eval.parameters, 1, matrices.LevelQ)
 		setFastOutputDomain(ctImag, ctIn)
 	}
-	err = eval.CoeffsToSlots(ctIn, matrices, ctReal, ctImag)
+	err = eval.coeffsToSlots(ctIn, matrices, ctReal, ctImag, restorePlan)
 	return
 }
 
 // CoeffsToSlots applies Fast factorized CoeffsToSlots to the provided outputs.
 func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix, ctReal, ctImag *rlwe.Ciphertext) error {
+	return eval.coeffsToSlots(ctIn, matrices, ctReal, ctImag, nil)
+}
+
+// CoeffsToSlotsWithRestorePlan applies the bounded Fast C2S restore plan.
+// Callers must provide one non-negative exponent per factor group.
+func (eval *FastEvaluator) CoeffsToSlotsWithRestorePlan(ctIn *rlwe.Ciphertext, matrices Matrix, ctReal, ctImag *rlwe.Ciphertext, restorePlan []int) error {
+	return eval.coeffsToSlots(ctIn, matrices, ctReal, ctImag, restorePlan)
+}
+
+func (eval *FastEvaluator) coeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix, ctReal, ctImag *rlwe.Ciphertext, restorePlan []int) error {
 	if err := eval.validateInput(ctIn); err != nil {
+		return err
+	}
+	if err := validateRestorePlan(matrices, restorePlan); err != nil {
 		return err
 	}
 	if ctReal == nil || matrices.Format == SplitRealAndImag && ctImag == nil && matrices.LogSlots == eval.parameters.LogMaxSlots() {
@@ -77,7 +101,7 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix,
 		if err != nil {
 			return err
 		}
-		if err = eval.dft(zV, matrices, zV); err != nil {
+		if err = eval.dftWithRestorePlan(zV, matrices, zV, restorePlan); err != nil {
 			return fmt.Errorf("cannot Fast CoeffsToSlots DFT: %w", err)
 		}
 		fastckks.Resize(ctReal, 1, zV.Level(), eval.parameters.N())
@@ -114,7 +138,7 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, matrices Matrix,
 		return nil
 	}
 
-	return eval.dft(ctIn, matrices, ctReal)
+	return eval.dftWithRestorePlan(ctIn, matrices, ctReal, restorePlan)
 }
 
 // SlotsToCoeffsNew applies Fast factorized SlotsToCoeffs and returns its output.
@@ -161,12 +185,19 @@ func (eval *FastEvaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext, matric
 // dft evaluates each factor group and uses Fast Rescale once per group, which
 // matches the Standard DFT factorization's logical level/scale progression.
 func (eval *FastEvaluator) dft(ctIn *rlwe.Ciphertext, matrices Matrix, opOut *rlwe.Ciphertext) error {
+	return eval.dftWithRestorePlan(ctIn, matrices, opOut, nil)
+}
+
+func (eval *FastEvaluator) dftWithRestorePlan(ctIn *rlwe.Ciphertext, matrices Matrix, opOut *rlwe.Ciphertext, restorePlan []int) error {
 	if len(matrices.Matrices) == 0 || len(matrices.Levels) == 0 {
 		return errors.New("Fast DFT requires factor matrices")
 	}
+	if err := validateRestorePlan(matrices, restorePlan); err != nil {
+		return err
+	}
 	inputDimensions := ctIn.LogDimensions
 	matrixIdx := 0
-	for _, factors := range matrices.Levels {
+	for groupIdx, factors := range matrices.Levels {
 		for range factors {
 			if matrixIdx >= len(matrices.Matrices) {
 				return errors.New("Fast DFT factorization is shorter than its level schedule")
@@ -180,11 +211,34 @@ func (eval *FastEvaluator) dft(ctIn *rlwe.Ciphertext, matrices Matrix, opOut *rl
 		if err := eval.eval.Rescale(opOut, opOut); err != nil {
 			return fmt.Errorf("Fast DFT group rescale: %w", err)
 		}
+		if restorePlan != nil && restorePlan[groupIdx] != 0 {
+			k := restorePlan[groupIdx]
+			scalar := new(big.Int).Lsh(big.NewInt(1), uint(k))
+			if err := eval.eval.MulIntegerMaintained(opOut, scalar, opOut); err != nil {
+				return fmt.Errorf("Fast DFT group %d restore: %w", groupIdx, err)
+			}
+			opOut.Scale = opOut.Scale.Mul(rlwe.NewScale(scalar))
+		}
 	}
 	if matrixIdx != len(matrices.Matrices) {
 		return errors.New("Fast DFT factorization has unused matrices")
 	}
 	opOut.LogDimensions = inputDimensions
+	return nil
+}
+
+func validateRestorePlan(matrices Matrix, restorePlan []int) error {
+	if restorePlan == nil {
+		return nil
+	}
+	if len(restorePlan) != len(matrices.Levels) {
+		return fmt.Errorf("Fast DFT restore plan has %d groups, expected %d", len(restorePlan), len(matrices.Levels))
+	}
+	for i, k := range restorePlan {
+		if k < 0 || k > 30 {
+			return fmt.Errorf("Fast DFT restore exponent %d at group %d is unsupported", k, i)
+		}
+	}
 	return nil
 }
 

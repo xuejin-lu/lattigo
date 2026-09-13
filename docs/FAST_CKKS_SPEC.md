@@ -296,6 +296,14 @@ dormant higher limbs untouched. Generic Standard-Bootstrap feature parity,
 iterative correction, inverse/continuous Mod1 variants, ephemeral switching,
 and arbitrary ring-degree ratios are not implied.
 
+For the bounded LogN13 full-slot profile, Fast CoeffsToSlots applies
+group-specific plaintext-encoding compression to preserve exact centered
+q0/q1 representability: group 0 uses exponent 4, group 1 exponent 2, and
+later groups exponent 0. After each ordinary Fast Rescale, the same power of
+two is restored in both maintained coefficients and metadata Scale without an
+additional level. Mathematical DFT scaling and Standard DFT behavior are
+unchanged; this is a bounded capacity workaround.
+
 ## 8. Current implementation versus permanent architecture
 
 ### CURRENT IMPLEMENTATION

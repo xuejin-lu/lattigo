@@ -13,7 +13,7 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext) (ctReal, ctImag 
 	if err = eval.ensureFastBootstrapCircuit(); err != nil {
 		return nil, nil, err
 	}
-	return eval.DFTEvaluator.CoeffsToSlotsNew(ctIn, eval.C2SDFTMatrix)
+	return eval.DFTEvaluator.CoeffsToSlotsNewWithRestorePlan(ctIn, eval.C2SDFTMatrix, eval.C2SRestorePlan)
 }
 
 // SlotsToCoeffs applies the Fast DFT through the ordinary bootstrap stage

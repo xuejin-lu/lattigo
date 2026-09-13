@@ -35,6 +35,10 @@ func (eval *FastEvaluator) ensureFastBootstrapCircuit() error {
 		eval.fastBootstrapErr = fmt.Errorf("cannot initialize Fast Bootstrap circuit: %w", err)
 		return eval.fastBootstrapErr
 	}
+	if c2s, eval.C2SRestorePlan, eval.C2SCompressionActive, err = prepareFastLogN13C2S(adjusted, c2s); err != nil {
+		eval.fastBootstrapErr = fmt.Errorf("cannot prepare Fast LogN13 C2S compression: %w", err)
+		return eval.fastBootstrapErr
+	}
 	eval.Parameters = adjusted
 	eval.Mod1Parameters = mod1Params
 	eval.C2SDFTMatrix = c2s
@@ -161,7 +165,7 @@ func (eval *FastEvaluator) bootstrapCore(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Cip
 		return nil, nil, err
 	}
 	var ctReal, ctImag *rlwe.Ciphertext
-	if ctReal, ctImag, err = eval.DFTEvaluator.CoeffsToSlotsNew(ctOut, eval.C2SDFTMatrix); err != nil {
+	if ctReal, ctImag, err = eval.DFTEvaluator.CoeffsToSlotsNewWithRestorePlan(ctOut, eval.C2SDFTMatrix, eval.C2SRestorePlan); err != nil {
 		return nil, nil, err
 	}
 	if ctReal, err = eval.EvalMod(ctReal); err != nil {

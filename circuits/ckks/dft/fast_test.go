@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	ckkslintrans "github.com/tuneinsight/lattigo/v6/circuits/ckks/lintrans"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
@@ -125,6 +126,51 @@ func TestFastDFTStandardCoeffsToSlotsAndSlotsToCoeffs(t *testing.T) {
 	standardDecoded, err := standardEval.SlotsToCoeffsNew(standardInput, nil, stc)
 	require.NoError(t, err)
 	requireFastDFTMatchesStandard(t, params, fastDecoded, standardDecoded)
+}
+
+func TestFastDFTCoeffsToSlotsRestorePlan(t *testing.T) {
+	params := fastDFTTestParameters(t)
+	original := fastDFTMatrix(t, params, HomomorphicEncode, Standard)
+	compressed := original
+	compressed.Matrices = append([]ckkslintrans.LinearTransformation(nil), original.Matrices...)
+	mathematical := original.MatrixLiteral.GenMatrices(params.LogN(), params.EncodingPrecision())
+	for i, k := range []int{2, 0} {
+		if k == 0 {
+			continue
+		}
+		matrix := original.Matrices[i]
+		compressed.Matrices[i] = ckkslintrans.NewTransformation(params, ckkslintrans.Parameters{
+			DiagonalsIndexList:        mathematical[i].DiagonalsIndexList(),
+			LevelQ:                    matrix.LevelQ,
+			LevelP:                    matrix.LevelP,
+			Scale:                     matrix.Scale.Div(rlwe.NewScale(uint64(1) << uint(k))),
+			LogDimensions:             matrix.LogDimensions,
+			LogBabyStepGiantStepRatio: matrix.LogBabyStepGiantStepRatio,
+		})
+		require.NoError(t, ckkslintrans.Encode(ckks.NewEncoder(params), mathematical[i], compressed.Matrices[i]))
+	}
+
+	standardInput := fastDFTInput(params, original.LevelQ)
+	fastInput := fastDFTMontgomeryCopy(params, standardInput)
+	standardEval := standardDFTEvaluator(t, params, compressed)
+	standard := standardInput.CopyNew()
+	matrixIdx := 0
+	for groupIdx, factors := range compressed.Levels {
+		for range factors {
+			out := ckks.NewCiphertext(params, 1, standard.Level())
+			require.NoError(t, standardEval.LTEvaluator.Evaluate(standard, compressed.Matrices[matrixIdx], out))
+			standard = out
+			matrixIdx++
+		}
+		require.NoError(t, standardEval.Rescale(standard, standard))
+		if k := []int{2, 0}[groupIdx]; k != 0 {
+			require.NoError(t, standardEval.Mul(standard, uint64(1)<<uint(k), standard))
+			standard.Scale = standard.Scale.Mul(rlwe.NewScale(uint64(1) << uint(k)))
+		}
+	}
+	fast, _, err := NewFastEvaluator(params).CoeffsToSlotsNewWithRestorePlan(fastInput, compressed, []int{2, 0})
+	require.NoError(t, err)
+	requireFastDFTMatchesStandard(t, params, fast, standard)
 }
 
 func TestFastDFTSplitRepackAndPoison(t *testing.T) {
