@@ -72,7 +72,7 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 
 	if normalizedLogN13Profile(params, mod1Params) {
 		planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), normalizedLogN13PlanScaleBits))
-		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScale(res, mod1Params.Mod1Poly, targetScale, planScale)
+		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScaleFinalParentOneBitScalarGuard(res, mod1Params.Mod1Poly, targetScale, planScale)
 		if err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial evaluation: %w", err)
 		}

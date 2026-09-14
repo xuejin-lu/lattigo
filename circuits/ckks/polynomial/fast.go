@@ -47,7 +47,7 @@ func NewFastEvaluator(params ckks.Parameters, eval *fastckks.Evaluator) *FastEva
 // polynomial surface accepts Chebyshev polynomials in the Standard ring with
 // NTT/Montgomery degree-one input at a level containing q0 and q1.
 func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale) (*rlwe.Ciphertext, error) {
-	return eval.evaluate(input, p, targetScale, nil)
+	return eval.evaluate(input, p, targetScale, nil, false)
 }
 
 // EvaluateWithPlanScale evaluates the same Paterson-Stockmeyer plan as
@@ -58,10 +58,20 @@ func (eval *FastEvaluator) EvaluateWithPlanScale(input *rlwe.Ciphertext, p bignu
 	if planScale.Value.Sign() <= 0 {
 		return nil, errors.New("Fast polynomial plan scale must be positive")
 	}
-	return eval.evaluate(input, p, targetScale, &planScale)
+	return eval.evaluate(input, p, targetScale, &planScale, false)
 }
 
-func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, planScale *rlwe.Scale) (*rlwe.Ciphertext, error) {
+// EvaluateWithPlanScaleFinalParentOneBitScalarGuard evaluates the normalized
+// LogN13 plan with one explicit final-parent scalar guard. The ordinary
+// Evaluate and EvaluateWithPlanScale paths remain unguarded.
+func (eval *FastEvaluator) EvaluateWithPlanScaleFinalParentOneBitScalarGuard(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale, planScale rlwe.Scale) (*rlwe.Ciphertext, error) {
+	if planScale.Value.Sign() <= 0 {
+		return nil, errors.New("Fast polynomial guarded plan scale must be positive")
+	}
+	return eval.evaluate(input, p, targetScale, &planScale, true)
+}
+
+func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, planScale *rlwe.Scale, guardFinalParent bool) (*rlwe.Ciphertext, error) {
 	if eval == nil || eval.Evaluator == nil {
 		return nil, errors.New("Fast polynomial evaluator cannot be nil")
 	}
@@ -143,7 +153,7 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 			plan.Value[i].Scale = *planScale
 		}
 	}
-	result, err := ws.evaluatePlan(eval.Parameters, eval.Evaluator, plan, ws.powers)
+	result, err := ws.evaluatePlan(eval.Parameters, eval.Evaluator, plan, ws.powers, guardFinalParent)
 	if err != nil {
 		return nil, err
 	}
@@ -151,25 +161,35 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 }
 
 type fastPolynomialWorkspace struct {
-	x1                *rlwe.Ciphertext
-	powers            map[int]*rlwe.Ciphertext
-	powerBuffers      map[int]*rlwe.Ciphertext
-	balancedLeft      *rlwe.Ciphertext
-	balancedRight     *rlwe.Ciphertext
-	babyBuffers       []*rlwe.Ciphertext
-	babySteps         []*fastBabyStep
-	giantSteps        []int
-	scaleScratch      *rlwe.Ciphertext
-	planScaleOverride bool
+	x1                  *rlwe.Ciphertext
+	powers              map[int]*rlwe.Ciphertext
+	powerBuffers        map[int]*rlwe.Ciphertext
+	balancedLeft        *rlwe.Ciphertext
+	balancedRight       *rlwe.Ciphertext
+	babyBuffers         []*rlwe.Ciphertext
+	babySteps           []*fastBabyStep
+	giantSteps          []int
+	scaleScratch        *rlwe.Ciphertext
+	planScaleOverride   bool
+	guardedPlanIndex    int
+	guardedPlanCount    int
+	guardedScalarDegree int
+	guardedOperations   int
 }
 
 type fastBabyStep struct {
-	Degree int
-	Value  *rlwe.Ciphertext
+	Degree              int
+	Value               *rlwe.Ciphertext
+	GuardApplied        bool
+	GuardedScalarDegree int
 }
 
 func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Ciphertext) {
 	ws.planScaleOverride = false
+	ws.guardedPlanIndex = -1
+	ws.guardedPlanCount = 0
+	ws.guardedScalarDegree = 0
+	ws.guardedOperations = 0
 	ws.x1 = ws.ensureCiphertext(params, ws.x1, 1, input.Level())
 	copyMaintained(params, input, ws.x1)
 	for key := range ws.powers {
@@ -494,20 +514,34 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	return nil
 }
 
-func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fastckks.Evaluator, plan commonpolynomial.PatersonStockmeyerPolynomial, powers map[int]*rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fastckks.Evaluator, plan commonpolynomial.PatersonStockmeyerPolynomial, powers map[int]*rlwe.Ciphertext, guardFinalParent bool) (*rlwe.Ciphertext, error) {
 	split := len(plan.Value)
+	if guardFinalParent && !ws.planScaleOverride {
+		return nil, errors.New("Fast polynomial guarded path requires an active plan-scale override")
+	}
+	guardedOperations := 0
+	ws.guardedPlanCount = split
 	if len(ws.babySteps) < split {
 		ws.babySteps = append(ws.babySteps, make([]*fastBabyStep, split-len(ws.babySteps))...)
 	}
 	ws.babySteps = ws.babySteps[:split]
 
 	for i := range ws.babySteps {
-		step, err := ws.evaluateBabyStep(params, eval, plan.Value[i], powers, i)
+		step, err := ws.evaluateBabyStep(params, eval, plan.Value[i], powers, i, guardFinalParent && i == split-1)
 		if err != nil {
 			return nil, fmt.Errorf("Fast polynomial baby step %d: %w", i, err)
 		}
+		if step.GuardApplied {
+			guardedOperations++
+			ws.guardedPlanIndex = i
+			ws.guardedScalarDegree = step.GuardedScalarDegree
+		}
 		ws.babySteps[split-i-1] = step
 	}
+	if guardFinalParent && guardedOperations != 1 {
+		return nil, fmt.Errorf("Fast polynomial guarded path selected %d final-parent scalar operations, want exactly one", guardedOperations)
+	}
+	ws.guardedOperations = guardedOperations
 	for len(ws.babySteps) != 1 {
 		if cap(ws.giantSteps) < len(ws.babySteps) {
 			ws.giantSteps = make([]int, len(ws.babySteps))
@@ -561,7 +595,7 @@ func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fa
 	return result, nil
 }
 
-func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval *fastckks.Evaluator, poly commonpolynomial.Polynomial, powers map[int]*rlwe.Ciphertext, index int) (*fastBabyStep, error) {
+func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval *fastckks.Evaluator, poly commonpolynomial.Polynomial, powers map[int]*rlwe.Ciphertext, index int, guardFinalParent bool) (*fastBabyStep, error) {
 	if poly.Degree() < 0 {
 		return nil, errors.New("invalid empty baby-step polynomial")
 	}
@@ -580,6 +614,23 @@ func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval
 			return nil, fmt.Errorf("constant: %w", err)
 		}
 	}
+	guardKey := -1
+	if guardFinalParent {
+		candidateKeys := make([]int, 0)
+		for key := poly.Degree(); key > 0; key-- {
+			if !(poly.IsEven || poly.IsOdd) || (key&1 == 0 && poly.IsEven) || (key&1 == 1 && poly.IsOdd) {
+				coefficient := poly.Coeffs[key]
+				if coefficient != nil && !coefficient.IsInt() && !fastPolynomialCoefficientZero(coefficient) {
+					candidateKeys = append(candidateKeys, key)
+					guardKey = key
+				}
+			}
+		}
+		if guardKey != 2 {
+			return nil, fmt.Errorf("Fast polynomial guarded path selected final scalar degree %d, want 2 (candidates=%v even=%t odd=%t)", guardKey, candidateKeys, poly.IsEven, poly.IsOdd)
+		}
+	}
+	guardApplied := false
 	for key := poly.Degree(); key > 0; key-- {
 		if !(poly.IsEven || poly.IsOdd) || (key&1 == 0 && poly.IsEven) || (key&1 == 1 && poly.IsOdd) {
 			if poly.Coeffs[key] == nil {
@@ -588,12 +639,26 @@ func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval
 			if powers[key] == nil {
 				return nil, fmt.Errorf("missing Fast power %d", key)
 			}
-			if err := eval.MulThenAdd(powers[key], poly.Coeffs[key], out); err != nil {
+			var err error
+			if guardFinalParent && key == guardKey {
+				err = eval.MulThenAddOneBitScalarGuard(powers[key], poly.Coeffs[key], out)
+				guardApplied = true
+			} else {
+				err = eval.MulThenAdd(powers[key], poly.Coeffs[key], out)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("coefficient %d: %w", key, err)
 			}
 		}
 	}
-	return &fastBabyStep{Degree: poly.Degree(), Value: out}, nil
+	if guardFinalParent && !guardApplied {
+		return nil, errors.New("Fast polynomial guarded path did not execute its selected scalar operation")
+	}
+	return &fastBabyStep{Degree: poly.Degree(), Value: out, GuardApplied: guardApplied, GuardedScalarDegree: guardKey}, nil
+}
+
+func fastPolynomialCoefficientZero(coefficient *bignum.Complex) bool {
+	return coefficient[0].Sign() == 0 && coefficient[1].Sign() == 0
 }
 
 func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval *fastckks.Evaluator, a, b, xpow *rlwe.Ciphertext) error {

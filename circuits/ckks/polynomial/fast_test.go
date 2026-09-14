@@ -14,6 +14,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
+	"github.com/tuneinsight/lattigo/v6/utils/cosine"
 )
 
 func fastPolynomialTestParameters(t *testing.T) ckks.Parameters {
@@ -252,6 +253,36 @@ func TestFastPolynomialPlanScaleOverrideKeepsInputAndFinalRescale(t *testing.T) 
 			require.Equal(t, before.Value[d].Coeffs[limb], input.Value[d].Coeffs[limb])
 		}
 	}
+}
+
+func TestFastPolynomialFinalParentOneBitScalarGuardSelection(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	eval := NewFastEvaluator(params, nil)
+	input := fastckks.NewCiphertext(params, 1, 12)
+	input.IsNTT, input.IsMontgomery = true, true
+	input.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	poly := bignum.NewPolynomial(bignum.Chebyshev, cosine.ApproximateCos(16, 30, float64(uint(1<<10)), 3), [2]float64{-16, 16})
+	poly.IsOdd = false
+	for i := range poly.Coeffs {
+		if i&1 == 1 {
+			poly.Coeffs[i] = nil
+		}
+	}
+	planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 91))
+	got, err := eval.EvaluateWithPlanScaleFinalParentOneBitScalarGuard(input, poly, rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60)), planScale)
+	require.NoError(t, err)
+	require.Equal(t, 1, got.Degree())
+	require.True(t, got.IsNTT)
+	require.True(t, got.IsMontgomery)
+	require.True(t, eval.workspace.planScaleOverride)
+	require.Equal(t, 1, eval.workspace.guardedOperations)
+	require.Equal(t, eval.workspace.guardedPlanCount-1, eval.workspace.guardedPlanIndex)
+	require.Equal(t, 2, eval.workspace.guardedScalarDegree)
 }
 
 func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
