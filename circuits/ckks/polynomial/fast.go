@@ -27,6 +27,17 @@ type FastEvaluator struct {
 	workspace  fastPolynomialWorkspace
 }
 
+// GuardSelectionEvidence reports the last explicit guarded-plan selection.
+// It is intentionally observational; it does not alter polynomial evaluation.
+type GuardSelectionEvidence struct {
+	PlanScaleOverride bool
+	PlanIndex         int
+	PlanCount         int
+	ScalarDegree      int
+	Operations        int
+	Contraction       bool
+}
+
 // NewFastEvaluator returns a Fast polynomial evaluator. If eval is nil, a
 // Fast CKKS evaluator is created for params.
 func NewFastEvaluator(params ckks.Parameters, eval *fastckks.Evaluator) *FastEvaluator {
@@ -40,6 +51,23 @@ func NewFastEvaluator(params ckks.Parameters, eval *fastckks.Evaluator) *FastEva
 			powerBuffers: make(map[int]*rlwe.Ciphertext),
 			powers:       make(map[int]*rlwe.Ciphertext),
 		},
+	}
+}
+
+// LastGuardSelectionEvidence returns compact evidence for the last guarded
+// evaluation. A zero value means no guarded evaluation has completed.
+func (eval *FastEvaluator) LastGuardSelectionEvidence() GuardSelectionEvidence {
+	if eval == nil {
+		return GuardSelectionEvidence{}
+	}
+	ws := &eval.workspace
+	return GuardSelectionEvidence{
+		PlanScaleOverride: ws.planScaleOverride,
+		PlanIndex:         ws.guardedPlanIndex,
+		PlanCount:         ws.guardedPlanCount,
+		ScalarDegree:      ws.guardedScalarDegree,
+		Operations:        ws.guardedOperations,
+		Contraction:       ws.guardedContraction,
 	}
 }
 
@@ -175,6 +203,7 @@ type fastPolynomialWorkspace struct {
 	guardedPlanCount    int
 	guardedScalarDegree int
 	guardedOperations   int
+	guardedContraction  bool
 }
 
 type fastBabyStep struct {
@@ -190,6 +219,7 @@ func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Cip
 	ws.guardedPlanCount = 0
 	ws.guardedScalarDegree = 0
 	ws.guardedOperations = 0
+	ws.guardedContraction = false
 	ws.x1 = ws.ensureCiphertext(params, ws.x1, 1, input.Level())
 	copyMaintained(params, input, ws.x1)
 	for key := range ws.powers {
@@ -535,6 +565,7 @@ func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fa
 			guardedOperations++
 			ws.guardedPlanIndex = i
 			ws.guardedScalarDegree = step.GuardedScalarDegree
+			ws.guardedContraction = true
 		}
 		ws.babySteps[split-i-1] = step
 	}
