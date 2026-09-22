@@ -8,6 +8,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
 // modUpBasis raises a Level-0 Fast ciphertext to the Bootstrap modulus basis
@@ -66,6 +67,7 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 	q0 := Q[0]
 	BRCQ := ringQ.BRedConstants()
 	q1 := Q[1]
+	maintained := fastckks.MaintainedLimbCount(&params, maxLevel)
 	for component := range ct.Value {
 		coeffs := ct.Value[component].Coeffs
 		for j, coeff := range coeffs[0] {
@@ -77,11 +79,26 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 			tmp := ring.BRedAdd(coeff, q1, BRCQ[1])
 			coeffs[1][j] = tmp*pos + (q1-tmp)*neg
 		}
+		if maintained >= 3 {
+			q2 := Q[2]
+			for j, coeff := range coeffs[0] {
+				pos, neg := uint64(1), uint64(0)
+				if coeff >= q0>>1 {
+					coeff = q0 - coeff
+					pos, neg = 0, 1
+				}
+				tmp := ring.BRedAdd(coeff, q2, BRCQ[2])
+				coeffs[2][j] = tmp*pos + (q2-tmp)*neg
+			}
+		}
 	}
 
 	for component := range ct.Value {
 		ringQ.SubRings[0].NTT(ct.Value[component].Coeffs[0], ct.Value[component].Coeffs[0])
 		ringQ.SubRings[1].NTT(ct.Value[component].Coeffs[1], ct.Value[component].Coeffs[1])
+		if maintained >= 3 {
+			ringQ.SubRings[2].NTT(ct.Value[component].Coeffs[2], ct.Value[component].Coeffs[2])
+		}
 	}
 
 	if scale := (eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()) / ct.Scale.Float64(); scale > 1 {
@@ -111,7 +128,7 @@ func (eval *FastEvaluator) ModUp(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) 
 	}
 	ringQ := eval.Parameters.BootstrappingParameters.RingQ()
 	for component := range ct.Value {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < fastckks.MaintainedLimbCount(&eval.Parameters.BootstrappingParameters, ct.Level()); limb++ {
 			ringQ.SubRings[limb].MForm(ct.Value[component].Coeffs[limb], ct.Value[component].Coeffs[limb])
 		}
 	}
@@ -132,10 +149,9 @@ func restoreFastModUpLevel(poly *ring.Poly, level, N int) error {
 	} else {
 		poly.Coeffs = poly.Coeffs[:level+1]
 	}
-	// Fast ModUp only restores the maintained q0/q1 rows. Higher logical
-	// rows remain nil so the bootstrap basis raise does not materialize the
-	// dormant full-RNS storage.
-	for i := 1; i <= level && i < 2; i++ {
+	// Fast ModUp only restores the active bounded rows. Higher logical rows
+	// remain nil so the basis raise does not materialize dormant full-RNS storage.
+	for i := 1; i <= level && i < 3; i++ {
 		if len(poly.Coeffs[i]) != N {
 			poly.Coeffs[i] = make([]uint64, N)
 		}

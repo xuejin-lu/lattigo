@@ -56,16 +56,18 @@ func FastMulQ01Authoritative(ringQ *ring.Ring, p1, p2, p3 ring.Poly) error {
 	if err != nil {
 		return err
 	}
-	copy(p3.Coeffs[0], product.Coeffs[0])
-	copy(p3.Coeffs[1], product.Coeffs[1])
+	for limb := 0; limb < maintainedLimbCountForRing(ringQ); limb++ {
+		copy(p3.Coeffs[limb], product.Coeffs[limb])
+	}
 	return nil
 }
 
 func fastMulQ01Core(ringQ *ring.Ring, p1, p2 ring.Poly) (ring.Poly, error) {
-	aNTT := ring.NewPoly(ringQ.N(), 1)
-	bNTT := ring.NewPoly(ringQ.N(), 1)
-	cNTT := ring.NewPoly(ringQ.N(), 1)
-	cCoeff := ring.NewPoly(ringQ.N(), 1)
+	maintained := maintainedLimbCountForRing(ringQ)
+	aNTT := ring.NewPoly(ringQ.N(), maintained-1)
+	bNTT := ring.NewPoly(ringQ.N(), maintained-1)
+	cNTT := ring.NewPoly(ringQ.N(), maintained-1)
+	cCoeff := ring.NewPoly(ringQ.N(), maintained-1)
 
 	if err := FastPartialNTT(ringQ, p1, aNTT); err != nil {
 		return ring.Poly{}, fmt.Errorf("FastPartialNTT(p1): %w", err)
@@ -76,10 +78,10 @@ func fastMulQ01Core(ringQ *ring.Ring, p1, p2 ring.Poly) (ring.Poly, error) {
 
 	// MulCoeffsMontgomery expects one operand in Montgomery form. This is the
 	// same representation transition used by the Standard CKKS multiplication.
-	ringQ.SubRings[0].MForm(aNTT.Coeffs[0], aNTT.Coeffs[0])
-	ringQ.SubRings[1].MForm(aNTT.Coeffs[1], aNTT.Coeffs[1])
-	ringQ.SubRings[0].MulCoeffsMontgomery(aNTT.Coeffs[0], bNTT.Coeffs[0], cNTT.Coeffs[0])
-	ringQ.SubRings[1].MulCoeffsMontgomery(aNTT.Coeffs[1], bNTT.Coeffs[1], cNTT.Coeffs[1])
+	for limb := 0; limb < maintained; limb++ {
+		ringQ.SubRings[limb].MForm(aNTT.Coeffs[limb], aNTT.Coeffs[limb])
+		ringQ.SubRings[limb].MulCoeffsMontgomery(aNTT.Coeffs[limb], bNTT.Coeffs[limb], cNTT.Coeffs[limb])
+	}
 
 	if err := FastPartialINTT(ringQ, cNTT, cCoeff); err != nil {
 		return ring.Poly{}, fmt.Errorf("FastPartialINTT(product): %w", err)
@@ -94,19 +96,30 @@ func validateFastMulAuthoritative(ringQ *ring.Ring, p1, p2, p3 ring.Poly) error 
 	if ringQ.Level() < 1 {
 		return errors.New("FastMulQ01Authoritative requires q0 and q1")
 	}
+	maintained := maintainedLimbCountForRing(ringQ)
 	for name, p := range map[string]ring.Poly{"p1": p1, "p2": p2} {
 		if p.N() != ringQ.N() || p.Level() < ringQ.Level() {
 			return fmt.Errorf("%s dimensions or level are insufficient", name)
 		}
-		if len(p.Coeffs) < 2 || len(p.Coeffs[0]) != ringQ.N() || len(p.Coeffs[1]) != ringQ.N() {
-			return fmt.Errorf("%s q0/q1 coefficient slices are invalid", name)
+		if len(p.Coeffs) < maintained {
+			return fmt.Errorf("%s maintained coefficient slices are invalid", name)
+		}
+		for limb := 0; limb < maintained; limb++ {
+			if len(p.Coeffs[limb]) != ringQ.N() {
+				return fmt.Errorf("%s maintained coefficient slices are invalid", name)
+			}
 		}
 	}
 	if p3.N() != ringQ.N() || p3.Level() < 1 {
 		return errors.New("p3 dimensions or level are insufficient")
 	}
-	if len(p3.Coeffs) < 2 || len(p3.Coeffs[0]) != ringQ.N() || len(p3.Coeffs[1]) != ringQ.N() {
-		return errors.New("p3 q0/q1 coefficient slices are invalid")
+	if len(p3.Coeffs) < maintained {
+		return errors.New("p3 maintained coefficient slices are invalid")
+	}
+	for limb := 0; limb < maintained; limb++ {
+		if len(p3.Coeffs[limb]) != ringQ.N() {
+			return errors.New("p3 maintained coefficient slices are invalid")
+		}
 	}
 	return nil
 }

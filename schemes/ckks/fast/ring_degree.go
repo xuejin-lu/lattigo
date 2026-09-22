@@ -48,10 +48,7 @@ func fastRingDegreeConversion(ringIn, ringOut *ring.Ring, ctIn, ctOut *rlwe.Ciph
 	} else if ringIn.N() != 2*ringOut.N() {
 		return errors.New("FastN2ToN1 requires input degree twice the output degree")
 	}
-	maintained := ringIn.Level() + 1
-	if maintained > 2 {
-		maintained = 2
-	}
+	maintained := maintainedLimbCountForRing(ringIn)
 	for i := 0; i < maintained; i++ {
 		if ringIn.SubRings[i].Modulus != ringOut.SubRings[i].Modulus {
 			return errors.New("Fast ring-degree conversion requires matching maintained moduli")

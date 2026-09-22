@@ -38,7 +38,7 @@ func FastAutomorphism(ringQ *ring.Ring, polIn, polOut ring.Poly, galEl uint64, i
 		if err != nil {
 			return fmt.Errorf("compute NTT automorphism index: %w", err)
 		}
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(polIn, polOut)); limb++ {
 			// The temporary is intentional: ring automorphism primitives are
 			// non-in-place, while Fast explicitly permits input/output aliasing.
 			tmp := make([]uint64, ringQ.N())
@@ -52,7 +52,7 @@ func FastAutomorphism(ringQ *ring.Ring, polIn, polOut ring.Poly, galEl uint64, i
 
 	mask := uint64(ringQ.N() - 1)
 	logN := uint(bits.Len64(mask))
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(polIn, polOut)); limb++ {
 		modulus := ringQ.SubRings[limb].Modulus
 		tmp := make([]uint64, ringQ.N())
 		for i, value := range polIn.Coeffs[limb] {
@@ -104,7 +104,7 @@ func (eval *Evaluator) fastAutomorphism(ringQ *ring.Ring, polIn, polOut ring.Pol
 		}
 		eval.automorphismIndexCache[galEl] = index
 	}
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(polIn, polOut)); limb++ {
 		tmp := eval.automorphismScratch[limb]
 		for j, src := range index {
 			tmp[j] = polIn.Coeffs[limb][src]

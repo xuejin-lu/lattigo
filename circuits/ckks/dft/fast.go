@@ -279,6 +279,7 @@ func setFastOutputDomain(out, reference *rlwe.Ciphertext) {
 }
 
 func copyQ01ForDFT(src, dst ring.Poly) {
-	copy(dst.Coeffs[0], src.Coeffs[0])
-	copy(dst.Coeffs[1], src.Coeffs[1])
+	for limb := 0; limb < len(src.Coeffs) && limb < len(dst.Coeffs) && limb < 3; limb++ {
+		copy(dst.Coeffs[limb], src.Coeffs[limb])
+	}
 }

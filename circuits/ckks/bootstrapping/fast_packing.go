@@ -12,8 +12,9 @@ import (
 )
 
 // ensureFastPackingTables lazily creates the Standard-ring monomial tables
-// used by the packing boundary. The tables contain only q0/q1 rows; the
-// exponent schedule is the same as the Standard evaluator's tables.
+// used by the packing boundary. The exponent schedule is the same as the
+// Standard evaluator's tables, while the active q-limb count follows the
+// bounded Fast parameter profile.
 func (eval *FastEvaluator) ensureFastPackingTables() error {
 	if eval == nil {
 		return errors.New("Fast Bootstrap evaluator cannot be nil")
@@ -55,7 +56,10 @@ func (eval *FastEvaluator) ensureFastPackingTables() error {
 	}
 	if paramsN1.RingQ() != nil {
 		maintained := utils.Min(paramsN1.RingQ().MaxLevel(), paramsN2.RingQ().MaxLevel()) + 1
-		maintained = utils.Min(maintained, 2)
+		maintained = utils.Min(maintained, utils.Min(
+			fastckks.MaintainedLimbCount(&paramsN1, paramsN1.RingQ().MaxLevel()),
+			fastckks.MaintainedLimbCount(&paramsN2, paramsN2.RingQ().MaxLevel()),
+		))
 		for limb := 0; limb < maintained; limb++ {
 			if paramsN1.RingQ().SubRings[limb].Modulus != paramsN2.RingQ().SubRings[limb].Modulus {
 				eval.fastPackingErr = errors.New("Fast packing requires matching maintained moduli across N1/N2")
@@ -64,16 +68,16 @@ func (eval *FastEvaluator) ensureFastPackingTables() error {
 		}
 	}
 
-	paramsN2Q01 := paramsN2.RingQ().AtLevel(utils.Min(1, paramsN2.RingQ().MaxLevel()))
-	eval.xPow2N2 = rlwe.GenXPow2NTT(paramsN2Q01, paramsN2.LogN(), false)
-	eval.xPow2InvN2 = rlwe.GenXPow2NTT(paramsN2Q01, paramsN2.LogN(), true)
+	paramsN2Q := paramsN2.RingQ().AtLevel(fastckks.MaintainedLimbCount(&paramsN2, paramsN2.RingQ().MaxLevel()) - 1)
+	eval.xPow2N2 = rlwe.GenXPow2NTT(paramsN2Q, paramsN2.LogN(), false)
+	eval.xPow2InvN2 = rlwe.GenXPow2NTT(paramsN2Q, paramsN2.LogN(), true)
 
 	if paramsN1.N() != paramsN2.N() {
-		paramsN1Q01 := paramsN1.RingQ().AtLevel(utils.Min(1, paramsN1.RingQ().MaxLevel()))
+		paramsN1Q := paramsN1.RingQ().AtLevel(fastckks.MaintainedLimbCount(&paramsN1, paramsN1.RingQ().MaxLevel()) - 1)
 		// Standard uses paramsN2.LogN() for the forward N1 table and
 		// paramsN1.LogN() for its inverse table.
-		eval.xPow2N1 = rlwe.GenXPow2NTT(paramsN1Q01, paramsN2.LogN(), false)
-		eval.xPow2InvN1 = rlwe.GenXPow2NTT(paramsN1Q01, paramsN1.LogN(), true)
+		eval.xPow2N1 = rlwe.GenXPow2NTT(paramsN1Q, paramsN2.LogN(), false)
+		eval.xPow2InvN1 = rlwe.GenXPow2NTT(paramsN1Q, paramsN1.LogN(), true)
 	}
 	return nil
 }
@@ -97,7 +101,7 @@ func validateFastPackingCiphertext(ct *rlwe.Ciphertext, params ckks.Parameters) 
 	if !ct.IsNTT {
 		return errors.New("Fast packing requires NTT-domain ciphertexts")
 	}
-	maintained := maintainedLimbs(ct.Level())
+	maintained := maintainedLimbs(params, ct.Level())
 	for d := 0; d <= 1; d++ {
 		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < maintained ||
 			len(ct.Value[d].Coeffs[0]) != params.N() {
@@ -144,7 +148,7 @@ func validateFastPackingSlice(cts []rlwe.Ciphertext, params ckks.Parameters) err
 func copyFastPackingCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) rlwe.Ciphertext {
 	dst := fastckks.NewCiphertext(params, 1, src.Level())
 	*dst.MetaData = *src.MetaData
-	maintained := maintainedLimbs(src.Level())
+	maintained := maintainedLimbs(params, src.Level())
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb < maintained; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
@@ -173,7 +177,7 @@ func (eval *FastEvaluator) fastPack(cts []rlwe.Ciphertext, ctxt packingContext, 
 	}
 	logPackCTs := ctxt.LogMaxDimensions.Cols - ctxt.LogSlots
 	logGap := ctxt.Params.LogMaxSlots() - ctxt.LogSlots - 1
-	maintained := maintainedLimbs(packed[0].Level())
+	maintained := maintainedLimbs(*ctxt.Params, packed[0].Level())
 	for i := 0; i < logPackCTs; i++ {
 		for j := 0; j < len(packed)>>1; j++ {
 			even := &packed[j*2]
@@ -234,7 +238,7 @@ func (eval *FastEvaluator) fastUnpack(ct *rlwe.Ciphertext, ctxt packingContext, 
 	}
 
 	logGap := ctxt.Params.LogMaxSlots() - ctxt.LogSlots - 1
-	maintained := maintainedLimbs(ct.Level())
+	maintained := maintainedLimbs(*ctxt.Params, ct.Level())
 	for i := 0; i < utils.Min(bitsLen64(uint64(n-1)), logPackCTs); i++ {
 		step := 1 << (i + 1)
 		monomialIndex := logGap - i
@@ -256,8 +260,8 @@ func (eval *FastEvaluator) fastUnpack(ct *rlwe.Ciphertext, ctxt packingContext, 
 	return cts, nil
 }
 
-func maintainedLimbs(level int) int {
-	return utils.Min(level+1, 2)
+func maintainedLimbs(params ckks.Parameters, level int) int {
+	return fastckks.MaintainedLimbCount(&params, level)
 }
 
 func bitsLen64(value uint64) int {

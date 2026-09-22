@@ -57,10 +57,10 @@ func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Cipher
 	}
 
 	*opOut.MetaData = *ctIn.MetaData
+	ringQ := eval.Parameters.RingQ().AtLevel(opOut.Level())
 	if ctIn != opOut {
 		for component := range ctIn.Value {
-			copy(opOut.Value[component].Coeffs[0], ctIn.Value[component].Coeffs[0])
-			copy(opOut.Value[component].Coeffs[1], ctIn.Value[component].Coeffs[1])
+			copyMaintained(ringQ, ctIn.Value[component], opOut.Value[component])
 		}
 	}
 
@@ -72,7 +72,6 @@ func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Cipher
 		return nil
 	}
 
-	ringQ := eval.Parameters.RingQ().AtLevel(opOut.Level())
 	nInv := new(big.Int).SetUint64(uint64(gap))
 	if nInv.ModInverse(nInv, ringQ.ModulusAtLevel[opOut.Level()]) == nil {
 		return fmt.Errorf("Fast Trace cannot invert gap %d modulo Q", gap)
@@ -86,7 +85,7 @@ func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Cipher
 			if err := eval.fastAutomorphism(ringQ, opOut.Value[component], eval.nttScratch[0], galEl, true); err != nil {
 				return err
 			}
-			for limb := 0; limb < 2; limb++ {
+			for limb := 0; limb < maintainedLimbCount(&eval.Parameters, opOut.Level()); limb++ {
 				ringQ.SubRings[limb].Add(opOut.Value[component].Coeffs[limb], eval.nttScratch[0].Coeffs[limb], opOut.Value[component].Coeffs[limb])
 			}
 		}

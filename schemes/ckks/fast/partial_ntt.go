@@ -20,8 +20,9 @@ func FastPartialNTT(ringQ *ring.Ring, p1, p2 ring.Poly) error {
 		return err
 	}
 
-	ringQ.SubRings[0].NTT(p1.Coeffs[0], p2.Coeffs[0])
-	ringQ.SubRings[1].NTT(p1.Coeffs[1], p2.Coeffs[1])
+	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(p1, p2)); limb++ {
+		ringQ.SubRings[limb].NTT(p1.Coeffs[limb], p2.Coeffs[limb])
+	}
 	return nil
 }
 
@@ -35,8 +36,9 @@ func FastPartialINTT(ringQ *ring.Ring, p1, p2 ring.Poly) error {
 		return err
 	}
 
-	ringQ.SubRings[0].INTT(p1.Coeffs[0], p2.Coeffs[0])
-	ringQ.SubRings[1].INTT(p1.Coeffs[1], p2.Coeffs[1])
+	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(p1, p2)); limb++ {
+		ringQ.SubRings[limb].INTT(p1.Coeffs[limb], p2.Coeffs[limb])
+	}
 	return nil
 }
 
@@ -53,9 +55,22 @@ func validatePartialTransform(ringQ *ring.Ring, p1, p2 ring.Poly) error {
 	if p1.N() != ringQ.N() || p2.N() != ringQ.N() {
 		return fmt.Errorf("input and output dimensions must match ringQ.N()=%d", ringQ.N())
 	}
-	if len(p1.Coeffs[0]) != ringQ.N() || len(p1.Coeffs[1]) != ringQ.N() ||
-		len(p2.Coeffs[0]) != ringQ.N() || len(p2.Coeffs[1]) != ringQ.N() {
-		return fmt.Errorf("q0 and q1 coefficient slices must have length %d", ringQ.N())
+	maintained := maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(p1, p2))
+	if len(p1.Coeffs) < maintained || len(p2.Coeffs) < maintained {
+		return fmt.Errorf("maintained coefficient slices are insufficient")
+	}
+	for limb := 0; limb < maintained; limb++ {
+		if len(p1.Coeffs[limb]) != ringQ.N() || len(p2.Coeffs[limb]) != ringQ.N() {
+			return fmt.Errorf("maintained coefficient slices must have length %d", ringQ.N())
+		}
 	}
 	return nil
+}
+
+func minPolyLevel(a, b ring.Poly) int {
+	level := a.Level()
+	if b.Level() < level {
+		level = b.Level()
+	}
+	return level
 }

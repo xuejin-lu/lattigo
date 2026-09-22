@@ -63,11 +63,11 @@ func (eval *Evaluator) addSub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlw
 	*opOut.MetaData = *op0.MetaData
 	if op0 != opOut {
 		for d := range op0.Value {
-			copyQ01(op0.Value[d], opOut.Value[d])
+			copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], opOut.Value[d])
 		}
 	}
 	values := eval.scalarNTT(c, &op0.Scale.Value, op0.IsMontgomery)
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		half := eval.Parameters.N() >> 1
 		if sub {
@@ -95,7 +95,7 @@ func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[rin
 	opOut.LogDimensions.Rows = utils.Max(op0.LogDimensions.Rows, op1.LogDimensions.Rows)
 	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
 	for d := 0; d <= minDegree; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, op0.Level()); limb++ {
 			s := eval.Parameters.RingQ().SubRings[limb]
 			if sub {
 				s.Sub(op0.Value[d].Coeffs[limb], op1.Value[d].Coeffs[limb], opOut.Value[d].Coeffs[limb])
@@ -106,14 +106,14 @@ func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[rin
 	}
 	if op0.Degree() > minDegree && opOut != op0 {
 		for d := minDegree + 1; d <= op0.Degree(); d++ {
-			copyQ01(op0.Value[d], opOut.Value[d])
+			copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], opOut.Value[d])
 		}
 	} else if op1.Degree() > minDegree {
 		for d := minDegree + 1; d <= op1.Degree(); d++ {
 			if sub {
 				negQ01(eval.Parameters.RingQ(), op1.Value[d], opOut.Value[d])
 			} else if opOut.El() != op1 {
-				copyQ01(op1.Value[d], opOut.Value[d])
+				copyMaintained(eval.Parameters.RingQ().AtLevel(level), op1.Value[d], opOut.Value[d])
 			}
 		}
 	}
@@ -181,7 +181,7 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 		eval.pointMul(op0.Value[0], op1.Value[0], t0, op0.IsMontgomery)
 		if op0.El() == op1 {
 			eval.pointMul(op0.Value[0], op0.Value[1], t1, op0.IsMontgomery)
-			for limb := 0; limb < 2; limb++ {
+			for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 				eval.Parameters.RingQ().SubRings[limb].Add(t1.Coeffs[limb], t1.Coeffs[limb], t1.Coeffs[limb])
 			}
 		} else {
@@ -192,10 +192,10 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 			eval.pointMul(op0.Value[1], op1.Value[1], t2, op0.IsMontgomery)
 		}
 		Resize(opOut, degree, level, eval.Parameters.N())
-		copyQ01(t0, opOut.Value[0])
-		copyQ01(t1, opOut.Value[1])
+		copyMaintained(eval.Parameters.RingQ().AtLevel(level), t0, opOut.Value[0])
+		copyMaintained(eval.Parameters.RingQ().AtLevel(level), t1, opOut.Value[1])
 		if !relin {
-			copyQ01(t2, opOut.Value[2])
+			copyMaintained(eval.Parameters.RingQ().AtLevel(level), t2, opOut.Value[2])
 		}
 	} else {
 		var ct []ring.Poly
@@ -210,7 +210,7 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 		}
 		Resize(opOut, degree, level, eval.Parameters.N())
 		for d := range ct {
-			copyQ01(eval.nttScratch[d], opOut.Value[d])
+			copyMaintained(eval.Parameters.RingQ().AtLevel(level), eval.nttScratch[d], opOut.Value[d])
 		}
 	}
 	*opOut.MetaData = *op0.MetaData
@@ -228,7 +228,7 @@ func (eval *Evaluator) Relinearize(op0, opOut *rlwe.Ciphertext) error {
 	if op0.Level() != opOut.Level() {
 		return errors.New("Fast Relinearize requires equal input/output levels")
 	}
-	return FastTruncateDegree2To1(op0, opOut)
+	return fastTruncateDegree2To1(eval.Parameters.RingQ(), op0, opOut)
 }
 
 // MulThenAdd adds the product directly into q0/q1 output storage.
@@ -270,7 +270,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			// must not also change the multiplicand used by the fused add.
 			if op0 == opOut {
 				for d := range op0.Value {
-					copyQ01(op0.Value[d], eval.nttScratch[d])
+					copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], eval.nttScratch[d])
 				}
 				source = eval.nttScratch[:len(op0.Value)]
 			}
@@ -303,7 +303,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		} else {
 			if op0 == opOut {
 				for d := range op0.Value {
-					copyQ01(op0.Value[d], eval.nttScratch[d])
+					copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], eval.nttScratch[d])
 				}
 				source = eval.nttScratch[:len(op0.Value)]
 			}
@@ -319,7 +319,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 	}
 	values := eval.scalarNTT(c, &scale.Value, false)
 	for d := range source {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 			s := eval.Parameters.RingQ().SubRings[limb]
 			half := eval.Parameters.N() >> 1
 			s.MulScalarMontgomeryThenAdd(source[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), opOut.Value[d].Coeffs[limb][:half])
@@ -334,7 +334,7 @@ func (eval *Evaluator) mulElementThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element
 		eval.pointMulThenAdd(op0.Value[0], op1.Value[0], out.Value[0], op0.IsMontgomery)
 		eval.pointMul(op0.Value[0], op1.Value[1], eval.nttScratch[0], op0.IsMontgomery)
 		eval.pointMulThenAdd(op0.Value[1], op1.Value[0], eval.nttScratch[0], op0.IsMontgomery)
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, out.Level()); limb++ {
 			eval.Parameters.RingQ().SubRings[limb].Add(out.Value[1].Coeffs[limb], eval.nttScratch[0].Coeffs[limb], out.Value[1].Coeffs[limb])
 		}
 		eval.pointMulThenAdd(op0.Value[1], op1.Value[1], out.Value[2], op0.IsMontgomery)
@@ -370,7 +370,7 @@ func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex,
 	values := eval.scalarNTT(c, &scale.Value, false)
 	Resize(out, op0.Degree(), level, eval.Parameters.N())
 	for d := range op0.Value {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 			s := eval.Parameters.RingQ().SubRings[limb]
 			half := eval.Parameters.N() >> 1
 			s.MulScalarMontgomery(op0.Value[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), out.Value[d].Coeffs[limb][:half])
@@ -383,7 +383,17 @@ func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex,
 }
 
 func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) {
-	for limb := 0; limb < 2; limb++ {
+	count := len(a.Coeffs)
+	if len(b.Coeffs) < count {
+		count = len(b.Coeffs)
+	}
+	if len(out.Coeffs) < count {
+		count = len(out.Coeffs)
+	}
+	if count > 3 {
+		count = 3
+	}
+	for limb := 0; limb < count; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		if montgomery {
 			s.MulCoeffsMontgomery(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
@@ -394,7 +404,17 @@ func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) {
 }
 
 func (eval *Evaluator) pointMulThenAdd(a, b, out ring.Poly, montgomery bool) {
-	for limb := 0; limb < 2; limb++ {
+	count := len(a.Coeffs)
+	if len(b.Coeffs) < count {
+		count = len(b.Coeffs)
+	}
+	if len(out.Coeffs) < count {
+		count = len(out.Coeffs)
+	}
+	if count > 3 {
+		count = 3
+	}
+	for limb := 0; limb < count; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		if montgomery {
 			s.MulCoeffsMontgomeryThenAdd(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
@@ -466,8 +486,8 @@ func (eval *Evaluator) coefficientScale(level int) (rlwe.Scale, error) {
 	return scale, nil
 }
 
-func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery bool) [2][2]uint64 {
-	var out [2][2]uint64
+func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery bool) [3][2]uint64 {
+	var out [3][2]uint64
 	toInt := func(x *big.Float) *big.Int {
 		z := new(big.Int)
 		if x == nil {
@@ -483,7 +503,7 @@ func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery
 		return z
 	}
 	real, imag := toInt(c[0]), toInt(c[1])
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, eval.Parameters.MaxLevel()); limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		r := new(big.Int).Mod(new(big.Int).Set(real), new(big.Int).SetUint64(s.Modulus)).Uint64()
 		i := new(big.Int).Mod(new(big.Int).Set(imag), new(big.Int).SetUint64(s.Modulus)).Uint64()

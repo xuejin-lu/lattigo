@@ -583,6 +583,60 @@ func TestBalancedScheduleBranchSelection(t *testing.T) {
 	require.False(t, low.balanced)
 }
 
+func TestPostProductQ012ScheduleSelection(t *testing.T) {
+	q012Params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		Q:               []uint64{72057594037616641, 549755731969, 549756026881},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	q012 := fastPowerBasis{basis: bignum.Chebyshev, params: q012Params}
+	require.False(t, q012.postProductQ012Schedule(1), "Q012 must not be selected before three maintained limbs are active")
+	require.True(t, q012.postProductQ012Schedule(2))
+
+	legacyParams, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{55, 39, 40},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	legacy := fastPowerBasis{basis: bignum.Chebyshev, params: legacyParams}
+	require.False(t, legacy.postProductQ012Schedule(2), "non-Q012 profiles must retain the fallback schedule")
+
+	monomial := fastPowerBasis{basis: bignum.Monomial, params: q012Params}
+	require.False(t, monomial.postProductQ012Schedule(2), "the post-product recurrence is Chebyshev-specific")
+}
+
+func TestPostProductQ012PowerContract(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{56, 39, 40, 40},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	eval := NewFastEvaluator(params, nil)
+	input := fastPolynomialTestCiphertext(params, 17)
+	eval.workspace.reset(params, input)
+	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+	require.NoError(t, pb.genPower(2, false))
+	got := eval.workspace.powers[2]
+
+	reference := fastPolynomialReferenceCiphertext(params, input)
+	require.NoError(t, eval.Evaluator.MulRelin(input, input, reference))
+	require.NoError(t, eval.Evaluator.Add(reference, reference, reference))
+	require.NoError(t, eval.Evaluator.Add(reference, -1, reference))
+	require.NoError(t, eval.Evaluator.Rescale(reference, reference))
+
+	require.Equal(t, input.Level()-1, got.Level(), "the repaired recurrence consumes exactly one level")
+	require.Equal(t, 1, got.Degree())
+	require.True(t, got.Scale.Equal(reference.Scale), "post-product scale=%v reference=%v", got.Scale.Float64(), reference.Scale.Float64())
+	for d := 0; d <= 1; d++ {
+		for limb := 0; limb < fastckks.MaintainedLimbCount(params, got.Level()); limb++ {
+			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb], "component=%d limb=%d", d, limb)
+		}
+	}
+}
+
 func TestBalancedPowerSourceImmutabilityAndScratchOwnership(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            6,

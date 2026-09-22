@@ -23,7 +23,8 @@ type FastEvaluator struct {
 	PolynomialEvaluator *ckkspolynomial.FastEvaluator
 }
 
-const normalizedLogN13PlanScaleBits = 91
+const normalizedLogN13PlanScaleBits = 93
+const legacyNormalizedLogN13PlanScaleBits = 91
 
 // NewFastEvaluator creates a bounded Fast Mod1 evaluator.
 func NewFastEvaluator(eval *fastckks.Evaluator, evalPoly *ckkspolynomial.FastEvaluator, params Parameters) *FastEvaluator {
@@ -71,7 +72,8 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 	}
 
 	if normalizedLogN13Profile(params, mod1Params) {
-		planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), normalizedLogN13PlanScaleBits))
+		planBits := normalizedLogN13PlanScaleBitsForParams(params)
+		planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(planBits)))
 		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScale(res, mod1Params.Mod1Poly, targetScale, planScale)
 		if err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial evaluation: %w", err)
@@ -117,7 +119,7 @@ func normalizedLogN13Profile(params *ckks.Parameters, mod1Params Parameters) boo
 		return false
 	}
 	for i, logQ := range params.LogQi() {
-		valid := (i == 0 && logQ == 55) ||
+		valid := (i == 0 && (logQ == 55 || logQ == 56)) ||
 			(i >= 1 && i <= 3 && logQ >= 39 && logQ <= 40) ||
 			(i == 4 && logQ >= 39 && logQ <= 45) ||
 			(i >= 5 && i <= 12 && logQ >= 60 && logQ <= 61) ||
@@ -127,6 +129,13 @@ func normalizedLogN13Profile(params *ckks.Parameters, mod1Params Parameters) boo
 		}
 	}
 	return true
+}
+
+func normalizedLogN13PlanScaleBitsForParams(params *ckks.Parameters) int {
+	if params != nil && len(params.Q()) > 0 && params.LogQi()[0] == 55 {
+		return legacyNormalizedLogN13PlanScaleBits
+	}
+	return normalizedLogN13PlanScaleBits
 }
 
 func nearestPowerOfTwoExponent(scale rlwe.Scale) (int, error) {
@@ -146,7 +155,7 @@ func maintainedComponentZero(ct *rlwe.Ciphertext, component int) bool {
 	if ct == nil || component < 0 || component >= len(ct.Value) || len(ct.Value[component].Coeffs) < 2 {
 		return false
 	}
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < len(ct.Value[component].Coeffs) && limb < 3; limb++ {
 		for _, value := range ct.Value[component].Coeffs[limb] {
 			if value != 0 {
 				return false
@@ -158,19 +167,24 @@ func maintainedComponentZero(ct *rlwe.Ciphertext, component int) bool {
 
 func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputScale, targetScale rlwe.Scale, mod1Params Parameters, planScale rlwe.Scale) (*rlwe.Ciphertext, error) {
 	params := eval.FastCKKS.GetParameters()
-	workingScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 31))
+	planBits := normalizedLogN13PlanScaleBitsForParams(params)
+	workingExponent, kExponent, multiplierExponent := 31, 29, 30
+	if planBits == normalizedLogN13PlanScaleBits {
+		workingExponent, kExponent, multiplierExponent = 33, 27, 28
+	}
+	workingScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(workingExponent)))
 	if res.Level() != 7 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(workingScale, 32) || !maintainedComponentZero(res, 1) {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial output invariant failed: level=%d degree=%d scale=%s isNTT=%t isMontgomery=%t", res.Level(), res.Degree(), res.Scale.Value.Text('e', 20), res.IsNTT, res.IsMontgomery)
 	}
-	if !planScale.Equal(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), normalizedLogN13PlanScaleBits))) {
+	if !planScale.Equal(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(planBits)))) {
 		return nil, errors.New("Fast Mod1 normalized LogN13 plan scale changed unexpectedly")
 	}
 	kIn, err := nearestPowerOfTwoExponent(targetScale.Div(res.Scale))
 	if err != nil {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 scale ratio: %w", err)
 	}
-	if kIn != 29 {
-		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 k exponent = %d, want 29", kIn)
+	if kIn != kExponent {
+		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 k exponent = %d, want %d", kIn, kExponent)
 	}
 	kValue := new(big.Int).Lsh(big.NewInt(1), uint(kIn))
 	coherentScale := res.Scale.Mul(rlwe.NewScale(kValue))
@@ -190,12 +204,12 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		if err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d next scale: %w", round, err)
 		}
-		if nextExponent != 29 {
-			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d k exponent = %d, want 29", round, nextExponent)
+		if nextExponent != kExponent {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d k exponent = %d, want %d", round, nextExponent, kExponent)
 		}
 		aExponent := 1 + 2*currentExponent - nextExponent
-		if aExponent != 30 {
-			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d multiplier exponent = %d, want 30", round, aExponent)
+		if aExponent != multiplierExponent {
+			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d multiplier exponent = %d, want %d", round, aExponent, multiplierExponent)
 		}
 		factor := new(big.Int).Lsh(big.NewInt(1), uint(aExponent))
 		sqrt2pi *= sqrt2pi
@@ -217,7 +231,7 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		}
 		currentExponent = nextExponent
 	}
-	if currentExponent != 29 || res.Level() != 4 {
+	if currentExponent != kExponent || res.Level() != 4 {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final recurrence state invalid: level=%d k=%d", res.Level(), currentExponent)
 	}
 	beforeRestoreScale := res.Scale
@@ -259,11 +273,12 @@ func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext) error {
 	if !ct.IsNTT || !ct.IsMontgomery {
 		return errors.New("Fast Mod1 requires NTT-domain Montgomery input")
 	}
+	maintained := fastckks.MaintainedLimbCount(eval.FastCKKS.GetParameters(), ct.Level())
 	for d := 0; d <= 1; d++ {
-		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < 2 ||
+		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < maintained ||
 			len(ct.Value[d].Coeffs[0]) != eval.FastCKKS.GetParameters().N() ||
 			len(ct.Value[d].Coeffs[1]) != eval.FastCKKS.GetParameters().N() {
-			return errors.New("Fast Mod1 input has invalid q0/q1 storage")
+			return errors.New("Fast Mod1 input has invalid maintained storage")
 		}
 	}
 	if len(eval.Parameters.Mod1Poly.Coeffs) == 0 {
@@ -286,8 +301,9 @@ func cloneFastCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Cip
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
+	maintained := fastckks.MaintainedLimbCount(&params, src.Level())
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < maintained; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}

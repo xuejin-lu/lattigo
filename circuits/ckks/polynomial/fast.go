@@ -392,6 +392,20 @@ func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, comm
 	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
 }
 
+// postProductQ012Schedule selects the proven LogN13 Q012 Chebyshev power
+// schedule. In this bounded profile the generated power must keep the full
+// product scale through the Chebyshev recurrence and consume exactly one
+// level only after the recurrence is complete. Other profiles retain the
+// established balanced/low-scale schedule.
+func (pb *fastPowerBasis) postProductQ012Schedule(commonLevel int) bool {
+	return pb.basis == bignum.Chebyshev &&
+		pb.params.LogN() == 13 &&
+		pb.params.RingType() == ring.Standard &&
+		pb.params.LevelsConsumedPerRescaling() == 1 &&
+		commonLevel >= 2 &&
+		fastckks.MaintainedLimbCount(&pb.params, commonLevel) == 3
+}
+
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
 	if pb.values[n] != nil {
 		return nil
@@ -433,7 +447,8 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
 	}
 	var out *rlwe.Ciphertext
-	balanced := schedule.balanced
+	postProduct := pb.postProductQ012Schedule(commonLevel)
+	balanced := schedule.balanced && !postProduct
 	if balanced {
 		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, true)
 		if err != nil {
@@ -515,7 +530,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			return fmt.Errorf("Fast power %d: balanced scale discrepancy: actual=%v target=%v", n, &out.Scale.Value, &schedule.targetScale.Value)
 		}
 		out.Scale = schedule.targetScale
-	} else {
+	} else if !postProduct {
 		if err := pb.eval.Rescale(out, out); err != nil {
 			return fmt.Errorf("Fast power %d: rescale: %w", n, err)
 		}
@@ -537,6 +552,11 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			if err = pb.workspace.subAligned(pb.params, pb.eval, out, pb.values[c]); err != nil {
 				return fmt.Errorf("Fast power %d: subtract difference power: %w", n, err)
 			}
+		}
+	}
+	if postProduct {
+		if err := pb.eval.Rescale(out, out); err != nil {
+			return fmt.Errorf("Fast power %d: post-product rescale: %w", n, err)
 		}
 	}
 
@@ -741,7 +761,7 @@ func copyMaintainedAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, le
 	dst.IsMontgomery = src.IsMontgomery
 	dst.Scale = src.Scale
 	for d := range src.Value {
-		for limb := 0; limb < 2 && limb <= level; limb++ {
+		for limb := 0; limb < fastckks.MaintainedLimbCount(params, level); limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
@@ -850,7 +870,7 @@ func copyMaintainedElement(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
 	dst.IsMontgomery = src.IsMontgomery
 	dst.Scale = src.Scale
 	for d := range src.Value {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < fastckks.MaintainedLimbCount(params, src.Level()); limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
@@ -866,7 +886,7 @@ func cloneMaintainedResult(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.C
 
 func zeroMaintained(ct *rlwe.Ciphertext) {
 	for d := range ct.Value {
-		for limb := 0; limb < 2 && limb < len(ct.Value[d].Coeffs); limb++ {
+		for limb := 0; limb < len(ct.Value[d].Coeffs) && limb < 3; limb++ {
 			ring.ZeroVec(ct.Value[d].Coeffs[limb])
 		}
 	}

@@ -11,9 +11,10 @@ import (
 // full-RNS APIs.
 func NewCiphertext(params rlwe.ParameterProvider, degree, level int) *rlwe.Ciphertext {
 	n := params.GetRLWEParameters().N()
+	maintained := maintainedLimbCount(params, level)
 	polys := make([]ring.Poly, degree+1)
 	for i := range polys {
-		polys[i] = compactPoly(n, level)
+		polys[i] = compactPoly(n, level, maintained)
 	}
 	ct, err := rlwe.NewCiphertextAtLevelFromPoly(level, polys)
 	if err != nil {
@@ -30,6 +31,10 @@ func Resize(ct *rlwe.Ciphertext, degree, level, n int) {
 		panic("invalid Fast ciphertext resize")
 	}
 
+	maintained := 2
+	if len(ct.Value) > 0 && len(ct.Value[0].Coeffs) > 2 && ct.Value[0].Coeffs[2] != nil {
+		maintained = 3
+	}
 	for i := range ct.Value {
 		coeffs := ct.Value[i].Coeffs
 		if level < len(coeffs)-1 {
@@ -39,30 +44,29 @@ func Resize(ct *rlwe.Ciphertext, degree, level, n int) {
 			copy(grown, coeffs)
 			ct.Value[i].Coeffs = grown
 		}
-		ensureMaintainedRows(ct.Value[i], level, n)
+		ensureMaintainedRows(ct.Value[i], level, n, maintained)
 	}
 
 	if degree < len(ct.Value)-1 {
 		ct.Value = ct.Value[:degree+1]
 	} else {
 		for len(ct.Value) < degree+1 {
-			ct.Value = append(ct.Value, compactPoly(n, level))
+			ct.Value = append(ct.Value, compactPoly(n, level, maintained))
 		}
 	}
 }
 
-func compactPoly(n, level int) ring.Poly {
+func compactPoly(n, level, maintained int) ring.Poly {
 	coeffs := make([][]uint64, level+1)
-	for limb := 0; limb < len(coeffs) && limb < 2; limb++ {
+	for limb := 0; limb < len(coeffs) && limb < maintained; limb++ {
 		coeffs[limb] = make([]uint64, n)
 	}
 	return ring.Poly{Coeffs: coeffs}
 }
 
-func ensureMaintainedRows(poly ring.Poly, level, n int) {
-	maintained := level + 1
-	if maintained > 2 {
-		maintained = 2
+func ensureMaintainedRows(poly ring.Poly, level, n, maintained int) {
+	if maintained > level+1 {
+		maintained = level + 1
 	}
 	for limb := 0; limb < maintained; limb++ {
 		if len(poly.Coeffs[limb]) != n {

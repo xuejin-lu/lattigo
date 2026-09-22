@@ -9,6 +9,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
 var _ Bootstrapper = (*FastEvaluator)(nil)
@@ -136,7 +137,7 @@ func (eval *FastEvaluator) validateFastBootstrapPublicInputs(cts []rlwe.Cipherte
 		if ct.Scale.Cmp(rlwe.NewScale(0)) != 1 {
 			return fmt.Errorf("ciphertext %d scale must be positive", i)
 		}
-		if len(ct.Value[0].Coeffs) < maintainedLimbs(currentLevel) || len(ct.Value[1].Coeffs) < maintainedLimbs(currentLevel) {
+		if len(ct.Value[0].Coeffs) < fastckks.MaintainedLimbCount(&params, currentLevel) || len(ct.Value[1].Coeffs) < fastckks.MaintainedLimbCount(&params, currentLevel) {
 			return fmt.Errorf("ciphertext %d has invalid maintained storage", i)
 		}
 		if i > 0 {
@@ -244,7 +245,7 @@ func (eval *FastEvaluator) finalizeFastPublicCiphertext(ct *rlwe.Ciphertext) err
 	}
 	ringQ := params.RingQ()
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < maintainedLimbs(ct.Level()); limb++ {
+		for limb := 0; limb < fastckks.MaintainedLimbCount(&eval.Parameters.ResidualParameters, ct.Level()); limb++ {
 			ringQ.SubRings[limb].IMForm(ct.Value[d].Coeffs[limb], ct.Value[d].Coeffs[limb])
 		}
 	}

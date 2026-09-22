@@ -91,7 +91,7 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
 
 	for i := 0; i <= minDegree; i++ {
-		for _, limb := range []int{0, 1} {
+		for limb := 0; limb < maintainedLimbCountForRing(ringQ.AtLevel(level)); limb++ {
 			dst := opOut.Value[i].Coeffs[limb]
 			if sub {
 				ringQ.SubRings[limb].Sub(op0.Value[i].Coeffs[limb], op1.Value[i].Coeffs[limb], dst)
@@ -104,14 +104,14 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	// Preserve standard degree semantics without touching dormant limbs.
 	if op0.Degree() > minDegree && opOut != op0 {
 		for i := minDegree + 1; i <= op0.Degree(); i++ {
-			copyQ01(op0.Value[i], opOut.Value[i])
+			copyMaintained(ringQ.AtLevel(level), op0.Value[i], opOut.Value[i])
 		}
 	} else if op1.Degree() > minDegree && opOut != op1 {
 		for i := minDegree + 1; i <= op1.Degree(); i++ {
 			if sub {
 				negQ01(ringQ, op1.Value[i], opOut.Value[i])
 			} else {
-				copyQ01(op1.Value[i], opOut.Value[i])
+				copyMaintained(ringQ.AtLevel(level), op1.Value[i], opOut.Value[i])
 			}
 		}
 	}
@@ -124,7 +124,17 @@ func copyQ01(src, dst ring.Poly) {
 	copy(dst.Coeffs[1], src.Coeffs[1])
 }
 
+func copyMaintained(ringQ *ring.Ring, src, dst ring.Poly) {
+	count := maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(src, dst))
+	for limb := 0; limb < count; limb++ {
+		copy(dst.Coeffs[limb], src.Coeffs[limb])
+	}
+}
+
 func negQ01(ringQ *ring.Ring, src, dst ring.Poly) {
 	ringQ.SubRings[0].Neg(src.Coeffs[0], dst.Coeffs[0])
 	ringQ.SubRings[1].Neg(src.Coeffs[1], dst.Coeffs[1])
+	if maintainedLimbCountForRing(ringQ) == 3 && len(src.Coeffs) > 2 && len(dst.Coeffs) > 2 {
+		ringQ.SubRings[2].Neg(src.Coeffs[2], dst.Coeffs[2])
+	}
 }

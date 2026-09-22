@@ -21,7 +21,7 @@ type Evaluator struct {
 	nttScratch             [3]ring.Poly
 	linearTransformScratch fastLinearTransformScratch
 	automorphismIndexCache map[uint64][]uint64
-	automorphismScratch    [2][]uint64
+	automorphismScratch    [3][]uint64
 	lastBSGSBabyRotations  int
 }
 
@@ -30,11 +30,11 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 	eval := &Evaluator{
 		Parameters:             params,
 		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
-		linearTransformScratch: newFastLinearTransformScratch(params.N()),
+		linearTransformScratch: newFastLinearTransformScratch(params.N(), maintainedLimbCount(params, params.MaxLevel())),
 		automorphismIndexCache: make(map[uint64][]uint64),
 	}
 	for i := range eval.nttScratch {
-		eval.nttScratch[i] = ring.NewPoly(params.N(), 1)
+		eval.nttScratch[i] = ring.NewPoly(params.N(), maintainedLimbCount(params, params.MaxLevel())-1)
 	}
 	for i := range eval.automorphismScratch {
 		eval.automorphismScratch[i] = make([]uint64, params.N())
@@ -77,14 +77,14 @@ func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.In
 	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	ringQ := eval.Parameters.RingQ()
-	var scalarMontgomery [2]uint64
-	for limb := 0; limb <= level && limb < len(scalarMontgomery); limb++ {
+	var scalarMontgomery [3]uint64
+	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 		subring := ringQ.SubRings[limb]
 		scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
 		scalarMontgomery[limb] = ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant)
 	}
 	for d := range op0.Value {
-		for limb := 0; limb <= level && limb < 2; limb++ {
+		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
 			subring := ringQ.SubRings[limb]
 			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], scalarMontgomery[limb], opOut.Value[d].Coeffs[limb])
 		}

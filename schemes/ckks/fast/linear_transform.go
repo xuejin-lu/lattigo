@@ -27,8 +27,8 @@ type fastLinearTransformScratch struct {
 	babyIndex      map[int]int
 }
 
-func newFastLinearTransformScratch(N int) fastLinearTransformScratch {
-	newPoly := func() ring.Poly { return ring.NewPoly(N, 1) }
+func newFastLinearTransformScratch(N, maintained int) fastLinearTransformScratch {
+	newPoly := func() ring.Poly { return ring.NewPoly(N, maintained-1) }
 	return fastLinearTransformScratch{
 		acc0:      newPoly(),
 		acc1:      newPoly(),
@@ -49,8 +49,8 @@ func (scratch *fastLinearTransformScratch) prepareBabyRotations(N int, rotations
 	for i, rotation := range rotations {
 		if i == len(scratch.baby) {
 			scratch.baby = append(scratch.baby, fastBabyRotation{
-				c0: ring.NewPoly(N, 1),
-				c1: ring.NewPoly(N, 1),
+				c0: ring.NewPoly(N, len(scratch.acc0.Coeffs)-1),
+				c1: ring.NewPoly(N, len(scratch.acc0.Coeffs)-1),
 			})
 		}
 		scratch.baby[i].rotation = rotation
@@ -95,8 +95,8 @@ func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.Li
 	Resize(ctOut, 1, level, eval.Parameters.N())
 	*ctOut.MetaData = *ctIn.MetaData
 	ctOut.Scale = ctIn.Scale.Mul(matrix.Scale)
-	copyQ01(acc0, ctOut.Value[0])
-	copyQ01(acc1, ctOut.Value[1])
+	copyMaintained(ringQ, acc0, ctOut.Value[0])
+	copyMaintained(ringQ, acc1, ctOut.Value[1])
 	return nil
 }
 
@@ -161,8 +161,8 @@ func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Cipher
 		fastPlaintextMul(ringQ, plaintext.Q, rot0, term0)
 		fastPlaintextMul(ringQ, plaintext.Q, rot1, term1)
 		if first {
-			copyQ01(term0, acc0)
-			copyQ01(term1, acc1)
+			copyMaintained(ringQ, term0, acc0)
+			copyMaintained(ringQ, term1, acc1)
 			first = false
 		} else {
 			addQ01(ringQ, term0, acc0)
@@ -210,8 +210,8 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			fastPlaintextMul(ringQ, plaintext.Q, baby.c0, term0)
 			fastPlaintextMul(ringQ, plaintext.Q, baby.c1, term1)
 			if firstInner {
-				copyQ01(term0, inner0)
-				copyQ01(term1, inner1)
+				copyMaintained(ringQ, term0, inner0)
+				copyMaintained(ringQ, term1, inner1)
 				firstInner = false
 			} else {
 				addQ01(ringQ, term0, inner0)
@@ -220,8 +220,8 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 		}
 
 		if j == 0 {
-			copyQ01(inner0, outer0)
-			copyQ01(inner1, outer1)
+			copyMaintained(ringQ, inner0, outer0)
+			copyMaintained(ringQ, inner1, outer1)
 		} else {
 			if err = eval.fastAutomorphism(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
@@ -231,8 +231,8 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			}
 		}
 		if firstOuter {
-			copyQ01(outer0, acc0)
-			copyQ01(outer1, acc1)
+			copyMaintained(ringQ, outer0, acc0)
+			copyMaintained(ringQ, outer1, acc1)
 			firstOuter = false
 		} else {
 			addQ01(ringQ, outer0, acc0)
@@ -244,8 +244,8 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 
 func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, out0, out1 ring.Poly, rotation int) error {
 	if rotation == 0 {
-		copyQ01(ctIn.Value[0], out0)
-		copyQ01(ctIn.Value[1], out1)
+		copyMaintained(ringQ, ctIn.Value[0], out0)
+		copyMaintained(ringQ, ctIn.Value[1], out1)
 		return nil
 	}
 	galEl := eval.Parameters.GaloisElement(rotation)
@@ -256,7 +256,7 @@ func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext,
 }
 
 func addQ01(ringQ *ring.Ring, src, dst ring.Poly) {
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCountForRing(ringQ); limb++ {
 		ringQ.SubRings[limb].Add(src.Coeffs[limb], dst.Coeffs[limb], dst.Coeffs[limb])
 	}
 }
@@ -264,7 +264,7 @@ func addQ01(ringQ *ring.Ring, src, dst ring.Poly) {
 // fastPlaintextMul multiplies an NTT/Montgomery plaintext diagonal by an
 // NTT/Montgomery ciphertext polynomial using q0/q1 only.
 func fastPlaintextMul(ringQ *ring.Ring, plaintext, ciphertext, output ring.Poly) {
-	for limb := 0; limb < 2; limb++ {
+	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(plaintext, ciphertext)); limb++ {
 		ringQ.SubRings[limb].MulCoeffsMontgomery(plaintext.Coeffs[limb], ciphertext.Coeffs[limb], output.Coeffs[limb])
 	}
 }
@@ -273,8 +273,14 @@ func validateFastDiagonal(ringQ *ring.Ring, plaintext ring.Poly) error {
 	if plaintext.N() != ringQ.N() || plaintext.Level() < 1 {
 		return errors.New("diagonal dimensions or level are insufficient")
 	}
-	if len(plaintext.Coeffs) < 2 || len(plaintext.Coeffs[0]) != ringQ.N() || len(plaintext.Coeffs[1]) != ringQ.N() {
+	maintained := maintainedLimbCountForRingAtLevel(ringQ, plaintext.Level())
+	if len(plaintext.Coeffs) < maintained || len(plaintext.Coeffs[0]) != ringQ.N() || len(plaintext.Coeffs[1]) != ringQ.N() {
 		return errors.New("diagonal q0/q1 storage is invalid")
+	}
+	for limb := 0; limb < maintained; limb++ {
+		if len(plaintext.Coeffs[limb]) != ringQ.N() {
+			return errors.New("diagonal maintained storage is invalid")
+		}
 	}
 	return nil
 }
