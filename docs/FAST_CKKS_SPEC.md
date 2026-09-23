@@ -52,39 +52,381 @@ Preserve public APIs where practical, CKKS parameter objects, metadata, structur
 
 Unused Fast-state fields or residue arrays may exist structurally while their values are unmaintained, stale, or dormant. The optimization target is to avoid computing, updating, transforming, or synchronizing RNS residue values that are not needed for the Fast numerical result.
 
-## 4. Parameter and RNS representation
+## 4. Fast constitution: logical CKKS semantics versus Fast storage
 
-Fast and Normal execution use the same application-provided CKKS parameter configuration. A 20-level modulus chain remains a 20-level configuration; Fast must not reinterpret it as two levels.
+This section is the **authoritative target architecture** for future Fast-CKKS implementation. Current q0/q1/q2 code below is historical/current implementation evidence and must not override these rules.
 
-Use the following terms precisely:
+### 4.1 Two different modulus systems
 
-```text
-q_i      = modulus prime at RNS index i
-r_i[k]   = x[k] mod q_i, the stored residue for coefficient k in limb i
-c0,c1... = ciphertext polynomial components
-Level    = highest active logical Q index
-```
+Fast must distinguish two concepts that ordinary RNS CKKS often stores in the same arrays.
 
-When the current Level is at least 1, Fast execution may maintain only a small sufficient subset of RNS residue values—currently the first two limbs, r0 and r1—when those values are sufficient for the required Fast reconstruction or arithmetic shortcut. For a degree-1 ciphertext this can be pictured as:
+**Logical CKKS modulus chain**
 
 ```text
-c0                         c1
- ├─ r0 actively maintained    ├─ r0 actively maintained
- ├─ r1 actively maintained    ├─ r1 actively maintained
- └─ r2...rL unmaintained      └─ r2...rL unmaintained
+Q = (q0, q1, ..., qL)
 ```
 
-This is a computational shortcut, not a requirement that every Fast ciphertext physically retain Level >= 1. Fast follows Standard CKKS Level progression, including transitions to Level 0. At Level 0 only the residue limb for modulus q0, containing r0 values, naturally exists.
+The application-provided `q_i` remain authoritative for:
 
-The configured modulus values `q0, q1, ..., qL` remain in the parameter object even when a hot path does not actively maintain all corresponding residue arrays:
+- logical ciphertext Level;
+- CKKS Rescale divisors;
+- Scale evolution;
+- public parameter identity;
+- logical ciphertext congruence;
+- Standard/Fast semantic comparison; and
+- conversion back to an ordinary Lattigo ciphertext.
+
+**Fast storage moduli**
 
 ```text
-modulus parameter exists
-!=
-its corresponding residue values are actively maintained
+F = (f0, f1, f2)
 ```
 
-Do not redefine historical q0/q1 Fast terminology as c0/c1. Historical “q0/q1-only” wording means an r0/r1 residue-maintenance shortcut, not deletion of modulus parameters or a floor on ciphertext Level.
+The `f_i` are backend-private NTT-friendly primes used only to preserve a bounded lifted integer with more CRT capacity than the frontend's low logical moduli. They are not CKKS rescale primes and do not replace the logical parameter chain.
+
+Use the names precisely:
+
+```text
+q_i                 logical CKKS modulus at index i
+f_i                 Fast private storage modulus
+logical residue     x mod q_i
+Fast residue        X mod f_i
+c0,c1,c2,...        ciphertext polynomial components
+Level               highest active logical q_i index
+ActiveStorageWidth  number of currently authoritative Fast storage residues
+```
+
+Do not call `f_i` a larger logical `q_i`. Do not infer logical level from ActiveStorageWidth.
+
+### 4.2 Fast state and permanent invariants
+
+Conceptually a Fast ciphertext state is
+
+[
+\mathcal S=(\ell,\Delta,A,X,B,D,d),
+]
+
+where:
+
+- `ell` is the logical CKKS Level;
+- `Delta` is the logical CKKS Scale;
+- `A` is the active Fast storage basis, a subset of `{f0,f1,f2}`;
+- `X` is the coefficient-wise lifted integer polynomial represented by the Fast residues;
+- `B` is a proven coefficient-magnitude bound;
+- `D` records coefficient/NTT and Montgomery representation state; and
+- `d` is the ciphertext degree.
+
+Every production Fast operation must preserve all applicable invariants below.
+
+**C1 — Logical congruence**
+
+For each coefficient at logical Level `ell`:
+
+[
+X \equiv c_{logical}\pmod{Q_\ell},
+\qquad
+Q_\ell=\prod_{i=0}^{\ell}q_i.
+]
+
+Fast may use a different integer lift than Standard internally; congruence modulo the current logical modulus is the semantic requirement.
+
+**C2 — Unique Fast reconstruction**
+
+For active storage product
+
+[
+S_A=\prod_{f\in A}f,
+]
+
+the authoritative lift must satisfy
+
+[
+|X|<\frac{S_A}{2}.
+]
+
+This strict centered-uniqueness condition is the correctness boundary. An engineering safety margin may be imposed in addition, but no operation may rely on an unproven wraparound.
+
+**C3 — Residue consistency**
+
+Every active Fast row must equal the same lift reduced modulo its storage modulus:
+
+[
+R_f = X\bmod f.
+]
+
+Dormant rows are not authoritative and must not be read as if they were synchronized.
+
+**C4 — Logical Scale sovereignty**
+
+Scale changes are determined only by CKKS mathematics and logical `q_i`. Fast storage primes never directly determine public Scale.
+
+**C5 — Logical level and storage width are independent**
+
+A logical transition
+
+[
+\ell\rightarrow\ell-1
+]
+
+does not imply
+
+[
+3\rightarrow2
+]
+
+or any other storage-width change. Storage contraction or expansion is a separate representation operation justified only by a capacity proof.
+
+### 4.3 Fixed shared Fast storage prime set
+
+The target software Fast backend uses one fixed three-prime storage set across all supported LogN profiles:
+
+[
+F=(f_0,f_1,f_2),
+\qquad
+\operatorname{bitlen}(f_i)\approx60.
+]
+
+This project prioritizes rapid software validation over per-LogN hardware specialization. Therefore the same `f_i` should be reused across supported LogN values.
+
+Prime-selection requirements:
+
+1. each `f_i` is an odd prime;
+2. `f_i != f_j` for `i != j`;
+3. each prime is NTT-friendly for the largest supported Standard-ring degree;
+4. for the current maximum `LogN=16`, require at least
+   [
+   f_i\equiv1\pmod{2^{17}};
+   ]
+5. prefer `f_i < 2^60` so existing uint64 Montgomery/lazy-NTT machinery retains comfortable headroom;
+6. if a path materializes an `f_i` together with logical `q_j` in one CRT basis, the combined moduli must be pairwise coprime; and
+7. candidate primes must be validated through Lattigo's own prime/SubRing/NTT-constant construction before adoption.
+
+The exact three numerical primes are an implementation choice. The constitution fixes the role and selection constraints, not particular constants.
+
+An illustrative frontend chain
+
+```text
+logical bit widths: 53, 38, 38, 60, 40, 45
+```
+
+may therefore have the Fast compatibility view
+
+```text
+storage bit widths: 60, 60, 60, 60, 40, 45
+```
+
+without changing the logical CKKS chain. The first three entries denote widened Fast storage roles, not replacement logical rescale moduli. Rows `q3...` may still remain dormant in sparse Fast execution.
+
+### 4.4 Active storage width
+
+Fast has at most three authoritative private storage residues for the bounded-integer shortcut:
+
+[
+A_3=(f_0,f_1,f_2),\quad
+A_2=(f_0,f_1),\quad
+A_1=(f_0).
+]
+
+The backend may keep three residues even at logical Level 1 or Level 0 if the bound requires them. Conversely, it may contract when the target basis still uniquely represents the current lift.
+
+A contraction
+
+[
+A_3\to A_2
+]
+
+is legal only if
+
+[
+|X|<\frac{f_0f_1}{2}.
+]
+
+Likewise
+
+[
+A_2\to A_1
+]
+
+requires
+
+[
+|X|<\frac{f_0}{2}.
+]
+
+Storage contraction:
+
+- does not consume a logical Level;
+- does not divide a coefficient;
+- does not round;
+- does not change Scale; and
+- does not change plaintext semantics.
+
+If a future operation needs more capacity, storage may be expanded again before the operation, provided the current smaller basis still uniquely reconstructs `X`; reconstruct `X` and reduce it into the added Fast modulus. Width changes are representation management, not CKKS operations.
+
+### 4.5 Operation state transitions
+
+The following table defines the target semantics.
+
+| Operation | Logical Level | Scale | Lifted integer / bound | Fast storage |
+|---|---|---|---|---|
+| Add/Sub | unchanged | unchanged | `Z=X +/- Y`, conservatively `Bz <= Bx + By` | unchanged unless capacity planning requires expansion |
+| Mul | unchanged | `DeltaX * DeltaY` | exact negacyclic polynomial product; conservative `Bz <= N*Bx*By` | must have enough pre-product capacity |
+| Relinearize / KeySwitch | unchanged | unchanged | logical value preserved plus bounded key-switch error | unchanged unless bound requires expansion |
+| Automorphism | unchanged | unchanged | permutation/sign change; coefficient infinity bound preserved | unchanged |
+| Rotate | unchanged | unchanged | automorphism followed by bounded key-switch effect | unchanged unless bound requires expansion |
+| Rescale | `ell -> ell-1` | `Delta/q_ell` | `Y=Round(X/q_ell)` | width change is optional and separate |
+| Storage contraction/expansion | unchanged | unchanged | exactly the same `X` | representation only |
+| NTT/INTT/Montgomery form | unchanged | unchanged | same mathematical polynomial | same authoritative storage moduli |
+| ModUp | logical basis grows | basis-raise step itself does not redefine Scale | canonicalize the logical representative before extension | expand/repopulate Fast basis from canonical lift |
+| Public/Standard boundary | unchanged | unchanged | reduce the authoritative lift modulo required logical `q_i` | Fast -> logical Q representation |
+
+### 4.6 Add/Sub and multiplication bounds
+
+For aligned operands,
+
+[
+Z=X\pm Y
+]
+
+may use
+
+[
+B_Z\le B_X+B_Y.
+]
+
+For negacyclic multiplication in degree `N`, a generic safe coefficient bound is
+
+[
+B_{mul}\le N B_XB_Y,
+]
+
+unless a tighter operation-specific proof is available.
+
+Multiplication is valid in a Fast storage basis only when the **pre-Rescale product** remains uniquely representable. It is insufficient to check only the smaller post-Rescale result.
+
+Measured LogN13/P93 evidence motivating the wider basis:
+
+[
+B_{max,current}\approx2^{121}
+]
+
+at the worst observed pre-Rescale generated-power checkpoint. The current q0q1q2 centered capacity was only about `2^133`, leaving roughly 12 bits. A first-order future estimate in which both multiplicative operands gain about 17 effective scale bits gives
+
+[
+B_{max,future}\approx2^{155}.
+]
+
+Three near-60-bit Fast storage primes provide centered capacity near `2^179`, about 24 bits above that estimate. These numbers are design evidence, not universal correctness bounds; every supported profile still needs an explicit bound check.
+
+### 4.7 KeySwitch, Relinearize and Rotate
+
+Fast key operations must preserve the same logical Level and Scale unless the corresponding CKKS operation explicitly says otherwise.
+
+Conceptually:
+
+[
+X' = X + E_{KS},
+]
+
+so a safe bound is
+
+[
+B'\le B+B_{KS}.
+]
+
+Current zero-secret/error-only key material is one implementation mode that makes `E_KS` bounded and cheap. The constitution does not permanently require zero secret. Any future key mode must provide a bound and Fast-storage representation that preserves C1-C4.
+
+A pure automorphism only permutes/sign-changes coefficients and therefore preserves the coefficient infinity bound. Rotation inherits the key-switch bound after the automorphism.
+
+### 4.8 Rescale theorem with independent storage primes
+
+For logical Level `ell`, let
+
+[
+Q_\ell=q_\ell Q_{\ell-1}
+]
+
+and let the Fast authoritative lift satisfy
+
+[
+X=c+kQ_\ell.
+]
+
+Fast Rescale must compute
+
+[
+Y=\operatorname{Round}(X/q_\ell),
+\qquad
+\Delta'=\Delta/q_\ell,
+\qquad
+\ell'=\ell-1.
+]
+
+Because `kQ_{ell-1}` is integral,
+
+[
+\operatorname{Round}(X/q_\ell)
+=
+\operatorname{Round}(c/q_\ell)+kQ_{\ell-1},
+]
+
+hence
+
+[
+Y\equiv\operatorname{Round}(c/q_\ell)
+\pmod{Q_{\ell-1}}.
+]
+
+Therefore the physical rounded division and the Scale update must use the **logical divisor `q_ell` even when no Fast storage row is modulo `q_ell`**.
+
+Using `f_i` as the divisor would be a semantic error. For example, dividing coefficients by `q_ell` but Scale by `f_i` introduces a message multiplier `f_i/q_ell`.
+
+After logical Rescale, optionally contract storage only when the post-Rescale bound proves that the smaller storage product is sufficient. Logical Rescale and storage contraction must remain separately testable operations.
+
+### 4.9 ModUp canonicalization boundary
+
+ModUp is different from same-level arithmetic because congruence modulo a small logical basis does not identify a unique representative in a larger logical basis.
+
+Before raising a logical ciphertext from `Q_ell` to a larger modulus basis, Fast must first choose the canonical centered logical representative
+
+[
+C=\operatorname{Center}_{Q_\ell}(X\bmod Q_\ell),
+\qquad
+C\in(-Q_\ell/2,Q_\ell/2].
+]
+
+For the current Bootstrap Level-0 ModUp this reduces to
+
+[
+C=\operatorname{Center}_{q_0}(X\bmod q_0).
+]
+
+Only then may the backend populate Fast storage residues or any newly materialized logical residues from `C`.
+
+ModUp is therefore an explicit **logical canonicalization boundary**. Merely extending an arbitrary lift `X=c+kQ_ell` would generally produce the wrong representative in the enlarged basis.
+
+### 4.10 Public boundary
+
+When a Fast value must become an ordinary logical-Q Lattigo value, reconstruct or otherwise derive the authoritative lift `X` and populate each required logical row as
+
+[
+X\bmod q_i.
+]
+
+The public result must expose the frontend's original logical Level, Scale, parameter identity, and key semantics. Fast storage primes are backend-private and must not leak into public CKKS parameters.
+
+### 4.11 Current implementation versus this target
+
+The current branch still implements historical q0/q1 and q0/q1/q2 maintained-residue shortcuts in which storage moduli are the frontend logical moduli themselves. That code is valid current evidence and a useful oracle for bounded behavior, but it is **not** the permanent storage architecture.
+
+Future implementation derived from this constitution must introduce an explicit distinction between:
+
+```text
+LogicalQ[i]   = frontend q_i
+FastStorage[i] = backend-private f_i
+```
+
+and must audit every place that currently reads `ringQ.SubRings[i].Modulus` to determine whether that use means logical CKKS semantics or physical Fast storage arithmetic.
 
 ## 5. Fast hot-path rules
 
@@ -163,51 +505,34 @@ Delta -> a*Delta
 
 The scalar adjustment aligns message-ratio/scale state with the Bootstrap target, whose final scale is approximately `q0 / MessageRatio` at Level 0.
 
-### 5.3 Fast Rescale semantics
+### 5.3 Fast Rescale implementation rule
 
-Fast Rescale preserves Standard CKKS mathematics. For one consumed highest logical modulus `q_L`:
+Section 4.8 is the authoritative mathematics. Production Fast Rescale must implement
 
 ```text
-x'     = round(x / q_L)
-Scale' = Scale / q_L
+Y      = round(X / logical_q[level])
+Scale' = Scale / logical_q[level]
 Level' = Level - 1
 ```
 
-Current Lattigo may consume multiple moduli according to `LevelsConsumedPerRescaling()`. Fast changes how the result is computed, not what Rescale means.
+using the authoritative Fast lift, regardless of which private storage moduli currently hold that lift.
 
-Standard Lattigo maintains all active residues and uses the residue for the dropped modulus in `DivRoundByLastModulusManyNTT`. If Fast has not maintained that residue, it must not call Standard Rescale on stale data. When Level >= 1 and r0/r1 are the maintained shortcut residues, a Fast implementation may normalize them, reconstruct modulo `q0*q1`, choose the required centered representative, round-divide by logical divisor `q_L`, reduce the quotient into residues that remain actively maintained, and update Scale and Level exactly as Standard semantics require. A transition to Level 0 retains only r0; there is no artificial Level-1 floor.
+For logical levels whose active storage row is still the same modulus as the logical divisor, an optimized ordinary drop-last implementation may remain valid. For the widened low Fast rows, where `f_i != q_i`, Standard `DivRoundByLastModulus...` cannot be used merely by dropping `f_i`: that would divide by the wrong modulus.
 
-The existing per-coefficient `big.Int` reconstruction is a reference oracle, not a production Rescale implementation. Production Stage A should investigate allocation-free fixed-width 64/128-bit reconstruction and rounded division, validate its supported modulus-size contract, avoid stale high residues, and leave Normal Rescale unchanged.
-
-Chebyshev power generation has an additional capacity constraint. q0/q1
-centered reconstruction determines a unique centered integer only while its
-magnitude is below `q0*q1/2`; the high-scale Standard ordering is therefore
-not automatically valid for the two-limb Fast backend. When an operation
-creates a value beyond that range, one-sided pre-Rescale is unsuitable when
-the operand scale is only about the rescale divisor because it collapses that
-operand's precision. For the bounded Fast polynomial surface, high-scale
-power generation instead uses independently owned maintained copies of both
-operands:
+The widened-low-limb implementation must instead perform an exact fixed-width path conceptually equivalent to:
 
 ```text
-left'  = Rescale(m1 * left)
-right' = Rescale(m2 * right)
-out    = left' * right'
+active Fast residues
+    -> unique centered lift X
+    -> rounded divide by logical q[level]
+    -> reduce quotient into the desired Fast storage basis
 ```
 
-The factors are deterministic, modulus-derived, content-independent, and
-chosen near `sqrt(q_L)`. The balanced branch is supported when one modulus is
-consumed per Rescale and both predicted post-Rescale operand scales remain at
-least `2^20`. It performs two physical Rescale operations but consumes only
-one logical level. Low-scale inputs retain the established post-product
-Rescale schedule when that precision floor is not met. Before correction, the
-actual product Scale is checked with CKKS `Scale.InDelta` semantics against
-the exact old planner target and is then normalized to that target; metadata
-is never silently relabeled after a failed closeness check. The recurrence
-correction is applied at the normalized product scale for both the scalar-one
-and generated-power correction cases. Stored power-basis operands remain
-immutable and q2+ rows remain dormant. This is a bounded Fast polynomial rule,
-not a universal theorem for arbitrary Fast CKKS multiplication.
+and then update logical Scale and Level with the same `q[level]`.
+
+A storage-width contraction may be attempted after Rescale, but it is not part of Rescale semantics and must be guarded by the target-basis centered-capacity proof.
+
+The existing q0/q1 and q0/q1/q2 fixed-width Rescale code is the current implementation/reference mechanism. Its assumption that maintained storage moduli and logical moduli are identical must not be copied into the target widened-storage design.
 
 ### 5.4 Target parameter profile
 
@@ -314,7 +639,7 @@ These are current implementation facts, not permanent scientific assumptions. Do
 
 ### PERMANENT FAST ARCHITECTURE
 
-The durable boundaries are: preserve Normal behavior and public structure where practical; maintain only the minimum sufficient residue subset for each Fast operation; permit normal Level/Scale progression through Level 0; avoid hidden Standard/full-RNS fallback on stale residue storage; preserve the full CKKS parameter chain; and leave localized extension points for alternate secrets, key models, and equivalent-noise experiments.
+The durable boundaries are: preserve Normal behavior and public structure where practical; preserve the frontend logical CKKS modulus chain as the sole authority for Level/Scale/Rescale semantics; use the fixed cross-LogN Fast private storage basis defined in Section 4 for bounded lifted-integer execution; keep logical Level independent from Fast active storage width; permit normal Level/Scale progression through Level 0; require centered-uniqueness proofs before relying on a storage basis or contracting it; canonicalize at logical ModUp boundaries; avoid hidden Standard/full-RNS fallback on stale residue storage; and leave localized extension points for alternate secrets, key models, and equivalent-noise experiments.
 
 ## 9. Key policy and future experimental knobs
 
@@ -425,7 +750,7 @@ These are not requests to optimize code in this documentation task.
 - [ ] Do not reduce the configured CKKS parameter chain to two levels.
 - [ ] Do not modify BFV/BGV/TFHE merely for symmetry.
 - [ ] Do not infer current Lattigo behavior from names alone.
-- [ ] Do not confuse modulus primes `q_i`, stored residues `r_i[k]`, ciphertext components `c0/c1/...`, or ciphertext Level.
+- [ ] Do not confuse logical modulus primes `q_i`, Fast private storage moduli `f_i`, logical/Fast residues, ciphertext components `c0/c1/...`, logical Level, or ActiveStorageWidth.
 - [ ] Do not read or synchronize unmaintained residue storage in Fast hot paths without an explicit operation requirement.
 - [ ] Do not impose an artificial Level-1 floor; follow Standard CKKS Level/Scale semantics through Level 0.
 - [ ] Do not call Normal key-dependent/full-RNS paths with zero keys and label that implementation complete.
