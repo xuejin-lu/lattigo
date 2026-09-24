@@ -27,8 +27,9 @@ This `fast-ckks` branch is an intentionally insecure Fast-CKKS backend built on 
 
 ## Persistent invariants
 
-- `q_i` names the modulus at RNS index `i`; `r_i[k]` names coefficient `k`'s stored residue modulo `q_i`; `c0`, `c1`, `c2`, ... name ciphertext polynomial components.
-- Fast may maintain only the minimum residue subset needed for the current operation. Do not perform unnecessary full-RNS work, but follow Standard CKKS Level/Scale semantics when an operation requires level transitions, including transitions to Level 0.
+- `q_i` names the logical CKKS modulus at index `i`; `f_i` names a backend-private Fast storage modulus; a logical residue is `X mod q_i`; a Fast storage residue is `X mod f_i`; `c0`, `c1`, `c2`, ... name ciphertext polynomial components. Do not infer logical Level from Fast active storage width.
+- Logical `Q` is authoritative for CKKS Level, Rescale divisors, Scale evolution, and public parameter semantics. Fast storage `F` is authoritative only for bounded lifted-integer representation capacity. Follow `docs/FAST_CKKS_SPEC.md` Section 4 whenever historical q0/q1/q012 implementation terminology differs from the target architecture.
+- Fast may maintain only the minimum storage residue subset needed for the current operation. Do not perform unnecessary full-RNS work, but follow Standard CKKS Level/Scale semantics when an operation requires level transitions, including transitions to Level 0.
 - Never call Standard full-RNS code on stale or unmaintained Fast residue storage as a hidden fallback.
 - The current zero-secret implementation is a mode, not a permanent scientific invariant. Preserve extension points for sampled secrets and future noise experiments.
 - Preserve public APIs and CKKS parameter objects where practical; preserve structure while eliding expensive dormant or security-only computation.
