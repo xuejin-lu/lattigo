@@ -10,7 +10,15 @@ import (
 )
 
 // This fixed private storage basis is independent of every CKKS logical Q chain.
-var fastStoragePrimes = [3]uint64{1152921504606584833, 1152921504598720513, 1152921504592429057}
+const (
+	fastStoragePrime0 uint64 = 1152921504606584833
+	fastStoragePrime1 uint64 = 1152921504598720513
+	fastStoragePrime2 uint64 = 1152921504592429057
+)
+
+func fastStoragePrimes() [3]uint64 {
+	return [3]uint64{fastStoragePrime0, fastStoragePrime1, fastStoragePrime2}
+}
 
 // storageUint192 is fixed-width arithmetic for storage products and values.
 type storageUint192 struct{ lo, mid, hi uint64 }
@@ -38,34 +46,35 @@ func newFastStorageBasis(logN int) (basis fastStorageBasis, err error) {
 	}
 	basis.logN = logN
 	degree := 1 << uint(logN)
-	for i, q := range fastStoragePrimes {
+	primes := fastStoragePrimes()
+	for i, q := range primes {
 		if !ring.IsPrime(q) || q >= 1<<60 || q%(1<<18) != 1 {
 			return fastStorageBasis{}, fmt.Errorf("invalid storage prime at index %d", i)
 		}
 		for j := 0; j < i; j++ {
-			if q == fastStoragePrimes[j] {
+			if q == primes[j] {
 				return fastStorageBasis{}, errors.New("storage primes must be distinct")
 			}
 		}
 	}
-	storageRing, err := ring.NewRing(degree, fastStoragePrimes[:])
+	storageRing, err := ring.NewRing(degree, primes[:])
 	if err != nil {
 		return fastStorageBasis{}, fmt.Errorf("storage ring: %w", err)
 	}
 	copy(basis.subrings[:], storageRing.SubRings)
 
 	basis.products[0] = storageUint192{lo: 1}
-	for width := 1; width <= len(fastStoragePrimes); width++ {
-		basis.products[width] = storageMul64(basis.products[width-1], fastStoragePrimes[width-1])
+	for width := 1; width <= len(primes); width++ {
+		basis.products[width] = storageMul64(basis.products[width-1], primes[width-1])
 		basis.halves[width] = storageHalf(basis.products[width])
 	}
 	var ok bool
-	basis.inverse01, ok = storageInverseMod(fastStoragePrimes[0]%fastStoragePrimes[1], fastStoragePrimes[1])
+	basis.inverse01, ok = storageInverseMod(primes[0]%primes[1], primes[1])
 	if !ok {
 		return fastStorageBasis{}, errors.New("storage primes are not pairwise coprime")
 	}
-	product01Mod2 := storageMod192(basis.products[2], fastStoragePrimes[2])
-	basis.inverse012, ok = storageInverseMod(product01Mod2, fastStoragePrimes[2])
+	product01Mod2 := storageMod192(basis.products[2], primes[2])
+	basis.inverse012, ok = storageInverseMod(product01Mod2, primes[2])
 	if !ok {
 		return fastStorageBasis{}, errors.New("storage basis products are not pairwise coprime")
 	}
@@ -84,6 +93,20 @@ func (basis fastStorageBasis) product(width int) (*big.Int, error) {
 		return nil, err
 	}
 	return storageToBig(basis.products[width]), nil
+}
+
+func (basis fastStorageBasis) productBitLen(width int) (int, error) {
+	if err := validateStorageWidth(width); err != nil {
+		return 0, err
+	}
+	return storageToBig(basis.products[width]).BitLen(), nil
+}
+
+func (basis fastStorageBasis) prime(index int) (uint64, error) {
+	if index < 0 || index >= len(fastStoragePrimes()) {
+		return 0, fmt.Errorf("invalid storage prime index %d", index)
+	}
+	return fastStoragePrimes()[index], nil
 }
 
 // centeredCapacity is floor((S-1)/2), the maximum magnitude satisfying 2|X|<S.
@@ -126,10 +149,11 @@ func (basis fastStorageBasis) encodeFixed(value storageInteger, width int) ([3]u
 	if err := validateStorageWidth(width); err != nil {
 		return residues, err
 	}
+	primes := fastStoragePrimes()
 	for i := 0; i < width; i++ {
-		residue := storageMod192(value.magnitude, fastStoragePrimes[i])
+		residue := storageMod192(value.magnitude, primes[i])
 		if value.negative && residue != 0 {
-			residue = fastStoragePrimes[i] - residue
+			residue = primes[i] - residue
 		}
 		residues[i] = residue
 	}
@@ -152,20 +176,21 @@ func (basis fastStorageBasis) decodeFixed(residues [3]uint64, width int) (storag
 	if err := validateStorageWidth(width); err != nil {
 		return storageInteger{}, err
 	}
+	primes := fastStoragePrimes()
 	for i := 0; i < width; i++ {
-		if residues[i] >= fastStoragePrimes[i] {
+		if residues[i] >= primes[i] {
 			return storageInteger{}, fmt.Errorf("residue %d is not canonical", i)
 		}
 	}
 	value := storageUint192{lo: residues[0]}
 	if width >= 2 {
-		q0, q1 := fastStoragePrimes[0], fastStoragePrimes[1]
+		q0, q1 := primes[0], primes[1]
 		delta := storageSubMod(residues[1], value.lo%q1, q1)
 		t := storageMulMod(delta, basis.inverse01, q1)
 		value = storageAdd(value, storageMul64(storageUint192{lo: q0}, t))
 	}
 	if width == 3 {
-		q2 := fastStoragePrimes[2]
+		q2 := primes[2]
 		delta := storageSubMod(residues[2], storageMod192(value, q2), q2)
 		t := storageMulMod(delta, basis.inverse012, q2)
 		value = storageAdd(value, storageMul64(basis.products[2], t))

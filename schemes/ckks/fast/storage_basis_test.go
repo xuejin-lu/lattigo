@@ -11,7 +11,7 @@ import (
 )
 
 func TestFastStorageBasisPrimesAndNTTRoundTrip(t *testing.T) {
-	primes := fastStoragePrimes
+	primes := fastStoragePrimes()
 	for i, q := range primes {
 		require.True(t, ring.IsPrime(q))
 		require.Equal(t, 60, bits.Len64(q))
@@ -32,6 +32,14 @@ func TestFastStorageBasisPrimesAndNTTRoundTrip(t *testing.T) {
 		gotProduct, err := basis.product(3)
 		require.NoError(t, err)
 		require.Equal(t, wantProduct, gotProduct)
+		gotProductBits, err := basis.productBitLen(3)
+		require.NoError(t, err)
+		require.Equal(t, wantProduct.BitLen(), gotProductBits)
+		for i, prime := range primes {
+			gotPrime, err := basis.prime(i)
+			require.NoError(t, err)
+			require.Equal(t, prime, gotPrime)
+		}
 		for i, q := range primes {
 			subring, err := basis.subring(i)
 			require.NoError(t, err)
@@ -79,7 +87,7 @@ func TestFastStorageBasisFixedWidthSignedRoundTrip(t *testing.T) {
 			encoded, err := basis.encode(value, width)
 			require.NoError(t, err)
 			for i := 0; i < width; i++ {
-				wantResidue := new(big.Int).Mod(new(big.Int).Set(value), new(big.Int).SetUint64(fastStoragePrimes[i]))
+				wantResidue := new(big.Int).Mod(new(big.Int).Set(value), new(big.Int).SetUint64(fastStoragePrimes()[i]))
 				require.Equal(t, wantResidue.Uint64(), encoded[i], "width=%d primeIndex=%d value=%s", width, i, value)
 			}
 			decoded, err := basis.decode(encoded, width)
@@ -147,7 +155,9 @@ func TestFastStorageBasisWidthValidationAndLogicalQIndependence(t *testing.T) {
 	}
 	_, err = basis13.subring(3)
 	require.Error(t, err)
-	_, err = basis13.decode([3]uint64{fastStoragePrimes[0]}, 1)
+	_, err = basis13.decode([3]uint64{fastStoragePrimes()[0]}, 1)
+	require.Error(t, err)
+	_, err = basis13.prime(3)
 	require.Error(t, err)
 	tooWide := new(big.Int).Lsh(big.NewInt(1), 192)
 	_, err = basis13.encode(tooWide, 3)
@@ -159,7 +169,7 @@ func TestFastStorageBasisWidthValidationAndLogicalQIndependence(t *testing.T) {
 	_, err = ring.NewRing(1<<13, logicalQ)
 	require.NoError(t, err)
 	for _, q := range logicalQ {
-		for _, storagePrime := range fastStoragePrimes {
+		for _, storagePrime := range fastStoragePrimes() {
 			require.NotEqual(t, storagePrime, q, "logical Q must remain separate from private storage basis")
 		}
 	}
