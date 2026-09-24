@@ -455,34 +455,44 @@ Suppose an ordinary logical-Q coefficient class `c` is available at logical Leve
 c\in\mathbb Z/Q_\ell\mathbb Z.
 ]
 
-From logical residues alone, an arbitrary lift
-
-[
-X=c+kQ_\ell
-]
-
-cannot be recovered because `k` is not encoded in the logical residue class.
-
-Therefore a deterministic import from ordinary logical-Q representation must first choose the canonical centered representative:
+Fast import defines its boundary lift deterministically as the canonical centered representative:
 
 [
 C=\operatorname{Center}_{Q_\ell}(c)
 \in(-Q_\ell/2,Q_\ell/2].
 ]
 
-Exact import into active Fast storage product `S_A` is authorized only when the boundary contract proves that this canonical representative is the intended lifted integer and that it fits uniquely:
+This is a representation choice made by the Fast boundary; it does not attempt to recover a hidden historical lift. For same-level ring arithmetic, congruence modulo `Q_ell` is the semantic requirement, and the logical Rescale theorem in Section 4.8 is invariant under adding multiples of `Q_ell`.
+
+Import into active Fast storage product `S_A` is legal only when the chosen canonical representative fits uniquely:
 
 [
 |C|<S_A/2.
 ]
 
-For an operation-specific proven bound `B`, a sufficient entry condition is:
+A generic high-level logical-Q ciphertext can therefore be rejected by the Fast importer when its canonical coefficients exceed the private storage capacity.
+
+For Bootstrap, the preferred production boundary is **after ScaleDown reaches logical Level 0**:
 
 [
-B<\min(Q_\ell/2,S_A/2).
+\text{logical Q input}
+\xrightarrow{\text{ScaleDown}}
+q_0
+\xrightarrow{\text{center/import}}
+F.
 ]
 
-If the intended internal Fast lift is `c+kQ_\ell` with unknown nonzero `k`, logical-Q residues alone are insufficient to reconstruct it. The implementation must not guess `k`.
+At Level 0:
+
+[
+C=\operatorname{Center}_{q_0}(c),
+\qquad
+|C|\le q_0/2.
+]
+
+For the supported frontend profiles `q0` is far smaller than the three-prime Fast storage product, so this boundary has large deterministic capacity headroom. After import, Bootstrap ModUp may increase the **logical** Level while physical storage remains in the same Fast basis.
+
+A generic import API, if retained for diagnostics or future applications, must perform the actual capacity check coefficient-wise or require an equivalent proven bound. It must never silently wrap a canonical logical representative into insufficient Fast storage.
 
 ### 4.13 Fast-storage to logical-Q exit boundary
 
