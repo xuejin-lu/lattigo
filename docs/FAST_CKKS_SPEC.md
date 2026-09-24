@@ -111,8 +111,8 @@ where:
 - `ell` is the logical CKKS Level;
 - `Delta` is the logical CKKS Scale;
 - `A` is the active Fast storage basis, a subset of `{f0,f1,f2}`;
-- `X` is the coefficient-wise lifted integer polynomial represented by the Fast residues;
-- `B` is a proven coefficient-magnitude bound;
+- `X=(X_0,...,X_d)` is the vector of coefficient-wise lifted integer polynomials represented by the Fast ciphertext components;
+- `B=(B_0,...,B_d)` is a vector of proven coefficient-infinity bounds with `||X_j||_infinity <= B_j`;
 - `D` records coefficient/NTT and Montgomery representation state; and
 - `d` is the ciphertext degree.
 
@@ -138,10 +138,17 @@ For active storage product
 S_A=\prod_{f\in A}f,
 ]
 
-the authoritative lift must satisfy
+every authoritative component coefficient must satisfy
 
 [
-|X|<\frac{S_A}{2}.
+\|X_j\|_\infty<\frac{S_A}{2},
+\qquad 0\le j\le d.
+]
+
+Equivalently, for every proven component bound:
+
+[
+2B_j<S_A.
 ]
 
 This strict centered-uniqueness condition is the correctness boundary. An engineering safety margin may be imposed in addition, but no operation may rely on an unproven wraparound.
@@ -282,29 +289,124 @@ The following table defines the target semantics.
 
 ### 4.6 Add/Sub and multiplication bounds
 
-For aligned operands,
+Fast bound tracking is **per ciphertext component**, not one scalar guessed for the entire ciphertext.
+
+For ciphertext degree `d`, maintain
 
 [
-Z=X\pm Y
+\mathbf B=(B_0,\ldots,B_d),
+\qquad
+\|X_j\|_\infty\le B_j.
 ]
 
-may use
+Bounds are semantic coefficient-domain facts. NTT coordinates may be numerically large; NTT/INTT does not change `B_j` because the bound belongs to the represented polynomial, not to its transform coordinates.
+
+#### Add/Sub
+
+For
 
 [
-B_Z\le B_X+B_Y.
+Z_j=X_j\pm Y_j
 ]
 
-For negacyclic multiplication in degree `N`, a generic safe coefficient bound is
+with a missing higher-degree component interpreted as zero,
 
 [
-B_{mul}\le N B_XB_Y,
+B_{Z,j}\le B_{X,j}+B_{Y,j}.
 ]
 
-unless a tighter operation-specific proof is available.
+For the initial private-storage arithmetic contract, Add/Sub requires equal CKKS Scale. The output logical Level is
 
-Multiplication is valid in a Fast storage basis only when the **pre-Rescale product** remains uniquely representable. It is insufficient to check only the smaller post-Rescale result.
+[
+\ell_Z=\min(\ell_X,\ell_Y),
+]
 
-Measured LogN13/P93 evidence motivating the wider basis:
+which is a logical restriction analogous to dropping unavailable higher logical residues; it does not change the private Fast lift. Output degree is `max(d_X,d_Y)`.
+
+#### Negacyclic polynomial product
+
+For two coefficient polynomials `A,B` in
+
+[
+R=\mathbb Z[X]/(X^N+1),
+]
+
+[
+\|A\star B\|_\infty
+\le
+N\|A\|_\infty\|B\|_\infty.
+]
+
+For ciphertext multiplication,
+
+[
+Z_k
+=
+\sum_{i=\max(0,k-d_Y)}^{\min(d_X,k)}
+X_i\star Y_{k-i}.
+]
+
+Therefore the generic safe per-component bound is
+
+[
+\boxed{
+B_{Z,k}
+\le
+N
+\sum_i
+B_{X,i}B_{Y,k-i}
+}.
+]
+
+For degree-one times degree-one multiplication this becomes
+
+[
+B_{Z,0}\le N B_{X,0}B_{Y,0},
+]
+
+[
+B_{Z,1}\le N(B_{X,0}B_{Y,1}+B_{X,1}B_{Y,0}),
+]
+
+[
+B_{Z,2}\le N B_{X,1}B_{Y,1}.
+]
+
+If only a single worst-case input bound is known, the coarser fallback is
+
+[
+\max_k B_{Z,k}
+\le
+N(\min(d_X,d_Y)+1)B_XB_Y.
+]
+
+This corrects the single-polynomial shortcut `N*Bx*By`, which is insufficient for ciphertext components that sum multiple polynomial products.
+
+Raw multiplication keeps
+
+[
+\ell_Z=\min(\ell_X,\ell_Y),
+\qquad
+\Delta_Z=\Delta_X\Delta_Y,
+\qquad
+d_Z=d_X+d_Y.
+]
+
+Relinearization is a separate operation and must not be silently folded into this bound unless its own bounded error contribution has been accounted for.
+
+#### Integer scalar multiplication
+
+For exact integer `m`,
+
+[
+Z_j=mX_j,
+\qquad
+B_{Z,j}\le |m|B_{X,j}.
+]
+
+The `MulInteger` arithmetic operation itself does not consume a logical Level and does not intrinsically change Scale. If a caller deliberately multiplies both coefficients and Scale by the same integer for message-preserving normalization, the Scale update is a separate explicit metadata transition.
+
+Measured LogN13/P93 evidence motivating the wider basis remains:
 
 [
 B_{max,current}\approx2^{121}
@@ -316,7 +418,7 @@ at the worst observed pre-Rescale generated-power checkpoint. The current q0q1q2
 B_{max,future}\approx2^{155}.
 ]
 
-Three near-60-bit Fast storage primes provide centered capacity near `2^179`, about 24 bits above that estimate. These numbers are design evidence, not universal correctness bounds; every supported profile still needs an explicit bound check.
+Three near-60-bit Fast storage primes provide centered capacity near `2^179`, about 24 bits above that estimate. These numbers are design evidence, not universal correctness bounds; the explicit per-operation bound gate remains authoritative.
 
 ### 4.7 KeySwitch, Relinearize and Rotate
 
@@ -551,7 +653,180 @@ X\bmod f_w.
 
 Contraction follows Section 4.4 and likewise changes no logical Level or Scale.
 
-### 4.16 Current implementation versus this target
+### 4.16 Fast-storage arithmetic exactness and capacity planner
+
+This section is the frozen arithmetic contract for private-F Add/Sub/Mul foundations.
+
+#### 4.16.1 Exactness theorem
+
+Let
+
+[
+S_w=\prod_{i=0}^{w-1}f_i
+]
+
+for active width `w`. Suppose a Fast operation computes, in every active row, the correct modular residue of an exact integer coefficient `z`:
+
+[
+r_i=z\bmod f_i.
+]
+
+If a proven bound satisfies
+
+[
+|z|\le B,
+\qquad
+2B<S_w,
+]
+
+then centered CRT reconstruction from those rows returns the exact integer `z`, not merely a congruence class.
+
+Therefore modular NTT arithmetic over the private storage primes is an exact implementation of the lifted-integer operation whenever the output bound passes the centered-capacity gate.
+
+For ciphertexts this condition is checked for every output component bound:
+
+[
+2B_{Z,j}<S_w
+\quad\text{for all }j.
+]
+
+If this proof fails, the modular rows may still be algebraically valid residues, but they no longer uniquely determine the intended lifted integer. The operation is therefore forbidden.
+
+#### 4.16.2 Required width
+
+Define
+
+[
+w_{req}(\mathbf B)
+=
+\min\left\{
+w\in\{1,2,3\}:
+2B_j<S_w\ \forall j
+\right\}.
+]
+
+If no such width exists, the operation must fail with an explicit Fast-storage capacity error before mutating the destination.
+
+Correctness uses the exact integer comparison above, not an approximate bit-length heuristic.
+
+For diagnostics, implementations may additionally report a headroom metric such as
+
+[
+h
+=
+\log_2(S_w/2)
+-
+\log_2(\max(1,\max_j B_j)).
+]
+
+Headroom is observability information; the strict inequality `2B_j<S_w` is the correctness gate.
+
+#### 4.16.3 Expand before arithmetic
+
+For a binary operation with current widths `w_X,w_Y` and proven output bounds `B_Z`, choose an operation width satisfying
+
+[
+w_{op}
+\ge
+\max(w_X,w_Y,w_{req}(\mathbf B_Z)).
+]
+
+With the current monotone-width policy, use
+
+[
+\boxed{
+w_{op}
+=
+\max(w_X,w_Y,w_{req}(\mathbf B_Z))
+}.
+]
+
+Any operand narrower than `w_op` must be **exactly expanded before the arithmetic**.
+
+Do not:
+
+```text
+compute in a too-small basis
+-> wrap modulo S_w
+-> expand the wrapped result
+```
+
+because once the true result exceeds the centered capacity of the narrow basis, the omitted integer lift information is lost.
+
+Expansion is legal because the source basis already uniquely reconstructs each input lift. Conceptually:
+
+```text
+current residues
+-> reconstruct authoritative X
+-> X mod added f_i
+-> enter the same representation domain under the widened basis
+```
+
+A future optimized RNS base-extension routine may replace explicit reconstruction only after proving equivalence.
+
+#### 4.16.4 No implicit contraction
+
+Add/Sub/Mul must not automatically shrink storage width.
+
+The output width is `w_op`. Contraction remains an explicit representation-management operation governed by Sections 4.4 and 4.15.
+
+This rule keeps arithmetic and representation policy separately testable and prevents a successful operation from hiding a subsequent narrowing decision.
+
+#### 4.16.5 Bound provenance
+
+A production Fast ciphertext must never carry an optimistic guessed bound.
+
+Allowed bound sources are:
+
+1. an exact coefficient scan at a deliberate boundary;
+2. a mathematically proven operation transition from already-valid input bounds; or
+3. a conservative externally proven bound encoded by the caller/specification.
+
+At the Level-0 logical-q0 to FastStorage import boundary, every coefficient is already visited for centered lifting. The preferred initialization is therefore the exact per-component maximum:
+
+[
+B_j
+=
+\max_k
+|\operatorname{Center}_{q_0}(c_{j,k})|.
+]
+
+This exact scan has no additional asymptotic cost at that boundary and is typically tighter than the generic `q0/2` bound.
+
+After arithmetic, use the proven transition formulas. A later deliberate full coefficient scan may tighten a bound, but routine hot-path correctness must not depend on such scans.
+
+Bound arithmetic itself is scalar metadata work and must be overflow-safe. Using arbitrary-precision integers for the small number of bound calculations per operation is acceptable; silent fixed-width overflow in capacity planning is forbidden.
+
+#### 4.16.6 Transactional capacity failure
+
+Capacity planning and any required width expansion must complete before destructive destination writes.
+
+If:
+
+- `w_req > 3`;
+- an operand cannot be exactly expanded;
+- metadata/domain preconditions fail; or
+- any bound is missing/untrusted,
+
+the operation must return an error without leaving a partially updated Fast ciphertext that appears valid.
+
+#### 4.16.7 Initial arithmetic-domain contract
+
+For the first private-F arithmetic implementation:
+
+- operands must use the same ring degree and parameter identity;
+- Add/Sub require equal Scale;
+- binary operations require matching coefficient/NTT domain;
+- Montgomery private-F arithmetic may remain unsupported and explicitly rejected;
+- raw Mul requires NTT-domain operands unless an explicit coefficient-to-NTT boundary is performed;
+- logical output Level is the minimum input logical Level;
+- storage width is governed only by the capacity planner above.
+
+These restrictions are intentionally conservative. They may be relaxed later only with an explicit mathematical contract.
+
+### 4.17 Current implementation versus this target
+
+
 
 The current branch still implements historical q0/q1 and q0/q1/q2 maintained-residue shortcuts in which storage moduli are the frontend logical moduli themselves. That code is valid current evidence and a useful oracle for bounded behavior, but it is **not** the permanent storage architecture.
 
