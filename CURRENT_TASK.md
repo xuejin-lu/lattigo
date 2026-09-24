@@ -1,14 +1,20 @@
 # Current Task
 
-Status: WAITING_FOR_PRIMARY_DESIGN
+Task: FAST-STORAGE-002
+Status: AUTHORIZED_BY_PRIMARY
 
-FAST-STORAGE-001 foundation is accepted at:
-`cc5028c872a89aff05ca43aa7e6f8c4269fcf8b5`
+Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap/specs/FAST-STORAGE-002-CONTAINER-CONVERSION-BOUNDARIES.md`
 
-The durable architecture was refined at:
-`3c3fe59f24fd9e80ab03ca566a39336c53b6c121`
+Scope:
+Implement and test the physically separate Fast storage ciphertext container and Level-0 LogicalQ <-> FastStorage conversion boundaries.
+
+Architecture authority:
+`docs/FAST_CKKS_SPEC.md`
 
 Important:
-- widened private `f_i` residues must not be stored in ordinary logical-q ciphertext rows;
-- the next phase requires a Primary/Web-led design for a distinct Fast storage container and LogicalQ <-> FastStorage conversion boundaries;
-- do not begin production integration, Rescale, ModUp, KeySwitch, Relinearize, Rotation, or Bootstrap changes until a new Primary spec explicitly authorizes them.
+- f_i rows must never masquerade as logical q_i rows;
+- LogicalLevel is explicit and independent from ActiveStorageWidth;
+- do not wire this container into Bootstrap, Rescale, ModUp, arithmetic, or keys in this task.
+
+Follow `AGENTS.md`, safely sync `fast-ckks`, read the Primary spec, then execute only the authorized scope.
