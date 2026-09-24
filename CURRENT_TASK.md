@@ -1,20 +1,12 @@
 # Current Task
 
-Task: FAST-STORAGE-002
-Status: AUTHORIZED_BY_PRIMARY
+Status: WAITING_FOR_PRIMARY_TASK
 
-Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap/specs/FAST-STORAGE-002-CONTAINER-CONVERSION-BOUNDARIES.md`
+FAST-STORAGE-002 is accepted at:
+`3b57a52b311397e0e1cf8298027782eec20d4ffc`
 
-Scope:
-Implement and test the physically separate Fast storage ciphertext container and Level-0 LogicalQ <-> FastStorage conversion boundaries.
+The separate FastCiphertext container and q0 <-> F conversion boundaries are accepted.
 
-Architecture authority:
-`docs/FAST_CKKS_SPEC.md`
+Do not wire the new container into production Bootstrap yet.
 
-Important:
-- f_i rows must never masquerade as logical q_i rows;
-- LogicalLevel is explicit and independent from ActiveStorageWidth;
-- do not wire this container into Bootstrap, Rescale, ModUp, arithmetic, or keys in this task.
-
-Follow `AGENTS.md`, safely sync `fast-ckks`, read the Primary spec, then execute only the authorized scope.
+Wait for the next Primary spec covering bounded FastStorage arithmetic foundations.
