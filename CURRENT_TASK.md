@@ -1,7 +1,17 @@
 # Current Task
 
-Status: IDLE
+Task: FAST-STORAGE-001
+Status: AUTHORIZED_BY_PRIMARY
 
-There is no standalone Lattigo task currently active.
+Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap/specs/FAST-STORAGE-001-PRIVATE-STORAGE-BASIS-FOUNDATION.md`
 
-Only modify this repository when the active task from the primary project explicitly requires a Lattigo backend change. When modifying this repository, continue to follow `AGENTS.md` and `docs/FAST_CKKS_SPEC.md`.
+Scope:
+Implement and test the backend-private Fast storage-basis foundation only.
+
+Architecture authority:
+`docs/FAST_CKKS_SPEC.md`
+
+Do not integrate the new storage basis into current ciphertext arithmetic, Rescale, ModUp, KeySwitch, Relinearize, Rotation, or Bootstrap in this task.
+
+Follow `AGENTS.md`, safely sync `fast-ckks`, read the Primary spec, then execute only its authorized Secondary scope.
