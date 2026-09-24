@@ -415,7 +415,133 @@ X\bmod q_i.
 
 The public result must expose the frontend's original logical Level, Scale, parameter identity, and key semantics. Fast storage primes are backend-private and must not leak into public CKKS parameters.
 
-### 4.11 Current implementation versus this target
+### 4.11 Physical container separation
+
+The target widened-storage architecture must not store residues modulo `f_i` inside coefficient rows that ordinary Lattigo code interprets as residues modulo logical `q_i`.
+
+A row position is not merely storage: existing `ringQ.SubRings[i]`, NTT constants, Montgomery constants, Rescale code, and other logical-Q operations interpret row `i` according to `q_i`.
+
+Therefore:
+
+[
+\boxed{\text{Fast private }f_i\text{ residues require a physically distinct storage container/basis context.}}
+]
+
+Do not create a target design in which an ordinary `rlwe.Ciphertext` row indexed as logical `q_i` silently contains data modulo `f_i`.
+
+The target representation should keep, explicitly and separately:
+
+```text
+logical metadata:
+    logical Level
+    CKKS Scale
+    degree / ring degree
+    public parameter identity
+
+private physical state:
+    Fast storage basis F
+    ActiveStorageWidth
+    residue polynomials modulo f_i
+    representation domain (Coeff/NTT, ordinary/Montgomery)
+```
+
+Historical q0/q1/q012 compact ciphertexts remain valid current implementation evidence because those rows are actually modulo the corresponding logical q_i. They must not be used as a template for silently relabeling widened f_i residues as q_i rows.
+
+### 4.12 Logical-Q to Fast-storage entry boundary
+
+Suppose an ordinary logical-Q coefficient class `c` is available at logical Level `ell`:
+
+[
+c\in\mathbb Z/Q_\ell\mathbb Z.
+]
+
+From logical residues alone, an arbitrary lift
+
+[
+X=c+kQ_\ell
+]
+
+cannot be recovered because `k` is not encoded in the logical residue class.
+
+Therefore a deterministic import from ordinary logical-Q representation must first choose the canonical centered representative:
+
+[
+C=\operatorname{Center}_{Q_\ell}(c)
+\in(-Q_\ell/2,Q_\ell/2].
+]
+
+Exact import into active Fast storage product `S_A` is authorized only when the boundary contract proves that this canonical representative is the intended lifted integer and that it fits uniquely:
+
+[
+|C|<S_A/2.
+]
+
+For an operation-specific proven bound `B`, a sufficient entry condition is:
+
+[
+B<\min(Q_\ell/2,S_A/2).
+]
+
+If the intended internal Fast lift is `c+kQ_\ell` with unknown nonzero `k`, logical-Q residues alone are insufficient to reconstruct it. The implementation must not guess `k`.
+
+### 4.13 Fast-storage to logical-Q exit boundary
+
+For an authoritative unique Fast lift `X`, exporting to an ordinary logical-Q ciphertext at Level `ell` is defined coefficient-wise by:
+
+[
+r_i=X\bmod q_i,
+\qquad 0\le i\le\ell.
+]
+
+This requires no equality between `X` and the canonical logical representative. Congruence is sufficient:
+
+[
+X\equiv c_{logical}\pmod{Q_\ell}.
+]
+
+The exported ordinary ciphertext must restore logical Level, Scale, degree, NTT/Montgomery state, and public parameter identity consistently.
+
+### 4.14 Cross-basis conversion must occur through coefficient-domain integers
+
+NTT coordinates are modulus-specific. An NTT coordinate modulo `q_i` is not the same mathematical coordinate as an NTT coordinate modulo `f_j`.
+
+Therefore basis conversion between logical Q and private F must not copy or reinterpret NTT rows index-by-index.
+
+Conceptually:
+
+[
+\text{source NTT residues}
+\xrightarrow{\mathrm{INTT}}
+\text{source coefficient residues}
+\xrightarrow{\mathrm{normalize}}
+\text{canonical/authoritative integer}
+\xrightarrow{\bmod\ target}
+\text{target coefficient residues}
+\xrightarrow{\mathrm{NTT}}
+\text{target NTT residues}.
+]
+
+Likewise, Montgomery-form residues must be converted to ordinary residues before integer reconstruction, and converted into the target Montgomery representation only after reduction into the target modulus.
+
+This rule is a correctness boundary, not permission to add routine coefficient-domain round trips to hot paths. Conversion should happen only at explicit basis boundaries.
+
+### 4.15 Storage width expansion and contraction
+
+Storage expansion from width `w` to `w+1` is representation-only and is legal only while the smaller basis uniquely determines `X`:
+
+[
+|X|<S_w/2.
+]
+
+Then reconstruct `X` and add:
+
+[
+X\bmod f_w.
+]
+
+Contraction follows Section 4.4 and likewise changes no logical Level or Scale.
+
+### 4.16 Current implementation versus this target
 
 The current branch still implements historical q0/q1 and q0/q1/q2 maintained-residue shortcuts in which storage moduli are the frontend logical moduli themselves. That code is valid current evidence and a useful oracle for bounded behavior, but it is **not** the permanent storage architecture.
 
