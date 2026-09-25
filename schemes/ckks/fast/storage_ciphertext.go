@@ -19,6 +19,7 @@ type FastCiphertext struct {
 	logicalLevel       int
 	activeStorageWidth int
 	value              []ring.Poly
+	componentBounds    []*big.Int
 	metadata           rlwe.MetaData
 	basis              fastStorageBasis
 }
@@ -47,6 +48,7 @@ func newFastCiphertextWithBasis(params ckks.Parameters, degree, logicalLevel, st
 		logicalLevel:       logicalLevel,
 		activeStorageWidth: storageWidth,
 		value:              value,
+		componentBounds:    zeroComponentBounds(degree + 1),
 		metadata: rlwe.MetaData{
 			PlaintextMetaData: rlwe.PlaintextMetaData{
 				Scale:         cloneFastScale(params.DefaultScale()),
@@ -85,6 +87,7 @@ func (ct *FastCiphertext) CopyNew() *FastCiphertext {
 	}
 	copy := *ct
 	copy.metadata = cloneFastMetadata(ct.metadata)
+	copy.componentBounds = cloneComponentBounds(ct.componentBounds)
 	copy.value = make([]ring.Poly, len(ct.value))
 	for i := range ct.value {
 		copy.value[i].Coeffs = make([][]uint64, len(ct.value[i].Coeffs))
@@ -110,14 +113,19 @@ func (ct *FastCiphertext) ResizeDegree(degree int) error {
 	if err := validateStorageWidth(ct.activeStorageWidth); err != nil {
 		return err
 	}
+	if len(ct.componentBounds) != len(ct.value) {
+		return fmt.Errorf("Fast ciphertext has %d component bounds for %d value components", len(ct.componentBounds), len(ct.value))
+	}
 	wantComponents := degree + 1
 	if wantComponents < len(ct.value) {
 		ct.value = ct.value[:wantComponents]
+		ct.componentBounds = ct.componentBounds[:wantComponents]
 		return nil
 	}
 	for len(ct.value) < wantComponents {
 		poly := ring.NewPoly(ct.N(), ct.activeStorageWidth-1)
 		ct.value = append(ct.value, poly)
+		ct.componentBounds = append(ct.componentBounds, new(big.Int))
 	}
 	return nil
 }
@@ -209,6 +217,56 @@ func (ct *FastCiphertext) Parameters() ckks.Parameters {
 		return ckks.Parameters{}
 	}
 	return ct.params
+}
+
+// ComponentBounds returns a deep copy of the proven coefficient-infinity
+// bounds, one exact non-negative integer per ciphertext component.
+func (ct *FastCiphertext) ComponentBounds() []*big.Int {
+	if ct == nil {
+		return nil
+	}
+	return cloneComponentBounds(ct.componentBounds)
+}
+
+func zeroComponentBounds(count int) []*big.Int {
+	bounds := make([]*big.Int, count)
+	for i := range bounds {
+		bounds[i] = new(big.Int)
+	}
+	return bounds
+}
+
+func cloneComponentBounds(bounds []*big.Int) []*big.Int {
+	if bounds == nil {
+		return nil
+	}
+	copy := make([]*big.Int, len(bounds))
+	for i := range bounds {
+		if bounds[i] != nil {
+			copy[i] = new(big.Int).Set(bounds[i])
+		}
+	}
+	return copy
+}
+
+func (ct *FastCiphertext) validateBoundInvariant() error {
+	if len(ct.componentBounds) != len(ct.value) {
+		return fmt.Errorf("Fast ciphertext has %d component bounds for %d value components", len(ct.componentBounds), len(ct.value))
+	}
+	capacity := storageToBig(ct.basis.products[ct.activeStorageWidth])
+	for component, bound := range ct.componentBounds {
+		if bound == nil {
+			return fmt.Errorf("Fast component %d bound cannot be nil", component)
+		}
+		if bound.Sign() < 0 {
+			return fmt.Errorf("Fast component %d bound cannot be negative", component)
+		}
+		doubled := new(big.Int).Lsh(new(big.Int).Set(bound), 1)
+		if doubled.Cmp(capacity) >= 0 {
+			return fmt.Errorf("Fast component %d bound does not fit uniquely in storage width %d", component, ct.activeStorageWidth)
+		}
+	}
+	return nil
 }
 
 func cloneFastScale(scale rlwe.Scale) rlwe.Scale {

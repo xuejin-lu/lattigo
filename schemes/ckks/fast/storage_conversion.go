@@ -69,11 +69,15 @@ func ImportLevel0(params ckks.Parameters, source *rlwe.Ciphertext, storageWidth 
 		} else {
 			copy(coefficients, sourceRow)
 		}
+		var maxMagnitude storageUint192
 		for k, residue := range coefficients {
 			if residue >= q0 {
 				return nil, fmt.Errorf("source component %d coefficient %d is not canonical modulo q0", component, k)
 			}
 			lift := centeredStorageResidue(residue, q0)
+			if storageCmp(lift.magnitude, maxMagnitude) > 0 {
+				maxMagnitude = lift.magnitude
+			}
 			encoded, err := encodeCenteredStorageValue(basis, lift, storageWidth)
 			if err != nil {
 				return nil, fmt.Errorf("source component %d coefficient %d: %w", component, k, err)
@@ -82,6 +86,7 @@ func ImportLevel0(params ckks.Parameters, source *rlwe.Ciphertext, storageWidth 
 				fast.value[component].Coeffs[i][k] = encoded[i]
 			}
 		}
+		fast.componentBounds[component] = storageToBig(maxMagnitude)
 	}
 	if target.IsNTT {
 		for component := range fast.value {
@@ -138,6 +143,9 @@ func (ct *FastCiphertext) ExportToLogical(target FastCiphertextDomain) (*rlwe.Ci
 		return nil, err
 	}
 	if err := ct.validateStorageRows(); err != nil {
+		return nil, err
+	}
+	if err := ct.validateBoundInvariant(); err != nil {
 		return nil, err
 	}
 

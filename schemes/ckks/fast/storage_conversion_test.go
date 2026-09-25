@@ -41,6 +41,7 @@ func TestFastCiphertextLogicalLevelAndStorageWidthAreIndependent(t *testing.T) {
 		require.Equal(t, test.width, ct.StorageWidth())
 		require.Equal(t, params.N(), ct.N())
 		require.Equal(t, 1, ct.Degree())
+		require.Equal(t, []*big.Int{new(big.Int), new(big.Int)}, ct.ComponentBounds())
 		for component := range ct.value {
 			require.Len(t, ct.value[component].Coeffs, test.width)
 			for _, row := range ct.value[component].Coeffs {
@@ -51,6 +52,9 @@ func TestFastCiphertextLogicalLevelAndStorageWidthAreIndependent(t *testing.T) {
 
 	ct, err := NewFastCiphertext(params, 1, 5, 3)
 	require.NoError(t, err)
+	ct.componentBounds[0].SetInt64(17)
+	ct.componentBounds[1].SetInt64(19)
+	boundsBefore := ct.ComponentBounds()
 	for component := range ct.value {
 		for row := range ct.value[component].Coeffs {
 			for k := range ct.value[component].Coeffs[row] {
@@ -60,18 +64,25 @@ func TestFastCiphertextLogicalLevelAndStorageWidthAreIndependent(t *testing.T) {
 	}
 	before := cloneStorageRows(ct.value)
 	require.NoError(t, ct.SetLogicalLevel(1))
+	require.True(t, ct.SetScale(rlwe.NewScale(987654321)) == nil)
 	require.Equal(t, before, ct.value, "logical level changes must not mutate or resize F rows")
+	require.Equal(t, boundsBefore, ct.ComponentBounds(), "logical metadata changes must not alter bounds")
 	require.Equal(t, 3, ct.StorageWidth())
 
 	copyCT := ct.CopyNew()
 	require.NotSame(t, &ct.value[0].Coeffs[0][0], &copyCT.value[0].Coeffs[0][0])
 	copyCT.value[0].Coeffs[0][0]++
+	copyCT.componentBounds[0].SetInt64(99)
 	require.Equal(t, before[0].Coeffs[0][0], ct.value[0].Coeffs[0][0])
+	require.Equal(t, boundsBefore[0], ct.ComponentBounds()[0], "CopyNew must deep-copy bounds")
 	require.NoError(t, ct.ResizeDegree(2))
 	require.Equal(t, 2, ct.Degree())
 	require.Len(t, ct.value[2].Coeffs, 3)
+	require.Equal(t, boundsBefore[:2], ct.ComponentBounds()[:2])
+	require.Zero(t, ct.ComponentBounds()[2].Sign())
 	require.NoError(t, ct.ResizeDegree(0))
 	require.Equal(t, 0, ct.Degree())
+	require.Equal(t, []*big.Int{boundsBefore[0]}, ct.ComponentBounds())
 }
 
 func TestFastStorageLevel0CoefficientImportWidths123(t *testing.T) {
