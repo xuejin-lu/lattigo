@@ -1,27 +1,22 @@
 # Current Task
 
-Task: FAST-INTEGRATION-002
-Status: NEEDS_BENCHMARK_EVIDENCE
+Status: WAITING_FOR_PRIMARY_TASK
 
-Candidate implementation:
+FAST-INTEGRATION-002 is accepted at:
 `57ffb88744c82778c0a9392ecab394e19f712a3d`
 
-Web source review found no blocking correctness defect.
+Accepted production ModUp basis path:
+- `FusedLevel0ModUpToCompactLogical` is the production hot path;
+- the unfused private-F Import/ModUp/compact-export chain remains the semantic oracle;
+- canonical q0 midpoint semantics remain authoritative;
+- only maintained logical q rows are materialized;
+- downstream Bootstrap stages and standalone private-F APIs remain unchanged.
 
-Before acceptance, run and report the required LogN13 performance evidence on this candidate:
-- `BenchmarkFastModUpBasisLogN13`
-- `BenchmarkStandardModUpBasisLogN13`
+Accepted LogN13 benchmark evidence:
+- Fast fused ~0.226 ms/op, 266096 B/op, 54 allocs/op;
+- Standard ~2.920 ms/op, ~1.967 MB/op, 46 allocs/op;
+- all FAST-INTEGRATION-002 performance gates passed.
 
-Run each at least three times and report:
-- ns/op
-- B/op
-- allocs/op
+Do not begin the next downstream private-F integration task without a new Primary specification.
 
-Required gates:
-- Fast allocs/op <= 873;
-- Fast B/op materially below ~3.35 MB/op;
-- Fast ns/op below ~4.50 ms/op.
-
-Do not change code unless a gate fails and one bounded repair pass is needed under the existing FAST-INTEGRATION-002 spec.
-
-Then report `READY_FOR_WEB_REVIEW` if all gates pass, otherwise `NEEDS_WEB_REVIEW`.
+Wait for the next Primary task.
