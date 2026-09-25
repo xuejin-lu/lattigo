@@ -483,7 +483,27 @@ Therefore the physical rounded division and the Scale update must use the **logi
 
 Using `f_i` as the divisor would be a semantic error. For example, dividing coefficients by `q_ell` but Scale by `f_i` introduces a message multiplier `f_i/q_ell`.
 
-After logical Rescale, optionally contract storage only when the post-Rescale bound proves that the smaller storage product is sufficient. Logical Rescale and storage contraction must remain separately testable operations.
+For a proven input component bound
+
+[
+\|X_j\|_\infty\le B_j,
+]
+
+with odd logical prime `q_ell`, nearest-integer division gives the safe post-Rescale bound
+
+[
+\boxed{
+B'_j
+=
+\left\lfloor
+\frac{B_j+(q_\ell-1)/2}{q_\ell}
+\right\rfloor
+}.
+]
+
+This follows because ties at exactly one half cannot occur for integer numerators divided by odd `q_ell`.
+
+After logical Rescale, optionally contract storage only when the post-Rescale bound vector proves that the smaller storage product is sufficient. Logical Rescale and storage contraction must remain separately testable operations.
 
 ### 4.9 ModUp canonicalization boundary
 
@@ -797,7 +817,45 @@ After arithmetic, use the proven transition formulas. A later deliberate full co
 
 Bound arithmetic itself is scalar metadata work and must be overflow-safe. Using arbitrary-precision integers for the small number of bound calculations per operation is acceptable; silent fixed-width overflow in capacity planning is forbidden.
 
-#### 4.16.6 Transactional capacity failure
+#### 4.16.6 LogN13 capacity sanity example
+
+For the accepted fixed storage primes, the three centered capacities are approximately:
+
+```text
+width 1: 2^59
+width 2: 2^119
+width 3: 2^179
+```
+
+For a 55-bit logical `q0`, a Level-0 canonical centered import has a generic component bound below about
+
+[
+2^{54}.
+]
+
+At `N=2^13`, a degree-one times degree-one multiplication has middle-component bound
+
+[
+B_{Z,1}
+\le
+N(B_{X,0}B_{Y,1}+B_{X,1}B_{Y,0}).
+]
+
+Under the symmetric worst-case estimate `B_{X,j},B_{Y,j} <= 2^54`:
+
+[
+B_{Z,1}
+\lesssim
+2\cdot2^{13}\cdot2^{108}
+=
+2^{122}.
+]
+
+Therefore a generic correctness proof cannot authorize width 2 for that multiplication, while width 3 has ample capacity. This is consistent with the historical measured pre-Rescale maximum near `2^121`.
+
+This example is explanatory only. Runtime authorization still uses the exact bound vector and exact product comparison.
+
+#### 4.16.7 Transactional capacity failure
 
 Capacity planning and any required width expansion must complete before destructive destination writes.
 
@@ -810,7 +868,7 @@ If:
 
 the operation must return an error without leaving a partially updated Fast ciphertext that appears valid.
 
-#### 4.16.7 Initial arithmetic-domain contract
+#### 4.16.8 Initial arithmetic-domain contract
 
 For the first private-F arithmetic implementation:
 
