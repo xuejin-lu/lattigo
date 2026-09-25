@@ -1,21 +1,23 @@
 # Current Task
 
-Status: WAITING_FOR_PRIMARY_TASK
+Task: FAST-INTEGRATION-002
+Status: READY_FOR_CODEX
 
-FAST-INTEGRATION-001 is accepted at:
-`31efadc693559217b48d3e76a2e3655b9e6cd14d`
+Authoritative Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap@main`
+`specs/FAST-INTEGRATION-002-FUSED-MODUP-BRIDGE-OPTIMIZATION.md`
 
-Accepted production integration:
-- `FastEvaluator.modUpBasis` now uses the private-F width-3 bridge;
-- compact logical export materializes only maintained q rows;
-- canonical q0 midpoint semantics are authoritative;
-- downstream Trace/DFT/EvalMod/packing/production Rescale remain on the existing path.
+Task class:
+`I — Implementation`
 
-Performance follow-up is required:
-- current LogN13 bridge is about 1.53x slower than the Standard basis-raise benchmark;
-- allocations are about 87,263/op versus 46/op;
-- do not treat the current bridge as the final optimized hot path.
+Accepted prerequisite:
+- FAST-INTEGRATION-001 at `31efadc693559217b48d3e76a2e3655b9e6cd14d`.
+- Fusion architecture clarification at `dc698e2d99a488f0de2cf4f3207b09ef94521303`.
 
-Do not begin the next optimization or downstream private-F migration without a new Primary specification.
+Implement only the fused Level-0 ModUp bridge optimization defined by Primary.
 
-Wait for the next Primary task.
+Preserve accepted canonical q0 semantics, compact maintained logical rows, fixed-width-3 architecture, standalone private-F reference APIs, and downstream Bootstrap behavior.
+
+Performance gates are part of task acceptance.
+
+Commit and push Secondary `fast-ckks`, then report `READY_FOR_WEB_REVIEW` or `NEEDS_WEB_REVIEW`.
