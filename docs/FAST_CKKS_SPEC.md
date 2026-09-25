@@ -270,6 +270,35 @@ Storage contraction:
 
 If a future operation needs more capacity, storage may be expanded again before the operation, provided the current smaller basis still uniquely reconstructs `X`; reconstruct `X` and reduce it into the added Fast modulus. Width changes are representation management, not CKKS operations.
 
+### 4.4.1 Initial production width policy
+
+For the first production integration of the private-F architecture, use a fixed active storage width of three:
+
+[
+A_3=(f_0,f_1,f_2).
+]
+
+This is an engineering policy, not a new correctness invariant.
+
+The exact planner
+
+[
+w_{req}(B)=\min\{w:2B_j<S_w\ \forall j\}
+]
+
+remains authoritative for proving whether a state fits the available private-F capacity, but it does not force the runtime to contract to the minimum admissible width.
+
+For the initial production path:
+
+- import into width 3;
+- keep width 3 across arithmetic, Rescale, ModUp, and later integration boundaries;
+- do not implement automatic `3->2` or `2->1` contraction;
+- do not add contraction/expansion hysteresis or adaptive-width policy yet.
+
+A wider active basis than mathematically required is valid. Dynamic width is a later performance experiment and should be justified by wall-clock measurements against the fixed-width-3 baseline. If fixed width 3 is already sufficiently fast, contraction may remain unimplemented.
+
+Existing width-1/2 support, required-width proofs, and exact expansion remain useful as correctness infrastructure and diagnostic capability.
+
 ### 4.5 Operation state transitions
 
 The following table defines the target semantics.
