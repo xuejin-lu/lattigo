@@ -2,11 +2,17 @@
 
 Status: WAITING_FOR_PRIMARY_TASK
 
-FAST-STORAGE-002 is accepted at:
-`3b57a52b311397e0e1cf8298027782eec20d4ffc`
+FAST-STORAGE-003 is accepted at:
+`b8305a7e3d4ff15591a2249e97a54ad0b3311dde`
 
-The separate FastCiphertext container and q0 <-> F conversion boundaries are accepted.
+Accepted foundation:
+- per-component proven coefficient bounds;
+- strict private-F width planning;
+- exact storage expansion;
+- standalone Add/Sub;
+- standalone raw NTT Mul.
 
-Do not wire the new container into production Bootstrap yet.
+Do not wire the new arithmetic foundation into production Bootstrap/Evaluator yet.
+Do not begin Rescale, ModUp, KeySwitch, Relinearize, Rotate, or storage contraction without a new Primary specification.
 
-Wait for the next Primary spec covering bounded FastStorage arithmetic foundations.
+Wait for the next Primary task.
