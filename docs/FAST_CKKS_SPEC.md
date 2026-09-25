@@ -578,6 +578,41 @@ X\bmod q_i.
 
 The public result must expose the frontend's original logical Level, Scale, parameter identity, and key semantics. Fast storage primes are backend-private and must not leak into public CKKS parameters.
 
+### 4.10.1 Fusion of adjacent representation boundaries
+
+The private-F architecture defines semantics, not a requirement to materialize every intermediate representation when no operation can observe it.
+
+An adjacent conversion chain may be fused away when all of the following are proven:
+
+- the input and output observable semantics are identical to the unfused private-F reference path;
+- no arithmetic operation, bound transition, key operation, or caller observes the intermediate private-F state;
+- the canonical lifted integer used by the fused kernel is the same authoritative integer that the unfused path would store;
+- all required capacity conditions are already proven;
+- no dormant/full-RNS logical rows are materialized as a consequence;
+- the accepted canonicalization convention and Logical-Q metadata semantics are unchanged.
+
+For the production Level-0 ModUp bridge, the accepted reference chain
+
+[
+q_0\text{-LogicalQ}
+\to
+ImportLevel0(F_3)
+\to
+FastStorageModUpLevel0
+\to
+compact\ LogicalQ
+]
+
+has no observable private-F arithmetic between import and export. Since `ImportLevel0` already selects
+
+[
+C=\operatorname{Center}_{q_0}(r)
+]
+
+and `FastStorageModUpLevel0` is idempotent on that canonical lift, a production optimization may directly compute maintained logical rows from the same `C` without physically materializing transient `F_3` residues.
+
+This is a **fused private-F boundary kernel**, not a Standard/full-RNS fallback. The unfused private-F chain remains the semantic oracle. When later production stages actually execute arithmetic in private-F storage, those observable private-F states must remain physically distinct as required by Section 4.11.
+
 ### 4.11 Physical container separation
 
 The target widened-storage architecture must not store residues modulo `f_i` inside coefficient rows that ordinary Lattigo code interprets as residues modulo logical `q_i`.
