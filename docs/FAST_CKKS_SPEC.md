@@ -552,6 +552,18 @@ For the current Bootstrap Level-0 ModUp this reduces to
 C=\operatorname{Center}_{q_0}(X\bmod q_0).
 ]
 
+For odd \(q_0=2m+1\), the centered convention is explicit:
+
+[
+\operatorname{Center}_{q_0}(r)=
+\begin{cases}
+r, & 0\le r\le m,\\
+r-q_0, & m+1\le r<q_0.
+\end{cases}
+]
+
+Therefore the residue \(r=\lfloor q_0/2\rfloor=q_0>>1\) is the **positive** representative \(+m\). A historical implementation that branches on \(r\ge q_0>>1\) selects \(-(m+1)\) at this single residue; that value is congruent modulo \(q_0\) but is not the canonical centered representative and must not override this architecture rule.
+
 Only then may the backend populate Fast storage residues or any newly materialized logical residues from `C`.
 
 ModUp is therefore an explicit **logical canonicalization boundary**. Merely extending an arbitrary lift `X=c+kQ_ell` would generally produce the wrong representative in the enlarged basis.
