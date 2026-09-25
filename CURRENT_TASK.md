@@ -2,17 +2,18 @@
 
 Status: WAITING_FOR_PRIMARY_TASK
 
-FAST-STORAGE-003 is accepted at:
-`b8305a7e3d4ff15591a2249e97a54ad0b3311dde`
+FAST-STORAGE-004 is accepted at:
+`1b9ecd7973505cac1c4a1673a9578260a761950f`
 
-Accepted foundation:
+Accepted foundation now includes:
 - per-component proven coefficient bounds;
 - strict private-F width planning;
 - exact storage expansion;
 - standalone Add/Sub;
-- standalone raw NTT Mul.
+- standalone raw NTT Mul;
+- standalone one-step Logical-Q Rescale over private-F storage.
 
-Do not wire the new arithmetic foundation into production Bootstrap/Evaluator yet.
-Do not begin Rescale, ModUp, KeySwitch, Relinearize, Rotate, or storage contraction without a new Primary specification.
+Do not wire the new storage arithmetic/Rescale foundation into production Bootstrap/Evaluator yet.
+Do not begin storage contraction, RescaleTo, ModUp, KeySwitch, Relinearize, Rotate, or application changes without a new Primary specification.
 
 Wait for the next Primary task.
