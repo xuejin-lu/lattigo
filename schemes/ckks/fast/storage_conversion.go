@@ -199,6 +199,75 @@ func (ct *FastCiphertext) ExportToLogical(target FastCiphertextDomain) (*rlwe.Ci
 	return output, nil
 }
 
+// ExportToCompactLogical reconstructs each authoritative private-F lift in
+// the coefficient domain and exports only the logical q rows maintained by
+// the Fast CKKS policy. Dormant logical rows remain unmaterialized.
+func (ct *FastCiphertext) ExportToCompactLogical(target FastCiphertextDomain) (*rlwe.Ciphertext, error) {
+	if ct == nil {
+		return nil, fmt.Errorf("Fast ciphertext cannot be nil")
+	}
+	if target.IsMontgomery {
+		return nil, fmt.Errorf("Montgomery LogicalQ output is not supported")
+	}
+	if err := validateFastStorageState(ct); err != nil {
+		return nil, err
+	}
+
+	maintained := maintainedLimbCount(&ct.params, ct.logicalLevel)
+	if maintained < 1 || maintained > ct.logicalLevel+1 {
+		return nil, fmt.Errorf("invalid maintained logical row count %d at level %d", maintained, ct.logicalLevel)
+	}
+	output := NewCiphertext(&ct.params, ct.Degree(), ct.logicalLevel)
+	*output.MetaData = cloneFastMetadata(ct.metadata)
+	output.IsNTT = false
+	output.IsMontgomery = false
+
+	coeffRows := make([][]uint64, ct.activeStorageWidth)
+	for row := range coeffRows {
+		coeffRows[row] = make([]uint64, ct.N())
+	}
+	for component := range ct.value {
+		for row := 0; row < ct.activeStorageWidth; row++ {
+			if ct.metadata.IsNTT {
+				subring, _ := ct.basis.subring(row)
+				subring.INTT(ct.value[component].Coeffs[row], coeffRows[row])
+			} else {
+				copy(coeffRows[row], ct.value[component].Coeffs[row])
+			}
+		}
+		for coefficient := 0; coefficient < ct.N(); coefficient++ {
+			var storageResidues [3]uint64
+			for row := 0; row < ct.activeStorageWidth; row++ {
+				storageResidues[row] = coeffRows[row][coefficient]
+			}
+			lift, err := ct.basis.decodeFixed(storageResidues, ct.activeStorageWidth)
+			if err != nil {
+				return nil, fmt.Errorf("Fast component %d coefficient %d: %w", component, coefficient, err)
+			}
+			for logicalIndex := 0; logicalIndex < maintained; logicalIndex++ {
+				q := ct.params.RingQ().SubRings[logicalIndex].Modulus
+				residue := storageMod192(lift.magnitude, q)
+				if lift.negative && residue != 0 {
+					residue = q - residue
+				}
+				output.Value[component].Coeffs[logicalIndex][coefficient] = residue
+			}
+		}
+	}
+
+	if target.IsNTT {
+		for component := range output.Value {
+			for logicalIndex := 0; logicalIndex < maintained; logicalIndex++ {
+				ringQ := ct.params.RingQ().SubRings[logicalIndex]
+				ringQ.NTT(output.Value[component].Coeffs[logicalIndex], output.Value[component].Coeffs[logicalIndex])
+			}
+		}
+	}
+	output.IsNTT = target.IsNTT
+	output.IsMontgomery = false
+	return output, nil
+}
+
 func (ct *FastCiphertext) validateStorageRows() error {
 	if ct.activeStorageWidth < 1 || ct.activeStorageWidth > 3 {
 		return fmt.Errorf("invalid active storage width %d", ct.activeStorageWidth)

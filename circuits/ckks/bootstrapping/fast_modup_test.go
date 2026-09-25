@@ -1,6 +1,7 @@
 package bootstrapping
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
 func fastModUpParameters(t testing.TB, logN int) (Parameters, ckks.Parameters) {
@@ -34,6 +36,27 @@ func fastModUpParameters(t testing.TB, logN int) (Parameters, ckks.Parameters) {
 			LogMessageRatio: 2,
 		},
 	}, params
+}
+
+func fastModUpQ012Parameters(t testing.TB) (Parameters, ckks.Parameters) {
+	t.Helper()
+	generator := ring.NewNTTFriendlyPrimesGenerator(45, 2*2*16)
+	q3, err := generator.NextAlternatingPrimes(1)
+	require.NoError(t, err)
+	ckksParams, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            4,
+		Q:               []uint64{72057594037616641, 549755731969, 549756026881, q3[0]},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, fastckks.MaintainedLimbCount(&ckksParams, ckksParams.MaxLevel()))
+	return Parameters{
+		BootstrappingParameters: ckksParams,
+		Mod1ParametersLiteral: mod1.ParametersLiteral{
+			LogScale:        30,
+			LogMessageRatio: 2,
+		},
+	}, ckksParams
 }
 
 func newFastModUpInput(params ckks.Parameters, values []int64, scale rlwe.Scale, withBacking bool) *rlwe.Ciphertext {
@@ -90,6 +113,42 @@ func standardModUpBasisReference(params Parameters, ct *rlwe.Ciphertext) *rlwe.C
 			for limb := 1; limb <= params.BootstrappingParameters.MaxLevel(); limb++ {
 				tmp := ring.BRedAdd(coeff, Q[limb], BRCQ[limb])
 				ct.Value[component].Coeffs[limb][j] = tmp*pos + (Q[limb]-tmp)*neg
+			}
+		}
+		ringQ.NTT(ct.Value[component], ct.Value[component])
+	}
+	mod1Parameters := mod1.Parameters{
+		LogDefaultScale: params.Mod1ParametersLiteral.LogScale,
+		LogMessageRatio: params.Mod1ParametersLiteral.LogMessageRatio,
+	}
+	if scale := (mod1Parameters.ScalingFactor().Float64() / mod1Parameters.MessageRatio()) / ct.Scale.Float64(); scale > 1 {
+		scalar := uint64(math.Round(scale))
+		ringQ.MulScalar(ct.Value[0], scalar, ct.Value[0])
+		ringQ.MulScalar(ct.Value[1], scalar, ct.Value[1])
+		ct.Scale = ct.Scale.Mul(rlwe.NewScale(scale))
+	}
+	return ct
+}
+
+// canonicalModUpBasisReference independently implements the accepted odd-q0
+// centered convention, including the positive midpoint r=q0>>1.
+func canonicalModUpBasisReference(params Parameters, ct *rlwe.Ciphertext) *rlwe.Ciphertext {
+	ringQ := params.BootstrappingParameters.RingQ()
+	for component := range ct.Value {
+		ringQ.AtLevel(0).INTT(ct.Value[component], ct.Value[component])
+	}
+	ct.Resize(ct.Degree(), params.BootstrappingParameters.MaxLevel())
+	q0 := new(big.Int).SetUint64(ringQ.SubRings[0].Modulus)
+	half := ringQ.SubRings[0].Modulus / 2
+	for component := range ct.Value {
+		for coefficient, residue := range ct.Value[component].Coeffs[0] {
+			canonical := new(big.Int).SetUint64(residue)
+			if residue > half {
+				canonical.Sub(canonical, q0)
+			}
+			for logicalIndex := 1; logicalIndex <= params.BootstrappingParameters.MaxLevel(); logicalIndex++ {
+				modulus := new(big.Int).SetUint64(ringQ.SubRings[logicalIndex].Modulus)
+				ct.Value[component].Coeffs[logicalIndex][coefficient] = new(big.Int).Mod(new(big.Int).Set(canonical), modulus).Uint64()
 			}
 		}
 		ringQ.NTT(ct.Value[component], ct.Value[component])
@@ -178,11 +237,69 @@ func TestFastModUpBasisMatchesStandardCenteredLiftAndScale(t *testing.T) {
 	fastEval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
 	input := newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), true)
-	want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	input.IsBatched = false
+	input.IsBitReversed = true
+	input.LogDimensions = ring.Dimensions{Rows: 1, Cols: 2}
+	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	want.IsBatched = input.IsBatched
+	want.IsBitReversed = input.IsBitReversed
+	want.LogDimensions = input.LogDimensions
 	got, err := fastEval.modUpBasis(input)
 	require.NoError(t, err)
 	requireFastModUpBasisMatches(t, want, got)
 	require.Equal(t, params.BootstrappingParameters.MaxLevel(), got.Level())
+	require.True(t, got.IsNTT)
+	require.False(t, got.IsMontgomery)
+	require.Equal(t, input.IsBatched, got.IsBatched)
+	require.Equal(t, input.IsBitReversed, got.IsBitReversed)
+	require.Equal(t, input.LogDimensions, got.LogDimensions)
+}
+
+func TestFastModUpBasisQ012CanonicalResiduesAndMetadata(t *testing.T) {
+	params, ckksParams := fastModUpQ012Parameters(t)
+	q0 := ckksParams.RingQ().SubRings[0].Modulus
+	values := []int64{int64(q0 >> 1), int64(q0>>1) - 1, -int64(q0 >> 1), 12345, -67890, 0}
+	input := newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), true)
+	input.IsBatched = false
+	input.IsBitReversed = true
+	input.LogDimensions = ring.Dimensions{Rows: 2, Cols: 3}
+	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	want.IsBatched = input.IsBatched
+	want.IsBitReversed = input.IsBitReversed
+	want.LogDimensions = input.LogDimensions
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	got, err := fastEval.modUpBasis(input)
+	require.NoError(t, err)
+	require.Equal(t, params.BootstrappingParameters.MaxLevel(), got.Level())
+	require.Equal(t, input.Degree(), got.Degree())
+	require.True(t, want.Scale.Equal(got.Scale))
+	require.True(t, got.IsNTT)
+	require.False(t, got.IsMontgomery)
+	require.Equal(t, input.IsBatched, got.IsBatched)
+	require.Equal(t, input.IsBitReversed, got.IsBitReversed)
+	require.Equal(t, input.LogDimensions, got.LogDimensions)
+	for component := range got.Value {
+		for logicalIndex := 0; logicalIndex < 3; logicalIndex++ {
+			require.Equal(t, want.Value[component].Coeffs[logicalIndex], got.Value[component].Coeffs[logicalIndex],
+				"component %d q-index %d", component, logicalIndex)
+		}
+		for logicalIndex := 3; logicalIndex <= got.Level(); logicalIndex++ {
+			require.Nil(t, got.Value[component].Coeffs[logicalIndex], "dormant q-index %d", logicalIndex)
+		}
+	}
+}
+
+func TestFastModUpBasisMatchesHistoricalAwayFromMidpoint(t *testing.T) {
+	params, ckksParams := fastModUpParameters(t, 4)
+	q0 := ckksParams.RingQ().SubRings[0].Modulus
+	values := []int64{int64(q0>>1) - 1, int64(q0>>1) + 1, -int64(q0 >> 1), 12345, -67890, 0}
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	got, err := fastEval.modUpBasis(newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	require.NoError(t, err)
+	want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	requireFastModUpBasisMatches(t, want, got)
 }
 
 func TestFastModUpBasisNoScaleUpAndPoisonedDormantRows(t *testing.T) {
@@ -194,32 +311,32 @@ func TestFastModUpBasisNoScaleUpAndPoisonedDormantRows(t *testing.T) {
 	input.IsNTT = true
 	input.Scale = rlwe.NewScale(1 << 40)
 	q0 := ckksParams.RingQ().SubRings[0].Modulus
-	rowPointers := make([][]*uint64, 2)
+	q0Rows := make([][]uint64, 2)
 	for component := range input.Value {
 		for j := range input.Value[component].Coeffs[0] {
 			value := values[(j+component)%len(values)]
 			input.Value[component].Coeffs[0][j] = new(big.Int).Mod(big.NewInt(value), new(big.Int).SetUint64(q0)).Uint64()
 		}
 		ckksParams.RingQ().SubRings[0].NTT(input.Value[component].Coeffs[0], input.Value[component].Coeffs[0])
-		rowPointers[component] = make([]*uint64, ckksParams.MaxLevel()-1)
+		q0Rows[component] = append([]uint64(nil), input.Value[component].Coeffs[0]...)
 		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
 			for j := range input.Value[component].Coeffs[limb] {
 				input.Value[component].Coeffs[limb][j] = uint64(0x9e3779b9) + uint64(limb*ckksParams.N()+j+component)
 			}
-			rowPointers[component][limb-2] = &input.Value[component].Coeffs[limb][0]
 		}
 	}
 	input.Resize(input.Degree(), 0)
-	want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<40), false))
+	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<40), false))
 	got, err := fastEval.modUpBasis(input)
 	require.NoError(t, err)
 	requireFastModUpBasisMatches(t, want, got)
 	require.Equal(t, rlwe.NewScale(1<<40), got.Scale)
+	for component := range input.Value {
+		require.Equal(t, q0Rows[component], input.Value[component].Coeffs[0], "input q0 NTT row must not be mutated")
+	}
 	for component := range got.Value {
 		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
-			require.Equal(t, rowPointers[component][limb-2], &got.Value[component].Coeffs[limb][0])
-			poison := uint64(0x9e3779b9) + uint64(limb*ckksParams.N()+component)
-			require.Equal(t, poison, got.Value[component].Coeffs[limb][0])
+			require.Nil(t, got.Value[component].Coeffs[limb], "dormant output row %d must not be materialized", limb)
 		}
 	}
 }
@@ -231,48 +348,62 @@ func TestFastModUpBasisFreshLevelZeroStorage(t *testing.T) {
 	require.NoError(t, err)
 	got, err := fastEval.modUpBasis(newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<40), false))
 	require.NoError(t, err)
-	want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<40), false))
+	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<40), false))
 	requireFastModUpBasisMatches(t, want, got)
 }
 
 func TestFastModUpCompleteBoundary(t *testing.T) {
-	params, ckksParams := fastModUpParameters(t, 4)
 	values := []int64{1, -2, 12345, -67890}
-	for _, logSlots := range []int{3, 1} {
-		params.CoeffsToSlotsParameters.LogSlots = logSlots
-		fastEval, err := NewFastEvaluator(params)
-		require.NoError(t, err)
-		input := newFastModUpInputAtLevel(ckksParams, values, rlwe.NewScale(1<<20), ckksParams.MaxLevel())
-		rowPointers := make([]*uint64, ckksParams.MaxLevel()-1)
-		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
-			rowPointers[limb-2] = &input.Value[0].Coeffs[limb][0]
-		}
-		input.Resize(input.Degree(), 0)
-
-		want := standardModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
-		standardModUpTraceReference(params, want, logSlots)
-		for component := range want.Value {
-			for limb := 0; limb < 2; limb++ {
-				ckksParams.RingQ().SubRings[limb].MForm(want.Value[component].Coeffs[limb], want.Value[component].Coeffs[limb])
+	for _, profile := range []struct {
+		name string
+		q012 bool
+	}{
+		{name: "q01"},
+		{name: "q012", q012: true},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			var params Parameters
+			var ckksParams ckks.Parameters
+			if profile.q012 {
+				params, ckksParams = fastModUpQ012Parameters(t)
+			} else {
+				params, ckksParams = fastModUpParameters(t, 4)
 			}
-		}
-		want.IsMontgomery = true
+			maintained := fastckks.MaintainedLimbCount(&ckksParams, ckksParams.MaxLevel())
+			for _, logSlots := range []int{3, 1} {
+				t.Run(fmt.Sprintf("logSlots-%d", logSlots), func(t *testing.T) {
+					params.CoeffsToSlotsParameters.LogSlots = logSlots
+					fastEval, err := NewFastEvaluator(params)
+					require.NoError(t, err)
+					input := newFastModUpInputAtLevel(ckksParams, values, rlwe.NewScale(1<<20), ckksParams.MaxLevel())
+					input.Resize(input.Degree(), 0)
 
-		got, err := fastEval.ModUp(input)
-		require.NoError(t, err)
-		require.Equal(t, want.Level(), got.Level())
-		require.True(t, want.Scale.Equal(got.Scale))
-		require.True(t, got.IsNTT)
-		require.True(t, got.IsMontgomery)
-		for component := range got.Value {
-			for limb := 0; limb < 2; limb++ {
-				require.Equal(t, want.Value[component].Coeffs[limb], got.Value[component].Coeffs[limb])
+					want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+					standardModUpTraceReference(params, want, logSlots)
+					for component := range want.Value {
+						for limb := 0; limb < maintained; limb++ {
+							ckksParams.RingQ().SubRings[limb].MForm(want.Value[component].Coeffs[limb], want.Value[component].Coeffs[limb])
+						}
+					}
+					want.IsMontgomery = true
+
+					got, err := fastEval.ModUp(input)
+					require.NoError(t, err)
+					require.Equal(t, want.Level(), got.Level())
+					require.True(t, want.Scale.Equal(got.Scale))
+					require.True(t, got.IsNTT)
+					require.True(t, got.IsMontgomery)
+					for component := range got.Value {
+						for limb := 0; limb < maintained; limb++ {
+							require.Equal(t, want.Value[component].Coeffs[limb], got.Value[component].Coeffs[limb], "component %d limb %d", component, limb)
+						}
+						for limb := maintained; limb <= ckksParams.MaxLevel(); limb++ {
+							require.Nil(t, got.Value[component].Coeffs[limb], "Trace/ModUp output must keep dormant row %d unmaterialized", limb)
+						}
+					}
+				})
 			}
-		}
-		for limb := 2; limb <= ckksParams.MaxLevel(); limb++ {
-			require.Equal(t, rowPointers[limb-2], &got.Value[0].Coeffs[limb][0])
-			require.Equal(t, uint64(0x9e3779b9)+uint64(limb*ckksParams.N()), got.Value[0].Coeffs[limb][0])
-		}
+		})
 	}
 }
 
