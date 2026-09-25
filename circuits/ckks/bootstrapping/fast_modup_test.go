@@ -223,6 +223,43 @@ func requireFastModUpBasisMatches(t *testing.T, want, got *rlwe.Ciphertext) {
 	}
 }
 
+func requireFastModUpMaintainedMatches(t *testing.T, params Parameters, want, got *rlwe.Ciphertext) {
+	t.Helper()
+	require.Equal(t, want.Level(), got.Level())
+	require.Equal(t, want.Degree(), got.Degree())
+	require.True(t, want.Scale.Equal(got.Scale))
+	require.Equal(t, want.IsNTT, got.IsNTT)
+	require.Equal(t, want.IsMontgomery, got.IsMontgomery)
+	require.Equal(t, want.IsBatched, got.IsBatched)
+	require.Equal(t, want.IsBitReversed, got.IsBitReversed)
+	require.Equal(t, want.LogDimensions, got.LogDimensions)
+	maintained := fastckks.MaintainedLimbCount(&params.BootstrappingParameters, got.Level())
+	for component := range got.Value {
+		for logicalIndex := 0; logicalIndex < maintained; logicalIndex++ {
+			require.Equal(t, want.Value[component].Coeffs[logicalIndex], got.Value[component].Coeffs[logicalIndex],
+				"component=%d q-index=%d", component, logicalIndex)
+		}
+	}
+}
+
+func unfusedPrivateFModUpBasisReference(t *testing.T, eval *FastEvaluator, source *rlwe.Ciphertext) *rlwe.Ciphertext {
+	t.Helper()
+	params := eval.Parameters.BootstrappingParameters
+	private, err := fastckks.ImportLevel0(params, source, 3, fastckks.FastCiphertextDomain{IsNTT: source.IsNTT})
+	require.NoError(t, err)
+	private, err = fastckks.FastStorageModUpLevel0(private, params.MaxLevel())
+	require.NoError(t, err)
+	compact, err := private.ExportToCompactLogical(fastckks.FastCiphertextDomain{IsNTT: true})
+	require.NoError(t, err)
+	if scale := (eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()) / compact.Scale.Float64(); scale > 1 {
+		scalar := uint64(math.Round(scale))
+		err = eval.FastCKKS.MulIntegerMaintained(compact, new(big.Int).SetUint64(scalar), compact)
+		require.NoError(t, err)
+		compact.Scale = compact.Scale.Mul(rlwe.NewScale(scale))
+	}
+	return compact
+}
+
 func TestFastModUpBasisMatchesStandardCenteredLiftAndScale(t *testing.T) {
 	params, ckksParams := fastModUpParameters(t, 4)
 	q0 := ckksParams.RingQ().SubRings[0].Modulus
@@ -240,10 +277,12 @@ func TestFastModUpBasisMatchesStandardCenteredLiftAndScale(t *testing.T) {
 	input.IsBatched = false
 	input.IsBitReversed = true
 	input.LogDimensions = ring.Dimensions{Rows: 1, Cols: 2}
-	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
-	want.IsBatched = input.IsBatched
-	want.IsBitReversed = input.IsBitReversed
-	want.LogDimensions = input.LogDimensions
+	canonicalWant := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	canonicalWant.IsBatched = input.IsBatched
+	canonicalWant.IsBitReversed = input.IsBitReversed
+	canonicalWant.LogDimensions = input.LogDimensions
+	want := unfusedPrivateFModUpBasisReference(t, fastEval, input)
+	requireFastModUpBasisMatches(t, canonicalWant, want)
 	got, err := fastEval.modUpBasis(input)
 	require.NoError(t, err)
 	requireFastModUpBasisMatches(t, want, got)
@@ -263,28 +302,21 @@ func TestFastModUpBasisQ012CanonicalResiduesAndMetadata(t *testing.T) {
 	input.IsBatched = false
 	input.IsBitReversed = true
 	input.LogDimensions = ring.Dimensions{Rows: 2, Cols: 3}
-	want := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
-	want.IsBatched = input.IsBatched
-	want.IsBitReversed = input.IsBitReversed
-	want.LogDimensions = input.LogDimensions
 	fastEval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
+	canonicalWant := canonicalModUpBasisReference(params, newFastModUpInput(ckksParams, values, rlwe.NewScale(1<<20), false))
+	canonicalWant.IsBatched = input.IsBatched
+	canonicalWant.IsBitReversed = input.IsBitReversed
+	canonicalWant.LogDimensions = input.LogDimensions
+	want := unfusedPrivateFModUpBasisReference(t, fastEval, input)
+	requireFastModUpMaintainedMatches(t, params, canonicalWant, want)
 	got, err := fastEval.modUpBasis(input)
 	require.NoError(t, err)
-	require.Equal(t, params.BootstrappingParameters.MaxLevel(), got.Level())
-	require.Equal(t, input.Degree(), got.Degree())
-	require.True(t, want.Scale.Equal(got.Scale))
+	requireFastModUpMaintainedMatches(t, params, want, got)
 	require.True(t, got.IsNTT)
 	require.False(t, got.IsMontgomery)
-	require.Equal(t, input.IsBatched, got.IsBatched)
-	require.Equal(t, input.IsBitReversed, got.IsBitReversed)
-	require.Equal(t, input.LogDimensions, got.LogDimensions)
 	for component := range got.Value {
-		for logicalIndex := 0; logicalIndex < 3; logicalIndex++ {
-			require.Equal(t, want.Value[component].Coeffs[logicalIndex], got.Value[component].Coeffs[logicalIndex],
-				"component %d q-index %d", component, logicalIndex)
-		}
-		for logicalIndex := 3; logicalIndex <= got.Level(); logicalIndex++ {
+		for logicalIndex := fastckks.MaintainedLimbCount(&ckksParams, got.Level()); logicalIndex <= got.Level(); logicalIndex++ {
 			require.Nil(t, got.Value[component].Coeffs[logicalIndex], "dormant q-index %d", logicalIndex)
 		}
 	}

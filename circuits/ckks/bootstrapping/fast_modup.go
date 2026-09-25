@@ -54,17 +54,9 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 		}
 	}
 
-	privateInput, err := fastckks.ImportLevel0(params, ct, 3, fastckks.FastCiphertextDomain{IsNTT: true})
+	compact, err := fastckks.FusedLevel0ModUpToCompactLogical(params, ct, maxLevel, fastckks.FastCiphertextDomain{IsNTT: true})
 	if err != nil {
-		return nil, fmt.Errorf("Fast ModUp basis LogicalQ import: %w", err)
-	}
-	privateModUp, err := fastckks.FastStorageModUpLevel0(privateInput, maxLevel)
-	if err != nil {
-		return nil, fmt.Errorf("Fast ModUp basis private-F canonicalization: %w", err)
-	}
-	compact, err := privateModUp.ExportToCompactLogical(fastckks.FastCiphertextDomain{IsNTT: true})
-	if err != nil {
-		return nil, fmt.Errorf("Fast ModUp basis compact LogicalQ export: %w", err)
+		return nil, fmt.Errorf("Fast ModUp basis fused private-F boundary: %w", err)
 	}
 
 	if scale := (eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()) / compact.Scale.Float64(); scale > 1 {
