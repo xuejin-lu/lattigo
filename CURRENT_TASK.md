@@ -1,30 +1,21 @@
 # Current Task
 
-Task: FAST-INTEGRATION-001
-Status: READY_FOR_CODEX
+Status: WAITING_FOR_PRIMARY_TASK
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/FAST-INTEGRATION-001-PRIVATE-F-MODUP-BASIS-BRIDGE.md`
+FAST-INTEGRATION-001 is accepted at:
+`31efadc693559217b48d3e76a2e3655b9e6cd14d`
 
-Primary task pointer:
-`heart-lattigo-bootstrap/CURRENT_TASK.md`
+Accepted production integration:
+- `FastEvaluator.modUpBasis` now uses the private-F width-3 bridge;
+- compact logical export materializes only maintained q rows;
+- canonical q0 midpoint semantics are authoritative;
+- downstream Trace/DFT/EvalMod/packing/production Rescale remain on the existing path.
 
-Task class:
-`I — Implementation`
+Performance follow-up is required:
+- current LogN13 bridge is about 1.53x slower than the Standard basis-raise benchmark;
+- allocations are about 87,263/op versus 46/op;
+- do not treat the current bridge as the final optimized hot path.
 
-Accepted prerequisites:
-- FAST-STORAGE-005 at `531aca50b5b38741e4e71cc98ea4b626bf88cb84`.
-- Fixed-width-3 production policy at `d9919f9c080e0dfa731746f5c447f93633ae2f36`.
+Do not begin the next optimization or downstream private-F migration without a new Primary specification.
 
-Implement only the first bounded production integration seam defined by the Primary spec:
-- replace the historical basis-raise portion of `FastEvaluator.modUpBasis` with Level-0 LogicalQ -> ImportLevel0(width=3) -> FastStorageModUpLevel0(MaxLevel) -> compact maintained LogicalQ;
-- add the compact private-F -> logical-Q bridge that materializes only existing maintained q rows;
-- preserve existing scale alignment, Trace, Montgomery conversion, downstream DFT/EvalMod/S2C, packing, and production Rescale semantics;
-- record ModUp-basis benchmark evidence.
-
-Do not migrate downstream arithmetic to `FastCiphertext`.
-Do not add KeySwitch, Relinearize, Rotate, contraction/adaptive width, frontend flags, or full-RNS fallback.
-
-Follow the normal bounded implementation -> self-review -> at most one repair -> validation workflow.
-Commit and push Secondary `fast-ckks`, then report `READY_FOR_WEB_REVIEW`.
+Wait for the next Primary task.
