@@ -1,28 +1,22 @@
 # Current Task
 
-Task: QPREFIX-AUDIT-001
+Task: QPREFIX-AUDIT-002
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
 `xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/QPREFIX-AUDIT-001-FULL-BOOTSTRAP-CAPACITY.md`
+`specs/QPREFIX-AUDIT-002-C2S-RAW-RESCALE.md`
 
 Task class:
-`M/E — Architecture audit + reproducible measurement`
+`M/E — Focused evidence completion`
 
-This branch intentionally starts from pre-F commit:
-`40532b4dce5c7eeae2db5b0b6f21be64801ce923`
+Audit current `fast-qprefix` C2S only.
 
-Authoritative architecture:
-`docs/FAST_QPREFIX_SPEC.md`
+If necessary, add a focused diagnostic `*_test.go` that manually steps:
+`LinearTransform -> Rescale -> restore`
+for all four current LogN13/P93 C2S groups and records exact bounds/levels/scales.
 
-Audit only:
-- no production behavior changes;
-- no independent F basis;
-- maintained prefix policy is `q0..q[min(level,3)]`;
-- prove or disprove strict centered capacity at every required Bootstrap stage;
-- identify actual Level-crossing contraction/canonicalization semantics.
+Production source must remain unchanged.
+Do not modify `fast-ckks`, EvalMod, S2C, parameters, or schedules.
 
-Use test/diagnostic instrumentation only if required and keep it isolated.
-
-Do not modify `fast-ckks`.
+Commit/push any useful diagnostic test only after validation.
