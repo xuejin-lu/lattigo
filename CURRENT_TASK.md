@@ -1,25 +1,24 @@
 # Current Task
 
-Task: FAST-STORAGE-006
-Status: READY_FOR_CODEX_DIRTY_RECOVERY
+Status: WAITING_FOR_PRIMARY_TASK
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/FAST-STORAGE-006-PRIVATE-F-TRACE-FOUNDATION-SALVAGE.md`
+FAST-STORAGE-006 is accepted at:
+`532319346d8235fb42c72bfd22b57a6468675c82`
 
-Task class:
-`I — Implementation / controlled dirty-worktree recovery`
+Accepted standalone private-F foundation now additionally includes:
+- `FastStorageMulInteger`;
+- `FastStorageTraceNormalized`;
+- strict Trace intermediate-capacity gate `2*g*B < S3`;
+- immutable private-F basis reuse by LogN.
 
-This task explicitly authorizes reconciliation of the known dirty FAST-INTEGRATION-003 worktree.
+Production remains unchanged from FAST-INTEGRATION-002:
+- fused Level-0 ModUp to compact LogicalQ;
+- logical scale alignment;
+- existing logical Fast Trace;
+- existing Montgomery/downstream Bootstrap path.
 
-Required outcome:
-- salvage standalone private-F integer-scalar and normalized-Trace foundation/tests;
-- retain accepted Trace theorem and capacity gate;
-- restore production Fast ModUp to FAST-INTEGRATION-002 fused path;
-- remove rejected resident-production wiring;
-- leave worktree clean after commit/push.
+FAST-INTEGRATION-003 private-F resident ModUp+Trace remains rejected on performance.
 
-Do not reset --hard or discard unrelated user work.
-If any dirty hunk is unrelated to FAST-INTEGRATION-003, stop with `NEEDS_WEB_REVIEW`.
+Do not begin another production-residency migration without a new Primary specification.
 
-After validation, commit/push Secondary `fast-ckks` and report `READY_FOR_WEB_REVIEW`.
+Wait for the next Primary task.
