@@ -1,24 +1,27 @@
 # Current Task
 
-Status: WAITING_FOR_PRIMARY_TASK
+Task: FAST-STORAGE-007
+Status: READY_FOR_CODEX
 
-FAST-STORAGE-006 is accepted at:
-`532319346d8235fb42c72bfd22b57a6468675c82`
+Authoritative Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap@main`
+`specs/FAST-STORAGE-007-PRIVATE-F-PLAINTEXT-LINEAR-TRANSFORM.md`
 
-Accepted standalone private-F foundation now additionally includes:
-- `FastStorageMulInteger`;
-- `FastStorageTraceNormalized`;
-- strict Trace intermediate-capacity gate `2*g*B < S3`;
-- immutable private-F basis reuse by LogN.
+Task class:
+`I — Implementation / feasibility foundation`
 
-Production remains unchanged from FAST-INTEGRATION-002:
-- fused Level-0 ModUp to compact LogicalQ;
-- logical scale alignment;
-- existing logical Fast Trace;
-- existing Montgomery/downstream Bootstrap path.
+Accepted prerequisites:
+- FAST-STORAGE-006 at `532319346d8235fb42c72bfd22b57a6468675c82`.
+- Private-F plaintext mirror architecture at `22b9f07969af38705573686fe96a873e4bd001a3`.
 
-FAST-INTEGRATION-003 private-F resident ModUp+Trace remains rejected on performance.
+Implement only:
+- private-F plaintext mirror from complete logical-Q encoded diagonals;
+- exact plaintext bounds/L1 norms;
+- private-F plaintext multiply and automorphism;
+- standalone private-F LinearTransform;
+- actual LogN13 C2S capacity audit.
 
-Do not begin another production-residency migration without a new Primary specification.
+Do not modify production Bootstrap/C2S or matrix generation.
 
-Wait for the next Primary task.
+If actual C2S width-3 capacity fails, stop with `NEEDS_WEB_REVIEW` and report the first failing factor + exact bound numbers.
+If feasible, commit/push Secondary `fast-ckks` and report `READY_FOR_WEB_REVIEW`.
