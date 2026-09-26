@@ -1,22 +1,18 @@
 # Current Task
 
-Task: QPREFIX-AUDIT-002
-Status: READY_FOR_CODEX
+Status: WAITING_FOR_PRIMARY_TASK
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/QPREFIX-AUDIT-002-C2S-RAW-RESCALE.md`
+QPREFIX-AUDIT-002 is accepted from Primary audit commit:
+`f12162970e7cf9e1f88db06a42d464cefd52e20d`
 
-Task class:
-`M/E — Focused evidence completion`
+Classification:
+`QPREFIX_C2S_CAPACITY_PROVEN`
 
-Audit current `fast-qprefix` C2S only.
+Current conclusion:
+- all four current LogN13/P93 C2S groups are strictly Q012-safe, including raw pre-Rescale LinearTransform outputs;
+- QPREFIX-v2 therefore has more than enough capacity for C2S at those Levels;
+- production source remains unchanged.
 
-If necessary, add a focused diagnostic `*_test.go` that manually steps:
-`LinearTransform -> Rescale -> restore`
-for all four current LogN13/P93 C2S groups and records exact bounds/levels/scales.
+Do not modify production until the remaining current-branch EvalMod/PS/DoubleAngle and S2C evidence gaps are closed.
 
-Production source must remain unchanged.
-Do not modify `fast-ckks`, EvalMod, S2C, parameters, or schedules.
-
-Commit/push any useful diagnostic test only after validation.
+Wait for the next Primary task.
