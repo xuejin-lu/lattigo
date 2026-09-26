@@ -56,6 +56,21 @@ func (eval *Evaluator) GetRLWEParameters() *rlwe.Parameters { return &eval.Param
 // Mul: Bootstrap ScaleDown must support the valid Level-0/r0-only state while
 // the generic Fast arithmetic surface continues to require q0 and q1.
 func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast integer multiplication evaluator, operands and scalar cannot be nil")
+	}
+	level := 0
+	if op0 != nil {
+		level = op0.Level()
+	}
+	if opOut != nil && opOut.Level() < level {
+		level = opOut.Level()
+	}
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return eval.mulIntegerRows(op0, scalar, opOut, rows)
+}
+
+func (eval *Evaluator) mulIntegerRows(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int) error {
 	if eval == nil || op0 == nil || opOut == nil || scalar == nil {
 		return errors.New("Fast integer multiplication evaluator, operands and scalar cannot be nil")
 	}
@@ -76,21 +91,31 @@ func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.In
 	if opOut.Level() < level {
 		level = opOut.Level()
 	}
-	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
-	*opOut.MetaData = *op0.MetaData
 	ringQ := eval.Parameters.RingQ()
-	var scalarMontgomery [3]uint64
-	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
+	for d := range op0.Value {
+		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("input component %d: %w", d, err)
+		}
+	}
+	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
+	for d := range opOut.Value {
+		if err := validatePrefixRows(ringQ, level, rows, opOut.Value[d]); err != nil {
+			return fmt.Errorf("output component %d: %w", d, err)
+		}
+	}
+	var scalarMontgomery [MaxQPrefixWidth]uint64
+	for limb := 0; limb < rows; limb++ {
 		subring := ringQ.SubRings[limb]
 		scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
 		scalarMontgomery[limb] = ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant)
 	}
 	for d := range op0.Value {
-		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			subring := ringQ.SubRings[limb]
 			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], scalarMontgomery[limb], opOut.Value[d].Coeffs[limb])
 		}
 	}
+	*opOut.MetaData = *op0.MetaData
 	return nil
 }
 

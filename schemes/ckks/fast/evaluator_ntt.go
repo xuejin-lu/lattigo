@@ -59,15 +59,24 @@ func (eval *Evaluator) addSub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlw
 		return err
 	}
 	level := utils.Min(op0.Level(), opOut.Level())
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	for d := range op0.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("input component %d: %w", d, err)
+		}
+	}
 	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	if op0 != opOut {
 		for d := range op0.Value {
-			copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], opOut.Value[d])
+			copyPrefixRowsUnchecked(rows, op0.Value[d], opOut.Value[d])
 		}
 	}
-	values := eval.scalarNTT(c, &op0.Scale.Value, op0.IsMontgomery)
-	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
+	values, err := eval.scalarNTTRows(c, &op0.Scale.Value, op0.IsMontgomery, level, rows)
+	if err != nil {
+		return err
+	}
+	for limb := 0; limb < rows; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		half := eval.Parameters.N() >> 1
 		if sub {
@@ -90,30 +99,38 @@ func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[rin
 	}
 	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
 	maxDegree, minDegree := utils.Max(op0.Degree(), op1.Degree()), utils.Min(op0.Degree(), op1.Degree())
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	for d := range op0.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("op0 component %d: %w", d, err)
+		}
+	}
+	for d := range op1.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op1.Value[d]); err != nil {
+			return fmt.Errorf("op1 component %d: %w", d, err)
+		}
+	}
 	Resize(opOut, maxDegree, level, eval.Parameters.N())
 	*opOut.MetaData = *op0.MetaData
 	opOut.LogDimensions.Rows = utils.Max(op0.LogDimensions.Rows, op1.LogDimensions.Rows)
 	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
 	for d := 0; d <= minDegree; d++ {
-		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, op0.Level()); limb++ {
-			s := eval.Parameters.RingQ().SubRings[limb]
-			if sub {
-				s.Sub(op0.Value[d].Coeffs[limb], op1.Value[d].Coeffs[limb], opOut.Value[d].Coeffs[limb])
-			} else {
-				s.Add(op0.Value[d].Coeffs[limb], op1.Value[d].Coeffs[limb], opOut.Value[d].Coeffs[limb])
-			}
+		if err := addSubPrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d], op1.Value[d], opOut.Value[d], sub); err != nil {
+			return err
 		}
 	}
 	if op0.Degree() > minDegree && opOut != op0 {
 		for d := minDegree + 1; d <= op0.Degree(); d++ {
-			copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], opOut.Value[d])
+			copyPrefixRowsUnchecked(rows, op0.Value[d], opOut.Value[d])
 		}
 	} else if op1.Degree() > minDegree {
 		for d := minDegree + 1; d <= op1.Degree(); d++ {
 			if sub {
-				negQ01(eval.Parameters.RingQ(), op1.Value[d], opOut.Value[d])
+				if err := negatePrefixRows(eval.Parameters.RingQ(), level, rows, op1.Value[d], opOut.Value[d]); err != nil {
+					return err
+				}
 			} else if opOut.El() != op1 {
-				copyMaintained(eval.Parameters.RingQ().AtLevel(level), op1.Value[d], opOut.Value[d])
+				copyPrefixRowsUnchecked(rows, op1.Value[d], opOut.Value[d])
 			}
 		}
 	}
@@ -165,7 +182,16 @@ func (eval *Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlw
 }
 
 func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, relin bool) error {
-	if err := eval.validateBinary(op0.El(), op1, opOut); err != nil {
+	if eval == nil || op0 == nil || op1 == nil || opOut == nil {
+		return errors.New("Fast Mul operands cannot be nil")
+	}
+	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return eval.mulElementRows(op0, op1, opOut, relin, rows)
+}
+
+func (eval *Evaluator) mulElementRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, relin bool, rows int) error {
+	if err := eval.validateBinaryPrefix(op0, op1, opOut); err != nil {
 		return err
 	}
 	if op0.Degree() > 1 || op1.Degree() > 1 {
@@ -176,26 +202,52 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 		degree = 1
 	}
 	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
+	ringQ := eval.Parameters.RingQ()
+	for d := range op0.Value {
+		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("op0 component %d: %w", d, err)
+		}
+	}
+	for d := range op1.Value {
+		if err := validatePrefixRows(ringQ, level, rows, op1.Value[d]); err != nil {
+			return fmt.Errorf("op1 component %d: %w", d, err)
+		}
+	}
+	for d := range eval.nttScratch {
+		if err := validatePrefixBacking(ringQ, rows, eval.nttScratch[d]); err != nil {
+			return fmt.Errorf("evaluator scratch %d: %w", d, err)
+		}
+	}
 	if op0.Degree() == 1 && op1.Degree() == 1 {
 		t0, t1, t2 := eval.nttScratch[0], eval.nttScratch[1], eval.nttScratch[2]
-		eval.pointMul(op0.Value[0], op1.Value[0], t0, op0.IsMontgomery)
+		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[0], t0, op0.IsMontgomery, false); err != nil {
+			return err
+		}
 		if op0.El() == op1 {
-			eval.pointMul(op0.Value[0], op0.Value[1], t1, op0.IsMontgomery)
-			for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
-				eval.Parameters.RingQ().SubRings[limb].Add(t1.Coeffs[limb], t1.Coeffs[limb], t1.Coeffs[limb])
+			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op0.Value[1], t1, op0.IsMontgomery, false); err != nil {
+				return err
+			}
+			for limb := 0; limb < rows; limb++ {
+				ringQ.SubRings[limb].Add(t1.Coeffs[limb], t1.Coeffs[limb], t1.Coeffs[limb])
 			}
 		} else {
-			eval.pointMul(op0.Value[0], op1.Value[1], t1, op0.IsMontgomery)
-			eval.pointMulThenAdd(op0.Value[1], op1.Value[0], t1, op0.IsMontgomery)
+			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[1], t1, op0.IsMontgomery, false); err != nil {
+				return err
+			}
+			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[0], t1, op0.IsMontgomery, true); err != nil {
+				return err
+			}
 		}
 		if !relin {
-			eval.pointMul(op0.Value[1], op1.Value[1], t2, op0.IsMontgomery)
+			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[1], t2, op0.IsMontgomery, false); err != nil {
+				return err
+			}
 		}
 		Resize(opOut, degree, level, eval.Parameters.N())
-		copyMaintained(eval.Parameters.RingQ().AtLevel(level), t0, opOut.Value[0])
-		copyMaintained(eval.Parameters.RingQ().AtLevel(level), t1, opOut.Value[1])
+		copyPrefixRowsUnchecked(rows, t0, opOut.Value[0])
+		copyPrefixRowsUnchecked(rows, t1, opOut.Value[1])
 		if !relin {
-			copyMaintained(eval.Parameters.RingQ().AtLevel(level), t2, opOut.Value[2])
+			copyPrefixRowsUnchecked(rows, t2, opOut.Value[2])
 		}
 	} else {
 		var ct []ring.Poly
@@ -206,11 +258,13 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 			pt, ct = op1.Value[0], op0.Value
 		}
 		for d := range ct {
-			eval.pointMul(pt, ct[d], eval.nttScratch[d], op0.IsMontgomery)
+			if err := pointMulPrefixRows(ringQ, level, rows, pt, ct[d], eval.nttScratch[d], op0.IsMontgomery, false); err != nil {
+				return err
+			}
 		}
 		Resize(opOut, degree, level, eval.Parameters.N())
 		for d := range ct {
-			copyMaintained(eval.Parameters.RingQ().AtLevel(level), eval.nttScratch[d], opOut.Value[d])
+			copyPrefixRowsUnchecked(rows, eval.nttScratch[d], opOut.Value[d])
 		}
 	}
 	*opOut.MetaData = *op0.MetaData
@@ -249,8 +303,10 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		if !opOut.Scale.Equal(op0.Scale.Mul(el.El().Scale)) {
 			return errors.New("Fast MulThenAdd RLWE requires output scale equal to product scale")
 		}
-		Resize(opOut, opOut.Degree(), utils.Min(utils.Min(op0.Level(), el.Level()), opOut.Level()), eval.Parameters.N())
-		return eval.mulElementThenAdd(op0, el.El(), opOut)
+		level := utils.Min(utils.Min(op0.Level(), el.Level()), opOut.Level())
+		rows := maintainedLimbCount(&eval.Parameters, level)
+		Resize(opOut, opOut.Degree(), level, eval.Parameters.N())
+		return eval.mulElementThenAdd(op0, el.El(), opOut, rows)
 	}
 	c, err := eval.scalar(op1)
 	if err != nil {
@@ -317,9 +373,13 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			opOut.Scale = opOut.Scale.Mul(scale)
 		}
 	}
-	values := eval.scalarNTT(c, &scale.Value, false)
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	values, err := eval.scalarNTTRows(c, &scale.Value, false, level, rows)
+	if err != nil {
+		return err
+	}
 	for d := range source {
-		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			s := eval.Parameters.RingQ().SubRings[limb]
 			half := eval.Parameters.N() >> 1
 			s.MulScalarMontgomeryThenAdd(source[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), opOut.Value[d].Coeffs[limb][:half])
@@ -329,15 +389,52 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 	return nil
 }
 
-func (eval *Evaluator) mulElementThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], out *rlwe.Ciphertext) error {
-	if op0.Degree() == 1 && op1.Degree() == 1 {
-		eval.pointMulThenAdd(op0.Value[0], op1.Value[0], out.Value[0], op0.IsMontgomery)
-		eval.pointMul(op0.Value[0], op1.Value[1], eval.nttScratch[0], op0.IsMontgomery)
-		eval.pointMulThenAdd(op0.Value[1], op1.Value[0], eval.nttScratch[0], op0.IsMontgomery)
-		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, out.Level()); limb++ {
-			eval.Parameters.RingQ().SubRings[limb].Add(out.Value[1].Coeffs[limb], eval.nttScratch[0].Coeffs[limb], out.Value[1].Coeffs[limb])
+func (eval *Evaluator) mulElementThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], out *rlwe.Ciphertext, rows int) error {
+	if eval == nil || op0 == nil || op1 == nil || out == nil {
+		return errors.New("Fast MulThenAdd evaluator and operands cannot be nil")
+	}
+	if op0.MetaData == nil || op1.MetaData == nil || out.MetaData == nil {
+		return errors.New("Fast MulThenAdd operand metadata cannot be nil")
+	}
+	if op0.Degree() > 1 || op1.Degree() > 1 || out.Degree() < op0.Degree()+op1.Degree() {
+		return errors.New("invalid Fast MulThenAdd degrees")
+	}
+	if !op0.IsNTT || !op1.IsNTT || !out.IsNTT || op0.IsNTT != op1.IsNTT || op0.IsMontgomery != op1.IsMontgomery || op0.IsMontgomery != out.IsMontgomery {
+		return errors.New("Fast MulThenAdd operands require matching NTT/Montgomery representations")
+	}
+	level := utils.Min(utils.Min(op0.Level(), op1.Level()), out.Level())
+	ringQ := eval.Parameters.RingQ()
+	for d := range op0.Value {
+		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
+			return err
 		}
-		eval.pointMulThenAdd(op0.Value[1], op1.Value[1], out.Value[2], op0.IsMontgomery)
+	}
+	for d := range op1.Value {
+		if err := validatePrefixRows(ringQ, level, rows, op1.Value[d]); err != nil {
+			return err
+		}
+	}
+	for d := 0; d <= out.Degree(); d++ {
+		if err := validatePrefixRows(ringQ, level, rows, out.Value[d]); err != nil {
+			return err
+		}
+	}
+	if op0.Degree() == 1 && op1.Degree() == 1 {
+		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[0], out.Value[0], op0.IsMontgomery, true); err != nil {
+			return err
+		}
+		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[1], eval.nttScratch[0], op0.IsMontgomery, false); err != nil {
+			return err
+		}
+		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[0], eval.nttScratch[0], op0.IsMontgomery, true); err != nil {
+			return err
+		}
+		for limb := 0; limb < rows; limb++ {
+			ringQ.SubRings[limb].Add(out.Value[1].Coeffs[limb], eval.nttScratch[0].Coeffs[limb], out.Value[1].Coeffs[limb])
+		}
+		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[1], out.Value[2], op0.IsMontgomery, true); err != nil {
+			return err
+		}
 	} else {
 		var ct []ring.Poly
 		var pt ring.Poly
@@ -347,7 +444,9 @@ func (eval *Evaluator) mulElementThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element
 			pt, ct = op1.Value[0], op0.Value
 		}
 		for d := range ct {
-			eval.pointMulThenAdd(pt, ct[d], out.Value[d], op0.IsMontgomery)
+			if err := pointMulPrefixRows(ringQ, level, rows, pt, ct[d], out.Value[d], op0.IsMontgomery, true); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -367,11 +466,34 @@ func (eval *Evaluator) mulScalar(op0 *rlwe.Ciphertext, c *bignum.Complex, out *r
 
 func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex, scale rlwe.Scale, out *rlwe.Ciphertext) error {
 	level := utils.Min(op0.Level(), out.Level())
-	values := eval.scalarNTT(c, &scale.Value, false)
-	Resize(out, op0.Degree(), level, eval.Parameters.N())
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return eval.mulScalarAtScaleRows(op0, c, scale, out, rows)
+}
+
+func (eval *Evaluator) mulScalarAtScaleRows(op0 *rlwe.Ciphertext, c *bignum.Complex, scale rlwe.Scale, out *rlwe.Ciphertext, rows int) error {
+	if eval == nil || op0 == nil || c == nil || out == nil {
+		return errors.New("Fast scalar multiplication evaluator and operands cannot be nil")
+	}
+	level := utils.Min(op0.Level(), out.Level())
+	ringQ := eval.Parameters.RingQ()
 	for d := range op0.Value {
-		for limb := 0; limb < maintainedLimbCount(&eval.Parameters, level); limb++ {
-			s := eval.Parameters.RingQ().SubRings[limb]
+		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("input component %d: %w", d, err)
+		}
+	}
+	values, err := eval.scalarNTTRows(c, &scale.Value, false, level, rows)
+	if err != nil {
+		return err
+	}
+	Resize(out, op0.Degree(), level, eval.Parameters.N())
+	for d := range out.Value {
+		if err := validatePrefixRows(ringQ, level, rows, out.Value[d]); err != nil {
+			return fmt.Errorf("output component %d: %w", d, err)
+		}
+	}
+	for d := range op0.Value {
+		for limb := 0; limb < rows; limb++ {
+			s := ringQ.SubRings[limb]
 			half := eval.Parameters.N() >> 1
 			s.MulScalarMontgomery(op0.Value[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), out.Value[d].Coeffs[limb][:half])
 			s.MulScalarMontgomery(op0.Value[d].Coeffs[limb][half:], ring.MForm(values[limb][1], s.Modulus, s.BRedConstant), out.Value[d].Coeffs[limb][half:])
@@ -382,48 +504,22 @@ func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex,
 	return nil
 }
 
-func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) {
-	count := len(a.Coeffs)
-	if len(b.Coeffs) < count {
-		count = len(b.Coeffs)
-	}
-	if len(out.Coeffs) < count {
-		count = len(out.Coeffs)
+func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
 	}
 	level := utils.Min(utils.Min(a.Level(), b.Level()), out.Level())
-	if active := maintainedLimbCount(&eval.Parameters, level); count > active {
-		count = active
-	}
-	for limb := 0; limb < count; limb++ {
-		s := eval.Parameters.RingQ().SubRings[limb]
-		if montgomery {
-			s.MulCoeffsMontgomery(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
-		} else {
-			s.MulCoeffsBarrett(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
-		}
-	}
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return pointMulPrefixRows(eval.Parameters.RingQ(), level, rows, a, b, out, montgomery, false)
 }
 
-func (eval *Evaluator) pointMulThenAdd(a, b, out ring.Poly, montgomery bool) {
-	count := len(a.Coeffs)
-	if len(b.Coeffs) < count {
-		count = len(b.Coeffs)
-	}
-	if len(out.Coeffs) < count {
-		count = len(out.Coeffs)
+func (eval *Evaluator) pointMulThenAdd(a, b, out ring.Poly, montgomery bool) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
 	}
 	level := utils.Min(utils.Min(a.Level(), b.Level()), out.Level())
-	if active := maintainedLimbCount(&eval.Parameters, level); count > active {
-		count = active
-	}
-	for limb := 0; limb < count; limb++ {
-		s := eval.Parameters.RingQ().SubRings[limb]
-		if montgomery {
-			s.MulCoeffsMontgomeryThenAdd(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
-		} else {
-			s.MulCoeffsBarrettThenAdd(a.Coeffs[limb], b.Coeffs[limb], out.Coeffs[limb])
-		}
-	}
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return pointMulPrefixRows(eval.Parameters.RingQ(), level, rows, a, b, out, montgomery, true)
 }
 
 func (eval *Evaluator) validateUnary(op0, out *rlwe.Ciphertext) error {
@@ -464,6 +560,25 @@ func (eval *Evaluator) validateBinary(op0, op1 *rlwe.Element[ring.Poly], out *rl
 	return nil
 }
 
+func (eval *Evaluator) validateBinaryPrefix(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], out *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || op1 == nil || out == nil {
+		return errors.New("Fast Mul evaluator and operands cannot be nil")
+	}
+	if op0.MetaData == nil || op1.MetaData == nil || out.MetaData == nil {
+		return errors.New("Fast Mul operand metadata cannot be nil")
+	}
+	if op0.N() != eval.Parameters.N() || op1.N() != eval.Parameters.N() || out.N() != eval.Parameters.N() {
+		return errors.New("Fast Mul operand dimensions do not match parameters")
+	}
+	if !op0.IsNTT || !op1.IsNTT || !out.IsNTT || op0.IsNTT != op1.IsNTT || op0.IsMontgomery != op1.IsMontgomery || op0.IsMontgomery != out.IsMontgomery {
+		return errors.New("Fast Mul operands require matching NTT/Montgomery representations")
+	}
+	if op0.IsBatched != op1.IsBatched {
+		return errors.New("Fast Mul operands require matching batching metadata")
+	}
+	return nil
+}
+
 func (eval *Evaluator) scalar(value rlwe.Operand) (*bignum.Complex, error) {
 	if v, ok := value.(uint); ok {
 		value = uint64(v)
@@ -488,8 +603,21 @@ func (eval *Evaluator) coefficientScale(level int) (rlwe.Scale, error) {
 	return scale, nil
 }
 
-func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery bool) [3][2]uint64 {
-	var out [3][2]uint64
+func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery bool) [MaxQPrefixWidth][2]uint64 {
+	level := eval.Parameters.MaxLevel()
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	out, _ := eval.scalarNTTRows(c, scale, montgomery, level, rows)
+	return out
+}
+
+func (eval *Evaluator) scalarNTTRows(c *bignum.Complex, scale *big.Float, montgomery bool, level, rows int) ([MaxQPrefixWidth][2]uint64, error) {
+	var out [MaxQPrefixWidth][2]uint64
+	if eval == nil || c == nil || scale == nil {
+		return out, errors.New("Fast scalar NTT evaluator, scalar and scale cannot be nil")
+	}
+	if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows); err != nil {
+		return out, err
+	}
 	toInt := func(x *big.Float) *big.Int {
 		z := new(big.Int)
 		if x == nil {
@@ -505,7 +633,7 @@ func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery
 		return z
 	}
 	real, imag := toInt(c[0]), toInt(c[1])
-	for limb := 0; limb < maintainedLimbCount(&eval.Parameters, eval.Parameters.MaxLevel()); limb++ {
+	for limb := 0; limb < rows; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
 		r := new(big.Int).Mod(new(big.Int).Set(real), new(big.Int).SetUint64(s.Modulus)).Uint64()
 		i := new(big.Int).Mod(new(big.Int).Set(imag), new(big.Int).SetUint64(s.Modulus)).Uint64()
@@ -516,5 +644,5 @@ func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery
 			out[limb][1] = ring.MForm(out[limb][1], s.Modulus, s.BRedConstant)
 		}
 	}
-	return out
+	return out, nil
 }

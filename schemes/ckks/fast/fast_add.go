@@ -57,25 +57,29 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	maxDegree := utils.Max(op0.Degree(), op1.Degree())
 	minDegree := utils.Min(op0.Degree(), op1.Degree())
 
-	validate := func(name string, ct *rlwe.Ciphertext) error {
+	rows := maintainedLimbCountForRingAtLevel(ringQ, level)
+	validate := func(name string, ct *rlwe.Ciphertext, degree int) error {
 		if ct.N() != opOut.N() || ct.N() != ringQ.N() {
 			return fmt.Errorf("%s dimension does not match output", name)
 		}
-		for i := 0; i <= minDegree; i++ {
-			if len(ct.Value[i].Coeffs) <= 1 || len(ct.Value[i].Coeffs[0]) != opOut.N() || len(ct.Value[i].Coeffs[1]) != opOut.N() {
-				return fmt.Errorf("%s q0/q1 coefficient lengths are invalid", name)
+		for i := 0; i <= degree; i++ {
+			if err := validatePrefixRows(ringQ, level, rows, ct.Value[i]); err != nil {
+				return fmt.Errorf("%s component %d: %w", name, i, err)
 			}
 		}
 		return nil
 	}
-	if err := validate("op0", op0); err != nil {
+	if err := validate("op0", op0, op0.Degree()); err != nil {
 		return err
 	}
-	if err := validate("op1", op1); err != nil {
+	if err := validate("op1", op1, op1.Degree()); err != nil {
 		return err
 	}
 	if opOut.N() == 0 || opOut.N() != ringQ.N() || len(opOut.Value) < maxDegree+1 {
 		return errors.New("output ciphertext has invalid storage")
+	}
+	if err := validate("opOut", opOut, maxDegree); err != nil {
+		return err
 	}
 
 	// Resize only changes level/degree metadata and allocation. It does not
@@ -91,27 +95,24 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
 
 	for i := 0; i <= minDegree; i++ {
-		for limb := 0; limb < maintainedLimbCountForRing(ringQ.AtLevel(level)); limb++ {
-			dst := opOut.Value[i].Coeffs[limb]
-			if sub {
-				ringQ.SubRings[limb].Sub(op0.Value[i].Coeffs[limb], op1.Value[i].Coeffs[limb], dst)
-			} else {
-				ringQ.SubRings[limb].Add(op0.Value[i].Coeffs[limb], op1.Value[i].Coeffs[limb], dst)
-			}
+		if err := addSubPrefixRows(ringQ, level, rows, op0.Value[i], op1.Value[i], opOut.Value[i], sub); err != nil {
+			return err
 		}
 	}
 
 	// Preserve standard degree semantics without touching dormant limbs.
 	if op0.Degree() > minDegree && opOut != op0 {
 		for i := minDegree + 1; i <= op0.Degree(); i++ {
-			copyMaintained(ringQ.AtLevel(level), op0.Value[i], opOut.Value[i])
+			copyPrefixRowsUnchecked(rows, op0.Value[i], opOut.Value[i])
 		}
 	} else if op1.Degree() > minDegree && opOut != op1 {
 		for i := minDegree + 1; i <= op1.Degree(); i++ {
 			if sub {
-				negQ01(ringQ, op1.Value[i], opOut.Value[i])
+				if err := negatePrefixRows(ringQ, level, rows, op1.Value[i], opOut.Value[i]); err != nil {
+					return err
+				}
 			} else {
-				copyMaintained(ringQ.AtLevel(level), op1.Value[i], opOut.Value[i])
+				copyPrefixRowsUnchecked(rows, op1.Value[i], opOut.Value[i])
 			}
 		}
 	}
@@ -125,16 +126,6 @@ func copyQ01(src, dst ring.Poly) {
 }
 
 func copyMaintained(ringQ *ring.Ring, src, dst ring.Poly) {
-	count := maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(src, dst))
-	for limb := 0; limb < count; limb++ {
-		copy(dst.Coeffs[limb], src.Coeffs[limb])
-	}
-}
-
-func negQ01(ringQ *ring.Ring, src, dst ring.Poly) {
-	ringQ.SubRings[0].Neg(src.Coeffs[0], dst.Coeffs[0])
-	ringQ.SubRings[1].Neg(src.Coeffs[1], dst.Coeffs[1])
-	if maintainedLimbCountForRing(ringQ) == 3 && len(src.Coeffs) > 2 && len(dst.Coeffs) > 2 {
-		ringQ.SubRings[2].Neg(src.Coeffs[2], dst.Coeffs[2])
-	}
+	level := minPolyLevel(src, dst)
+	copyPrefixRowsUnchecked(maintainedLimbCountForRingAtLevel(ringQ, level), src, dst)
 }

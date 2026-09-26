@@ -230,7 +230,7 @@ func TestFastPointwiseScratchDoesNotPromoteUnwrittenPrefixRows(t *testing.T) {
 		}
 	}
 
-	eval.pointMul(a.Value[0], b.Value[0], out.Value[0], false)
+	require.NoError(t, eval.pointMul(a.Value[0], b.Value[0], out.Value[0], false))
 	for limb := 0; limb < 2; limb++ {
 		q := params.Q()[limb]
 		for _, coefficient := range out.Value[0].Coeffs[limb] {
@@ -244,7 +244,7 @@ func TestFastPointwiseScratchDoesNotPromoteUnwrittenPrefixRows(t *testing.T) {
 		out.Value[0].Coeffs[0][i] = 5
 		out.Value[0].Coeffs[1][i] = 7
 	}
-	eval.pointMulThenAdd(a.Value[0], b.Value[0], out.Value[0], false)
+	require.NoError(t, eval.pointMulThenAdd(a.Value[0], b.Value[0], out.Value[0], false))
 	require.Equal(t, uint64(11), out.Value[0].Coeffs[0][0])
 	require.Equal(t, uint64(13), out.Value[0].Coeffs[1][0])
 	require.Equal(t, uint64(19), out.Value[0].Coeffs[2][0])
