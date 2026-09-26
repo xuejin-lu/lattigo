@@ -1,25 +1,26 @@
 # Current Task
 
-Status: WAITING_FOR_PRIMARY_TASK
+Task: FAST-STORAGE-008
+Status: READY_FOR_CODEX
 
-FAST-STORAGE-007 is accepted at:
-`1a8018efda159f1dc9ab7078ce80a40c6db28e71`
+Authoritative Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap@main`
+`specs/FAST-STORAGE-008-C2S-WIDTH2-EXPERIMENT.md`
 
-Accepted standalone foundation now includes:
-- complete LogicalQ -> authoritative integer -> private-F plaintext mirrors;
-- exact plaintext max/L1 bounds;
-- private-F plaintext multiplication;
-- private-F automorphism;
-- direct and BSGS private-F LinearTransform;
-- real LogN13 C2S width-3 feasibility evidence.
+Task class:
+`E — Experiment / bounded implementation`
 
-Production Bootstrap/C2S remains unchanged.
+Accepted prerequisites:
+- FAST-STORAGE-007 at `1a8018efda159f1dc9ab7078ce80a40c6db28e71`.
+- Explicit stage-local width experiment rule at `04396c94a3bb063e93b00bb80a500dfcc2891e21`.
 
-Important performance evidence:
-- representative factor-0 private-F width-3 LinearTransform ~1.01 ms/op;
-- existing logical Fast LinearTransform ~0.41 ms/op;
-- do not wire width-3 private-F C2S into production yet.
+Implement only:
+- explicit storage contraction 3->2 under strict bound proof;
+- width-2 plaintext mirror and LinearTransform support;
+- actual LogN13 C2S capacity experiment;
+- exact Logical/F3/F2 comparisons;
+- representative factor and full-chain benchmarks.
 
-Next Primary work should evaluate stage-specific storage-width policy (especially width 2) and full standalone C2S-chain performance before any production residency decision.
+Do not modify production Bootstrap/C2S or enable adaptive runtime width.
 
-Wait for the next Primary task.
+Commit/push `fast-ckks` and report `READY_FOR_WEB_REVIEW`, or `NEEDS_WEB_REVIEW` only for architecture/math conflicts.
