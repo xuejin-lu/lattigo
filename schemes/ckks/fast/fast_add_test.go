@@ -60,8 +60,21 @@ func TestFastAddSubQ01(t *testing.T) {
 				}
 			}
 		}
-		require.Equal(t, addDormant, cloneDormant(addOut, 2))
-		require.Equal(t, subDormant, cloneDormant(subOut, 2))
+		width, err := QPrefixWidth(level)
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			got     *rlwe.Ciphertext
+			dormant [][][]uint64
+		}{{addOut, addDormant}, {subOut, subDormant}} {
+			for d := range tc.got.Value {
+				for limb := 2; limb < width; limb++ {
+					require.Equal(t, tc.dormant[d][limb-2], tc.got.Value[d].Coeffs[limb], "level=%d limb=%d remains unwritten", level, limb)
+				}
+				for limb := width; limb <= level; limb++ {
+					require.Empty(t, tc.got.Value[d].Coeffs[limb], "level=%d limb=%d must be structurally dormant", level, limb)
+				}
+			}
+		}
 	}
 }
 

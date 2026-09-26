@@ -19,8 +19,9 @@ func q012Enabled(params rlwe.ParameterProvider) bool {
 	return len(q) >= 3 && bits.Len64(q[0]) == 56 && bits.Len64(q[1]) <= 39 && bits.Len64(q[2]) <= 40
 }
 
-// maintainedLimbCount returns the actively maintained residue count for the
-// bounded Fast mode at the requested logical level.
+// maintainedLimbCount returns the legacy arithmetic producer row count for
+// the bounded Fast mode. Storage allocation is governed by QPrefixWidth;
+// arithmetic stays on this narrower count until its later migration task.
 func maintainedLimbCount(params rlwe.ParameterProvider, level int) int {
 	count := 2
 	if q012Enabled(params) {

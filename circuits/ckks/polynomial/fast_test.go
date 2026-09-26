@@ -362,11 +362,19 @@ func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
 	require.Equal(t, workspaceResult.Scale, public.Scale)
 	require.Equal(t, workspaceResult.IsNTT, public.IsNTT)
 	require.Equal(t, workspaceResult.IsMontgomery, public.IsMontgomery)
+	width, err := fastckks.QPrefixWidth(public.Level())
+	require.NoError(t, err)
 	for d := range workspaceResult.Value {
 		for limb := 0; limb < 2; limb++ {
 			require.Equal(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
 		}
-		for limb := 2; limb <= public.Level(); limb++ {
+		for limb := 2; limb < width; limb++ {
+			require.Len(t, public.Value[d].Coeffs[limb], params.N())
+			for _, coefficient := range public.Value[d].Coeffs[limb] {
+				require.Zero(t, coefficient, "unwritten prefix limb %d must remain non-authoritative", limb)
+			}
+		}
+		for limb := width; limb <= public.Level(); limb++ {
 			require.Empty(t, public.Value[d].Coeffs[limb])
 		}
 	}

@@ -146,7 +146,12 @@ func TestFastTraceMontgomeryAndPoisonedResidues(t *testing.T) {
 		dormant := cloneDormant(in, 2)
 		require.NoError(t, eval.Trace(in, 1, in))
 		requireTraceMatches(t, want, in)
-		require.Equal(t, dormant, cloneDormant(in, 2))
+		for component := range in.Value {
+			for limb := 2; limb < MaxQPrefixWidth; limb++ {
+				require.Equal(t, dormant[component][limb-2], in.Value[component].Coeffs[limb])
+			}
+			require.Empty(t, in.Value[component].Coeffs[4], "rows beyond Q-prefix width must be structurally dormant")
+		}
 	}
 }
 

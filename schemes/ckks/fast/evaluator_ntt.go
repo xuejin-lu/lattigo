@@ -390,8 +390,9 @@ func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) {
 	if len(out.Coeffs) < count {
 		count = len(out.Coeffs)
 	}
-	if count > 3 {
-		count = 3
+	level := utils.Min(utils.Min(a.Level(), b.Level()), out.Level())
+	if active := maintainedLimbCount(&eval.Parameters, level); count > active {
+		count = active
 	}
 	for limb := 0; limb < count; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]
@@ -411,8 +412,9 @@ func (eval *Evaluator) pointMulThenAdd(a, b, out ring.Poly, montgomery bool) {
 	if len(out.Coeffs) < count {
 		count = len(out.Coeffs)
 	}
-	if count > 3 {
-		count = 3
+	level := utils.Min(utils.Min(a.Level(), b.Level()), out.Level())
+	if active := maintainedLimbCount(&eval.Parameters, level); count > active {
+		count = active
 	}
 	for limb := 0; limb < count; limb++ {
 		s := eval.Parameters.RingQ().SubRings[limb]

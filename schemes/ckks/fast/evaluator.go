@@ -21,20 +21,22 @@ type Evaluator struct {
 	nttScratch             [3]ring.Poly
 	linearTransformScratch fastLinearTransformScratch
 	automorphismIndexCache map[uint64][]uint64
-	automorphismScratch    [3][]uint64
+	automorphismScratch    [][]uint64
 	lastBSGSBabyRotations  int
 }
 
 // NewEvaluator creates an explicit q0/q1-authoritative evaluator.
 func NewEvaluator(params ckks.Parameters) *Evaluator {
+	prefixWidth := qPrefixWidthOrPanic(params.MaxLevel())
 	eval := &Evaluator{
 		Parameters:             params,
 		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
-		linearTransformScratch: newFastLinearTransformScratch(params.N(), maintainedLimbCount(params, params.MaxLevel())),
+		linearTransformScratch: newFastLinearTransformScratch(params.N(), prefixWidth),
 		automorphismIndexCache: make(map[uint64][]uint64),
+		automorphismScratch:    make([][]uint64, prefixWidth),
 	}
 	for i := range eval.nttScratch {
-		eval.nttScratch[i] = ring.NewPoly(params.N(), maintainedLimbCount(params, params.MaxLevel())-1)
+		eval.nttScratch[i] = ring.NewPoly(params.N(), prefixWidth-1)
 	}
 	for i := range eval.automorphismScratch {
 		eval.automorphismScratch[i] = make([]uint64, params.N())

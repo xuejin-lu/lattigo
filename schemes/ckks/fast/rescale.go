@@ -38,8 +38,9 @@ func newFastRescaleScratch(ringQ *ring.Ring) fastRescaleScratch {
 		return scratch
 	}
 	maintained := maintainedLimbCountForRing(ringQ)
-	scratch.coeff = ring.NewPoly(ringQ.N(), maintained-1)
-	scratch.result = ring.NewPoly(ringQ.N(), maintained-1)
+	prefixWidth := qPrefixWidthOrPanic(ringQ.Level())
+	scratch.coeff = ring.NewPoly(ringQ.N(), prefixWidth-1)
+	scratch.result = ring.NewPoly(ringQ.N(), prefixWidth-1)
 	scratch.q0 = ringQ.SubRings[0].Modulus
 	scratch.q1 = ringQ.SubRings[1].Modulus
 	scratch.q0InverseModQ1, _ = inverseMod(scratch.q0%scratch.q1, scratch.q1)

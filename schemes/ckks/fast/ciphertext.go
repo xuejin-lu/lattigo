@@ -6,15 +6,15 @@ import (
 )
 
 // NewCiphertext allocates a Fast-local ciphertext shape. The logical level is
-// retained in the coefficient-row headers, while only q0 and q1 own N-sized
-// backing arrays. Dormant rows are nil and must not be passed to Standard or
-// full-RNS APIs.
+// retained in the coefficient-row headers, while only the Q-prefix rows own
+// N-sized backing arrays. Rows outside the prefix are nil and must not be
+// passed to Standard or full-RNS APIs.
 func NewCiphertext(params rlwe.ParameterProvider, degree, level int) *rlwe.Ciphertext {
 	n := params.GetRLWEParameters().N()
-	maintained := maintainedLimbCount(params, level)
+	prefixWidth := qPrefixWidthOrPanic(level)
 	polys := make([]ring.Poly, degree+1)
 	for i := range polys {
-		polys[i] = compactPoly(n, level, maintained)
+		polys[i] = compactPoly(n, level, prefixWidth)
 	}
 	ct, err := rlwe.NewCiphertextAtLevelFromPoly(level, polys)
 	if err != nil {
@@ -31,10 +31,7 @@ func Resize(ct *rlwe.Ciphertext, degree, level, n int) {
 		panic("invalid Fast ciphertext resize")
 	}
 
-	maintained := 2
-	if len(ct.Value) > 0 && len(ct.Value[0].Coeffs) > 2 && ct.Value[0].Coeffs[2] != nil {
-		maintained = 3
-	}
+	prefixWidth := qPrefixWidthOrPanic(level)
 	for i := range ct.Value {
 		coeffs := ct.Value[i].Coeffs
 		if level < len(coeffs)-1 {
@@ -44,33 +41,34 @@ func Resize(ct *rlwe.Ciphertext, degree, level, n int) {
 			copy(grown, coeffs)
 			ct.Value[i].Coeffs = grown
 		}
-		ensureMaintainedRows(ct.Value[i], level, n, maintained)
+		ensureQPrefixRows(ct.Value[i], level, n, prefixWidth)
 	}
 
 	if degree < len(ct.Value)-1 {
 		ct.Value = ct.Value[:degree+1]
 	} else {
 		for len(ct.Value) < degree+1 {
-			ct.Value = append(ct.Value, compactPoly(n, level, maintained))
+			ct.Value = append(ct.Value, compactPoly(n, level, prefixWidth))
 		}
 	}
 }
 
-func compactPoly(n, level, maintained int) ring.Poly {
+func compactPoly(n, level, prefixWidth int) ring.Poly {
 	coeffs := make([][]uint64, level+1)
-	for limb := 0; limb < len(coeffs) && limb < maintained; limb++ {
+	for limb := 0; limb < len(coeffs) && limb < prefixWidth; limb++ {
 		coeffs[limb] = make([]uint64, n)
 	}
 	return ring.Poly{Coeffs: coeffs}
 }
 
-func ensureMaintainedRows(poly ring.Poly, level, n, maintained int) {
-	if maintained > level+1 {
-		maintained = level + 1
-	}
-	for limb := 0; limb < maintained; limb++ {
-		if len(poly.Coeffs[limb]) != n {
-			poly.Coeffs[limb] = make([]uint64, n)
+func ensureQPrefixRows(poly ring.Poly, level, n, prefixWidth int) {
+	for limb := range poly.Coeffs {
+		if limb < prefixWidth {
+			if len(poly.Coeffs[limb]) != n {
+				poly.Coeffs[limb] = make([]uint64, n)
+			}
+		} else {
+			poly.Coeffs[limb] = nil
 		}
 	}
 }

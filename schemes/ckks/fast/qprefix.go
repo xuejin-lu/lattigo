@@ -23,6 +23,14 @@ func QPrefixWidth(level int) (int, error) {
 	return level + 1, nil
 }
 
+func qPrefixWidthOrPanic(level int) int {
+	width, err := QPrefixWidth(level)
+	if err != nil {
+		panic(err)
+	}
+	return width
+}
+
 // QPrefixProduct returns the exact product of the actual q values in the
 // maintained prefix for level. It does not infer capacity from prime bit sizes.
 func QPrefixProduct(q []uint64, level int) (*big.Int, error) {
