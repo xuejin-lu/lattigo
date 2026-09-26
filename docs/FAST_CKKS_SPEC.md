@@ -682,6 +682,79 @@ The normalized private-F Trace preserves:
 - fixed production storage width 3;
 - and a safe post-bound no larger than the input bound.
 
+### 4.10.3 Private-F plaintext mirrors for CKKS linear transforms
+
+A CKKS plaintext diagonal is not a small scalar and must not be reinterpreted from one logical residue row.
+
+The CKKS encoder first quantizes each coefficient to a single signed integer (P_k), then stores (P_k mod q_i) in every logical CRT row. Therefore a linear-transformation plaintext has an authoritative integer-polynomial interpretation whenever that integer representative is uniquely recoverable.
+
+For the current Fast DFT matrices, the practical one-time mirror construction is:
+
+1. take the complete logical-Q polynomial of the encoded matrix diagonal at its declared `LevelQ`;
+2. undo Montgomery form and NTT on all logical q rows;
+3. CRT-reconstruct the centered coefficient
+   [
+   P_k=operatorname{Center}_{Q_{LevelQ}}(p_kmod Q_{LevelQ});
+   ]
+4. require
+   [
+   2|P_k|<S_3
+   ]
+   for every coefficient;
+5. encode the same (P_k) into private storage:
+   [
+   (P_kmod f_0, P_kmod f_1, P_kmod f_2);
+   ]
+6. transform those F rows to the NTT domain for repeated execution.
+
+This reconstruction is circuit-initialization work, not a hot-path operation. Arbitrary-precision CRT is acceptable during this one-time conversion. A future direct encoder-to-F path may replace it but must produce the same integer polynomial.
+
+Do not:
+- infer a plaintext lift from q0 alone;
+- infer it from q0/q1 unless uniqueness is separately proven;
+- reinterpret Montgomery/NTT q residues as F residues;
+- treat matrix `Scale` as a storage modulus.
+
+For a private ciphertext component with
+[
+|X_j|_inftyle B_j
+]
+and an integer plaintext polynomial (P), use the convolution bound
+[
+|X_jstar P|_infty
+le
+B_j|P|_1,
+qquad
+|P|_1=sum_k|P_k|.
+]
+
+For a diagonal linear transform
+[
+Y_j=sum_d operatorname{Rot}_d(X_j)star P_d,
+]
+automorphisms are signed coefficient permutations, so
+[
+oxed{
+B'_{j}
+le
+B_jsum_d|P_d|_1.
+}
+]
+
+This bound is preferred to the coarser (N B_j B_P) bound for DFT feasibility planning.
+
+The private-F linear-transform output Scale follows ordinary CKKS semantics:
+[
+Delta'=DeltacdotDelta_P,
+]
+where (Delta_P) is the matrix plaintext Scale. Logical Level is unchanged until the explicit logical-Q Rescale transition.
+
+The private-F implementation must prove
+[
+2B'_j<S_3
+]
+before accepting the result. If a C2S factor or factor group cannot satisfy this with the fixed width-3 production basis, it is not eligible for private-F residency without a new architecture decision.
+
 ### 4.11 Physical container separation
 
 The target widened-storage architecture must not store residues modulo `f_i` inside coefficient rows that ordinary Lattigo code interprets as residues modulo logical `q_i`.
