@@ -299,6 +299,36 @@ A wider active basis than mathematically required is valid. Dynamic width is a l
 
 Existing width-1/2 support, required-width proofs, and exact expansion remain useful as correctness infrastructure and diagnostic capability.
 
+### 4.4.2 Explicit stage-local width experiments
+
+The initial production policy remains fixed width 3. This section does not enable automatic/adaptive runtime width selection.
+
+A bounded experiment may explicitly contract an already valid private-F ciphertext from width (w) to a smaller width (w'<w) when:
+
+[
+2B_j<S_{w'}qquad\forall j.
+]
+
+Because every active row already stores the same authoritative integer (X_j) modulo its corresponding private prime, contraction to a prefix basis does not require integer reconstruction. The target rows are simply the existing prefix residues:
+
+[
+(X\bmod f_0,ldots,X\bmod f_{w'-1}).
+]
+
+The centered-capacity proof makes that prefix a unique representation of the same authoritative integer lift.
+
+Therefore an explicit contraction may:
+- allocate/copy only the prefix rows, or use an equivalent ownership-safe row truncation;
+- preserve logical Level, Scale, degree, domain, metadata, and component bounds;
+- avoid INTT/CRT/NTT reconstruction.
+
+The reverse direction is different: expanding from a narrower basis to a wider basis requires reconstructing the authoritative integer (or an equivalent proven method) to generate the missing residues. For this reason, stage-local width experiments should avoid repeated (3\to2\to3\) oscillation.
+
+Current authorized experiment:
+- C2S/DFT feasibility may compare width 2 against width 3 and the existing compact LogicalQ Fast path;
+- production Bootstrap remains width-3/private-F only where already accepted and otherwise keeps the current logical Fast path;
+- no benchmark result automatically changes production policy. A later Primary decision is required.
+
 ### 4.5 Operation state transitions
 
 The following table defines the target semantics.
