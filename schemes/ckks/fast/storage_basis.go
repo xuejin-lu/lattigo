@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/bits"
+	"sync"
 
 	"github.com/tuneinsight/lattigo/v6/ring"
 )
@@ -38,6 +39,22 @@ type fastStorageBasis struct {
 	halves     [4]storageUint192
 	inverse01  uint64
 	inverse012 uint64
+}
+
+var fastStorageBasisCache sync.Map
+
+// fastStorageBasisForLogN reuses immutable private-ring NTT tables across
+// ciphertexts. The cached subrings are read-only arithmetic parameters.
+func fastStorageBasisForLogN(logN int) (fastStorageBasis, error) {
+	if cached, ok := fastStorageBasisCache.Load(logN); ok {
+		return cached.(fastStorageBasis), nil
+	}
+	basis, err := newFastStorageBasis(logN)
+	if err != nil {
+		return fastStorageBasis{}, err
+	}
+	cached, _ := fastStorageBasisCache.LoadOrStore(logN, basis)
+	return cached.(fastStorageBasis), nil
 }
 
 func newFastStorageBasis(logN int) (basis fastStorageBasis, err error) {

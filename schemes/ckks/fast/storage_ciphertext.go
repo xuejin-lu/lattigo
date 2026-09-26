@@ -30,7 +30,7 @@ func NewFastCiphertext(params ckks.Parameters, degree, logicalLevel, storageWidt
 	if err := validateFastCiphertextParameters(params, degree, logicalLevel, storageWidth); err != nil {
 		return nil, err
 	}
-	basis, err := newFastStorageBasis(params.LogN())
+	basis, err := fastStorageBasisForLogN(params.LogN())
 	if err != nil {
 		return nil, err
 	}

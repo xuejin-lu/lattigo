@@ -50,7 +50,7 @@ func ImportLevel0(params ckks.Parameters, source *rlwe.Ciphertext, storageWidth 
 		}
 	}
 
-	basis, err := newFastStorageBasis(params.LogN())
+	basis, err := fastStorageBasisForLogN(params.LogN())
 	if err != nil {
 		return nil, err
 	}

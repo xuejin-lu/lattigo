@@ -439,6 +439,68 @@ func TestFastModUpCompleteBoundary(t *testing.T) {
 	}
 }
 
+func TestFastStorageNormalizedTraceMatchesLogicalTrace(t *testing.T) {
+	values := []int64{1, -2, 12345, -67890}
+	for _, profile := range []struct {
+		name string
+		new  func(testing.TB) (Parameters, ckks.Parameters)
+	}{
+		{name: "q01", new: func(tb testing.TB) (Parameters, ckks.Parameters) { return fastModUpParameters(tb, 4) }},
+		{name: "q012", new: fastModUpQ012Parameters},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			params, ckksParams := profile.new(t)
+			maintained := fastckks.MaintainedLimbCount(&ckksParams, ckksParams.MaxLevel())
+			for _, logSlots := range []int{3, 2, 1, 0} {
+				for _, scale := range []int64{1 << 20, 1 << 28} {
+					t.Run(fmt.Sprintf("logSlots-%d-scale-%d", logSlots, scale), func(t *testing.T) {
+						input := newFastModUpInput(ckksParams, values, rlwe.NewScale(scale), false)
+						fastEvaluator := fastckks.NewEvaluator(ckksParams)
+						reference, err := fastckks.FusedLevel0ModUpToCompactLogical(ckksParams, input, ckksParams.MaxLevel(), fastckks.FastCiphertextDomain{IsNTT: true})
+						require.NoError(t, err)
+						private, err := fastckks.ImportLevel0(ckksParams, input, 3, fastckks.FastCiphertextDomain{IsNTT: true})
+						require.NoError(t, err)
+						private, err = fastckks.FastStorageModUpLevel0(private, ckksParams.MaxLevel())
+						require.NoError(t, err)
+
+						mod1Parameters := mod1.Parameters{LogDefaultScale: params.Mod1ParametersLiteral.LogScale, LogMessageRatio: params.Mod1ParametersLiteral.LogMessageRatio}
+						if alignment := (mod1Parameters.ScalingFactor().Float64() / mod1Parameters.MessageRatio()) / private.Scale().Float64(); alignment > 1 {
+							scalar := uint64(math.Round(alignment))
+							private, err = fastckks.FastStorageMulInteger(private, new(big.Int).SetUint64(scalar))
+							require.NoError(t, err)
+							require.NoError(t, private.SetScale(private.Scale().Mul(rlwe.NewScale(alignment))))
+							require.NoError(t, fastEvaluator.MulIntegerMaintained(reference, new(big.Int).SetUint64(scalar), reference))
+							reference.Scale = reference.Scale.Mul(rlwe.NewScale(alignment))
+						}
+
+						require.NoError(t, fastEvaluator.Trace(reference, logSlots, reference))
+						private, err = fastckks.FastStorageTraceNormalized(private, logSlots)
+						require.NoError(t, err)
+						got, err := private.ExportToCompactLogical(fastckks.FastCiphertextDomain{IsNTT: true})
+						require.NoError(t, err)
+
+						require.Equal(t, reference.Level(), got.Level())
+						require.True(t, reference.Scale.Equal(got.Scale))
+						require.Equal(t, reference.IsNTT, got.IsNTT)
+						require.Equal(t, reference.IsMontgomery, got.IsMontgomery)
+						require.Equal(t, reference.MetaData.IsBatched, got.MetaData.IsBatched)
+						require.Equal(t, reference.MetaData.IsBitReversed, got.MetaData.IsBitReversed)
+						require.Equal(t, reference.MetaData.LogDimensions, got.MetaData.LogDimensions)
+						for component := range reference.Value {
+							for limb := 0; limb < maintained; limb++ {
+								require.Equal(t, reference.Value[component].Coeffs[limb], got.Value[component].Coeffs[limb], "component=%d limb=%d", component, limb)
+							}
+							for limb := maintained; limb <= ckksParams.MaxLevel(); limb++ {
+								require.Nil(t, got.Value[component].Coeffs[limb], "dormant q row %d must remain unmaterialized", limb)
+							}
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
 func TestFastModUpBasisValidation(t *testing.T) {
 	params, ckksParams := fastModUpParameters(t, 4)
 	fastEval, err := NewFastEvaluator(params)
