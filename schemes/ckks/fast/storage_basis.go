@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 )
 
 // This fixed private storage basis is independent of every CKKS logical Q chain.
@@ -19,6 +20,20 @@ const (
 
 func fastStoragePrimes() [3]uint64 {
 	return [3]uint64{fastStoragePrime0, fastStoragePrime1, fastStoragePrime2}
+}
+
+// FastStorageProduct returns the exact private-F modulus product for the
+// requested active width. It is intended for capacity planning/reporting;
+// callers must still use the strict centered inequality 2*B < S_w.
+func FastStorageProduct(params ckks.Parameters, width int) (*big.Int, error) {
+	if params.N() == 0 || params.RingType() != ring.Standard {
+		return nil, errors.New("Fast storage product requires initialized Standard CKKS parameters")
+	}
+	basis, err := fastStorageBasisForLogN(params.LogN())
+	if err != nil {
+		return nil, err
+	}
+	return basis.product(width)
 }
 
 // storageUint192 is fixed-width arithmetic for storage products and values.
