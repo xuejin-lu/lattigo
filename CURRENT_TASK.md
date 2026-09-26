@@ -1,18 +1,24 @@
 # Current Task
 
-Status: WAITING_FOR_PRIMARY_TASK
+Task: QPREFIX-AUDIT-003
+Status: READY_FOR_CODEX
 
-QPREFIX-AUDIT-002 is accepted from Primary audit commit:
-`f12162970e7cf9e1f88db06a42d464cefd52e20d`
+Authoritative Primary specification:
+`xuejin-lu/heart-lattigo-bootstrap@main`
+`specs/QPREFIX-AUDIT-003-EVALMOD-PS-DA-CAPACITY.md`
 
-Classification:
-`QPREFIX_C2S_CAPACITY_PROVEN`
+Task class:
+`M/E — Focused evidence completion`
 
-Current conclusion:
-- all four current LogN13/P93 C2S groups are strictly Q012-safe, including raw pre-Rescale LinearTransform outputs;
-- QPREFIX-v2 therefore has more than enough capacity for C2S at those Levels;
-- production source remains unchanged.
+Audit current `fast-qprefix` EvalMod/PS/DoubleAngle only.
 
-Do not modify production until the remaining current-branch EvalMod/PS/DoubleAngle and S2C evidence gaps are closed.
+If necessary, add diagnostic/test-only instrumentation to expose:
+- generated-power operands/products/rescales;
+- PS baby/giant boundaries;
+- DoubleAngle rounds;
+- exact maintained-prefix coefficient bounds.
 
-Wait for the next Primary task.
+Production semantics must remain unchanged.
+Do not modify `fast-ckks`, S2C, parameters, planScale, or polynomial scheduling.
+
+Commit/push useful diagnostic-only instrumentation only after validation.
