@@ -1,27 +1,25 @@
 # Current Task
 
-Task: FAST-STORAGE-007
-Status: READY_FOR_CODEX
+Status: WAITING_FOR_PRIMARY_TASK
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/FAST-STORAGE-007-PRIVATE-F-PLAINTEXT-LINEAR-TRANSFORM.md`
+FAST-STORAGE-007 is accepted at:
+`1a8018efda159f1dc9ab7078ce80a40c6db28e71`
 
-Task class:
-`I — Implementation / feasibility foundation`
+Accepted standalone foundation now includes:
+- complete LogicalQ -> authoritative integer -> private-F plaintext mirrors;
+- exact plaintext max/L1 bounds;
+- private-F plaintext multiplication;
+- private-F automorphism;
+- direct and BSGS private-F LinearTransform;
+- real LogN13 C2S width-3 feasibility evidence.
 
-Accepted prerequisites:
-- FAST-STORAGE-006 at `532319346d8235fb42c72bfd22b57a6468675c82`.
-- Private-F plaintext mirror architecture at `22b9f07969af38705573686fe96a873e4bd001a3`.
+Production Bootstrap/C2S remains unchanged.
 
-Implement only:
-- private-F plaintext mirror from complete logical-Q encoded diagonals;
-- exact plaintext bounds/L1 norms;
-- private-F plaintext multiply and automorphism;
-- standalone private-F LinearTransform;
-- actual LogN13 C2S capacity audit.
+Important performance evidence:
+- representative factor-0 private-F width-3 LinearTransform ~1.01 ms/op;
+- existing logical Fast LinearTransform ~0.41 ms/op;
+- do not wire width-3 private-F C2S into production yet.
 
-Do not modify production Bootstrap/C2S or matrix generation.
+Next Primary work should evaluate stage-specific storage-width policy (especially width 2) and full standalone C2S-chain performance before any production residency decision.
 
-If actual C2S width-3 capacity fails, stop with `NEEDS_WEB_REVIEW` and report the first failing factor + exact bound numbers.
-If feasible, commit/push Secondary `fast-ckks` and report `READY_FOR_WEB_REVIEW`.
+Wait for the next Primary task.
