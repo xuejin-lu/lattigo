@@ -1,24 +1,26 @@
 # Current Task
 
-Task: QPREFIX-AUDIT-003
+Task: QPREFIX-ARCH-PLAN-001
 Status: READY_FOR_CODEX
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/QPREFIX-AUDIT-003-EVALMOD-PS-DA-CAPACITY.md`
-
 Task class:
-`M/E — Focused evidence completion`
+`M — Architecture planning only`
 
-Audit current `fast-qprefix` EvalMod/PS/DoubleAngle only.
+This branch is the architecture-reading target only.
 
-If necessary, add diagnostic/test-only instrumentation to expose:
-- generated-power operands/products/rescales;
-- PS baby/giant boundaries;
-- DoubleAngle rounds;
-- exact maintained-prefix coefficient bounds.
+Authoritative architecture:
+`docs/FAST_QPREFIX_SPEC.md`
 
-Production semantics must remain unchanged.
-Do not modify `fast-ckks`, S2C, parameters, planScale, or polynomial scheduling.
+Important decision:
+- Q-prefix v2 is the production direction;
+- private F is not the production direction;
+- `QPREFIX-AUDIT-003` is paused and must not be resumed unless a later Primary task explicitly re-authorizes it.
 
-Commit/push useful diagnostic-only instrumentation only after validation.
+The user will provide the detailed architecture-planner prompt directly in Codex chat.
+
+Do not modify this Secondary branch.
+Do not write implementation code.
+Do not run a broad repository-wide implementation audit beyond what the user's planning prompt requires.
+
+The only repository write for this task belongs in Primary:
+`docs/QPREFIX-V2-PRODUCTION-MIGRATION-PLAN.md`
