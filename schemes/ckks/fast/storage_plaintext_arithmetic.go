@@ -13,7 +13,7 @@ import (
 )
 
 // FastStorageMulPlaintext multiplies each private-F ciphertext component by
-// one private-F plaintext polynomial. It performs only width-3 NTT-domain
+// one private-F plaintext polynomial. It performs only active-width NTT-domain
 // arithmetic and does not reconstruct coefficients in the execution path.
 func FastStorageMulPlaintext(ct *FastCiphertext, pt *FastStoragePlaintext) (*FastCiphertext, error) {
 	if err := validateFastStoragePlaintextOperand(ct, pt); err != nil {
@@ -23,15 +23,15 @@ func FastStorageMulPlaintext(ct *FastCiphertext, pt *FastStoragePlaintext) (*Fas
 	for component, bound := range ct.componentBounds {
 		bounds[component] = new(big.Int).Mul(bound, pt.l1Norm)
 	}
-	if err := validateBoundsFit(ct.basis, bounds, 3); err != nil {
+	if err := validateBoundsFit(ct.basis, bounds, ct.activeStorageWidth); err != nil {
 		return nil, fmt.Errorf("private-F plaintext multiplication capacity: %w", err)
 	}
 
-	output := newFastCiphertextWithBasis(ct.params, ct.Degree(), ct.logicalLevel, 3, ct.basis)
+	output := newFastCiphertextWithBasis(ct.params, ct.Degree(), ct.logicalLevel, ct.activeStorageWidth, ct.basis)
 	output.metadata = cloneFastMetadata(ct.metadata)
 	output.metadata.Scale = ct.metadata.Scale.Mul(pt.scale)
 	output.componentBounds = bounds
-	for row := 0; row < 3; row++ {
+	for row := 0; row < ct.activeStorageWidth; row++ {
 		subring, _ := ct.basis.subring(row)
 		for component := range ct.value {
 			subring.MulCoeffsBarrett(ct.value[component].Coeffs[row], pt.value.Coeffs[row], output.value[component].Coeffs[row])
@@ -50,8 +50,8 @@ func validateFastStoragePlaintextOperand(ct *FastCiphertext, pt *FastStoragePlai
 	if err := validateFastStoragePlaintext(pt); err != nil {
 		return fmt.Errorf("plaintext: %w", err)
 	}
-	if ct.activeStorageWidth != 3 || !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
-		return errors.New("private-F plaintext arithmetic requires width-3 NTT ordinary-residue ciphertext storage")
+	if ct.activeStorageWidth != pt.width || !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
+		return fmt.Errorf("private-F plaintext arithmetic requires matching-width NTT ordinary-residue storage (ciphertext=%d plaintext=%d)", ct.activeStorageWidth, pt.width)
 	}
 	if ct.N() != pt.params.N() || !ct.params.Equal(&pt.params) || ct.basis.logN != pt.basis.logN {
 		return errors.New("private-F plaintext and ciphertext require matching CKKS parameters")
@@ -73,8 +73,8 @@ func FastStorageAutomorphism(ct *FastCiphertext, galEl uint64) (*FastCiphertext,
 	if err := validateFastStorageState(ct); err != nil {
 		return nil, err
 	}
-	if ct.activeStorageWidth != 3 || !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
-		return nil, errors.New("private-F automorphism requires width-3 NTT ordinary-residue storage")
+	if !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
+		return nil, errors.New("private-F automorphism requires NTT ordinary-residue storage")
 	}
 	index, err := ring.AutomorphismNTTIndex(ct.N(), ct.params.RingQ().NthRoot(), galEl)
 	if err != nil {
@@ -82,7 +82,7 @@ func FastStorageAutomorphism(ct *FastCiphertext, galEl uint64) (*FastCiphertext,
 	}
 	output := ct.CopyNew()
 	for component := range ct.value {
-		for row := 0; row < 3; row++ {
+		for row := 0; row < ct.activeStorageWidth; row++ {
 			permuteStorageNTT(ct.value[component].Coeffs[row], output.value[component].Coeffs[row], index)
 		}
 	}
@@ -102,6 +102,7 @@ func permuteStorageNTT(input, output []uint64, index []uint64) {
 // the exact direct/BSGS schedule of one encoded LogicalQ transformation.
 type FastStorageLinearTransformation struct {
 	params    ckks.Parameters
+	width     int
 	levelQ    int
 	scale     rlwe.Scale
 	metadata  rlwe.PlaintextMetaData
@@ -117,6 +118,16 @@ type FastStorageLinearTransformation struct {
 // NewFastStorageLinearTransformation mirrors every encoded Q diagonal and
 // retains the corresponding direct/BSGS execution schedule.
 func NewFastStorageLinearTransformation(params ckks.Parameters, matrix lintrans.LinearTransformation) (*FastStorageLinearTransformation, error) {
+	return NewFastStorageLinearTransformationWithWidth(params, matrix, 3)
+}
+
+// NewFastStorageLinearTransformationWithWidth mirrors every encoded Q
+// diagonal into the requested width-2 or width-3 private-F basis, preserving
+// the exact direct/BSGS schedule.
+func NewFastStorageLinearTransformationWithWidth(params ckks.Parameters, matrix lintrans.LinearTransformation, storageWidth int) (*FastStorageLinearTransformation, error) {
+	if storageWidth != 2 && storageWidth != 3 {
+		return nil, fmt.Errorf("private-F LinearTransformation width must be 2 or 3, got %d", storageWidth)
+	}
 	if matrix.MetaData == nil {
 		return nil, errors.New("LogicalQ linear transformation metadata cannot be nil")
 	}
@@ -138,7 +149,7 @@ func NewFastStorageLinearTransformation(params ckks.Parameters, matrix lintrans.
 	}
 	cols := 1 << uint(colsLog)
 	mirrored := &FastStorageLinearTransformation{
-		params: params, levelQ: matrix.LevelQ, scale: cloneFastScale(matrix.Scale),
+		params: params, width: storageWidth, levelQ: matrix.LevelQ, scale: cloneFastScale(matrix.Scale),
 		metadata: cloneFastPlaintextMetadata(matrix.PlaintextMetaData), n1: matrix.N1,
 		cols: cols, diagonals: make(map[int]*FastStoragePlaintext, len(matrix.Vec)),
 		sumL1Norm: new(big.Int), maxAbs: new(big.Int), maxL1Norm: new(big.Int),
@@ -148,7 +159,7 @@ func NewFastStorageLinearTransformation(params ckks.Parameters, matrix lintrans.
 		if _, exists := mirrored.diagonals[key]; exists {
 			return nil, fmt.Errorf("linear transformation has duplicate diagonal index modulo %d: %d", cols, diagonal)
 		}
-		pt, err := NewFastStoragePlaintextMirror(params, qp.Q, matrix.LevelQ, matrix.PlaintextMetaData, matrix.IsNTT, matrix.IsMontgomery)
+		pt, err := NewFastStoragePlaintextMirrorWithWidth(params, qp.Q, matrix.LevelQ, matrix.PlaintextMetaData, matrix.IsNTT, matrix.IsMontgomery, storageWidth)
 		if err != nil {
 			return nil, fmt.Errorf("mirror diagonal %d: %w", diagonal, err)
 		}
@@ -229,8 +240,8 @@ func FastStorageLinearTransform(ct *FastCiphertext, matrix *FastStorageLinearTra
 	if matrix == nil || len(matrix.diagonals) == 0 {
 		return nil, errors.New("private-F linear transformation cannot be nil or empty")
 	}
-	if ct.activeStorageWidth != 3 || ct.Degree() != 1 || !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
-		return nil, errors.New("private-F LinearTransform requires width-3 degree-one NTT ordinary-residue ciphertext storage")
+	if ct.activeStorageWidth != matrix.width || ct.Degree() != 1 || !ct.metadata.IsNTT || ct.metadata.IsMontgomery {
+		return nil, fmt.Errorf("private-F LinearTransform requires matching-width degree-one NTT ordinary-residue storage (ciphertext=%d matrix=%d)", ct.activeStorageWidth, matrix.width)
 	}
 	if ct.N() != matrix.params.N() || !ct.params.Equal(&matrix.params) || ct.logicalLevel > matrix.levelQ {
 		return nil, errors.New("private-F LinearTransform CKKS parameters or LevelQ are incompatible with input")
@@ -242,11 +253,11 @@ func FastStorageLinearTransform(ct *FastCiphertext, matrix *FastStorageLinearTra
 	for component, bound := range ct.componentBounds {
 		bounds[component] = new(big.Int).Mul(bound, matrix.sumL1Norm)
 	}
-	if err := validateBoundsFit(ct.basis, bounds, 3); err != nil {
+	if err := validateBoundsFit(ct.basis, bounds, ct.activeStorageWidth); err != nil {
 		return nil, fmt.Errorf("private-F LinearTransform capacity preflight: %w", err)
 	}
 
-	output := newFastCiphertextWithBasis(ct.params, 1, ct.logicalLevel, 3, ct.basis)
+	output := newFastCiphertextWithBasis(ct.params, 1, ct.logicalLevel, ct.activeStorageWidth, ct.basis)
 	output.metadata = cloneFastMetadata(ct.metadata)
 	output.metadata.Scale = ct.metadata.Scale.Mul(matrix.scale)
 	output.componentBounds = bounds
@@ -309,7 +320,7 @@ func fastStorageLinearTransformBSGS(input *FastCiphertext, matrix *FastStorageLi
 	}
 	sort.Ints(outerKeys)
 	for _, j := range outerKeys {
-		inner := newFastStorageComponentPair(input.N())
+		inner := newFastStorageComponentPair(input.N(), input.activeStorageWidth)
 		babyIndexes := append([]int(nil), matrix.index[j]...)
 		sort.Ints(babyIndexes)
 		for _, i := range babyIndexes {
@@ -331,15 +342,15 @@ func fastStorageLinearTransformBSGS(input *FastCiphertext, matrix *FastStorageLi
 	return nil
 }
 
-func newFastStorageComponentPair(N int) []ring.Poly {
-	return []ring.Poly{ring.NewPoly(N, 2), ring.NewPoly(N, 2)}
+func newFastStorageComponentPair(N, width int) []ring.Poly {
+	return []ring.Poly{ring.NewPoly(N, width-1), ring.NewPoly(N, width-1)}
 }
 
 func fastStorageRotatedComponents(input *FastCiphertext, rotation int) ([]ring.Poly, error) {
-	rotated := newFastStorageComponentPair(input.N())
+	rotated := newFastStorageComponentPair(input.N(), input.activeStorageWidth)
 	if rotation == 0 {
 		for component := 0; component < 2; component++ {
-			for row := 0; row < 3; row++ {
+			for row := 0; row < input.activeStorageWidth; row++ {
 				copy(rotated[component].Coeffs[row], input.value[component].Coeffs[row])
 			}
 		}
@@ -350,7 +361,7 @@ func fastStorageRotatedComponents(input *FastCiphertext, rotation int) ([]ring.P
 		return nil, err
 	}
 	for component := 0; component < 2; component++ {
-		for row := 0; row < 3; row++ {
+		for row := 0; row < input.activeStorageWidth; row++ {
 			permuteStorageNTT(input.value[component].Coeffs[row], rotated[component].Coeffs[row], index)
 		}
 	}
@@ -365,9 +376,9 @@ func fastStorageRotatePair(input []ring.Poly, ct *FastCiphertext, rotation int) 
 	if err != nil {
 		return nil, err
 	}
-	output := newFastStorageComponentPair(ct.N())
+	output := newFastStorageComponentPair(ct.N(), ct.activeStorageWidth)
 	for component := 0; component < 2; component++ {
-		for row := 0; row < 3; row++ {
+		for row := 0; row < ct.activeStorageWidth; row++ {
 			permuteStorageNTT(input[component].Coeffs[row], output[component].Coeffs[row], index)
 		}
 	}
@@ -375,31 +386,27 @@ func fastStorageRotatePair(input []ring.Poly, ct *FastCiphertext, rotation int) 
 }
 
 func fastStorageMulAddTerm(output *FastCiphertext, rotated []ring.Poly, pt *FastStoragePlaintext) error {
-	for row := 0; row < 3; row++ {
+	for row := 0; row < output.activeStorageWidth; row++ {
 		subring, _ := output.basis.subring(row)
 		for component := 0; component < 2; component++ {
-			term := make([]uint64, output.N())
-			subring.MulCoeffsBarrett(rotated[component].Coeffs[row], pt.value.Coeffs[row], term)
-			subring.Add(output.value[component].Coeffs[row], term, output.value[component].Coeffs[row])
+			subring.MulCoeffsBarrettThenAdd(rotated[component].Coeffs[row], pt.value.Coeffs[row], output.value[component].Coeffs[row])
 		}
 	}
 	return nil
 }
 
 func fastStorageMulAddTermPair(output, rotated []ring.Poly, pt *FastStoragePlaintext, basis fastStorageBasis) error {
-	for row := 0; row < 3; row++ {
+	for row := 0; row < len(output[0].Coeffs); row++ {
 		subring, _ := basis.subring(row)
 		for component := 0; component < 2; component++ {
-			term := make([]uint64, len(rotated[component].Coeffs[row]))
-			subring.MulCoeffsBarrett(rotated[component].Coeffs[row], pt.value.Coeffs[row], term)
-			subring.Add(output[component].Coeffs[row], term, output[component].Coeffs[row])
+			subring.MulCoeffsBarrettThenAdd(rotated[component].Coeffs[row], pt.value.Coeffs[row], output[component].Coeffs[row])
 		}
 	}
 	return nil
 }
 
 func addFastStoragePair(output *FastCiphertext, input []ring.Poly, basis fastStorageBasis) {
-	for row := 0; row < 3; row++ {
+	for row := 0; row < output.activeStorageWidth; row++ {
 		subring, _ := basis.subring(row)
 		for component := 0; component < 2; component++ {
 			subring.Add(output.value[component].Coeffs[row], input[component].Coeffs[row], output.value[component].Coeffs[row])

@@ -282,8 +282,8 @@ func logicalTestLinearTransformation(t *testing.T, params ckks.Parameters, level
 
 func decodeFastStoragePlaintext(t *testing.T, pt *FastStoragePlaintext) []*big.Int {
 	t.Helper()
-	coefficients := make([][]uint64, 3)
-	for row := 0; row < 3; row++ {
+	coefficients := make([][]uint64, pt.StorageWidth())
+	for row := 0; row < pt.StorageWidth(); row++ {
 		coefficients[row] = make([]uint64, pt.params.N())
 		subring, _ := pt.basis.subring(row)
 		subring.INTT(pt.value.Coeffs[row], coefficients[row])
@@ -291,10 +291,10 @@ func decodeFastStoragePlaintext(t *testing.T, pt *FastStoragePlaintext) []*big.I
 	values := make([]*big.Int, pt.params.N())
 	for coefficient := range values {
 		var residues [3]uint64
-		for row := 0; row < 3; row++ {
+		for row := 0; row < pt.StorageWidth(); row++ {
 			residues[row] = coefficients[row][coefficient]
 		}
-		value, err := pt.basis.decode(residues, 3)
+		value, err := pt.basis.decode(residues, pt.StorageWidth())
 		require.NoError(t, err)
 		values[coefficient] = value
 	}

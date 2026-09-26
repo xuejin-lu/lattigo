@@ -106,6 +106,99 @@ func (ct *FastCiphertext) ExpandStorage(storageWidth int) (*FastCiphertext, erro
 	return output, nil
 }
 
+// ContractStorage returns a copy backed by a narrower prefix of the current
+// private-F rows. The strict centered-capacity proof guarantees that the
+// retained prefix still uniquely identifies every authoritative coefficient;
+// contraction does not reconstruct or otherwise change the represented lift.
+func (ct *FastCiphertext) ContractStorage(storageWidth int) (*FastCiphertext, error) {
+	if err := validateFastStorageState(ct); err != nil {
+		return nil, err
+	}
+	if storageWidth != 1 && storageWidth != 2 {
+		return nil, fmt.Errorf("storage contraction target must be width 1 or 2, got %d", storageWidth)
+	}
+	if storageWidth >= ct.activeStorageWidth {
+		return nil, fmt.Errorf("storage contraction requires a narrower basis: current=%d target=%d", ct.activeStorageWidth, storageWidth)
+	}
+	if err := validateBoundsFit(ct.basis, ct.componentBounds, storageWidth); err != nil {
+		return nil, fmt.Errorf("storage contraction capacity preflight: %w", err)
+	}
+
+	output := newFastCiphertextWithBasis(ct.params, ct.Degree(), ct.logicalLevel, storageWidth, ct.basis)
+	output.metadata = cloneFastMetadata(ct.metadata)
+	output.componentBounds = cloneComponentBounds(ct.componentBounds)
+	for component := range ct.value {
+		for row := 0; row < storageWidth; row++ {
+			copy(output.value[component].Coeffs[row], ct.value[component].Coeffs[row])
+		}
+	}
+	return output, nil
+}
+
+// FastStorageEqualLift reports whether two valid private-F ciphertexts encode
+// exactly the same centered integer polynomial components. The explicit
+// semantic comparison is useful when validating equivalent stage-local
+// representations with different active storage widths.
+func FastStorageEqualLift(left, right *FastCiphertext) (bool, error) {
+	if err := validateFastStorageState(left); err != nil {
+		return false, fmt.Errorf("left ciphertext: %w", err)
+	}
+	if err := validateFastStorageState(right); err != nil {
+		return false, fmt.Errorf("right ciphertext: %w", err)
+	}
+	if !left.params.Equal(&right.params) || left.logicalLevel != right.logicalLevel || left.Degree() != right.Degree() {
+		return false, fmt.Errorf("private-F lift comparison requires matching parameters, logical level, and degree")
+	}
+	if !left.metadata.Scale.Equal(right.metadata.Scale) {
+		return false, fmt.Errorf("private-F lift comparison requires matching CKKS scales")
+	}
+	if !left.metadata.PlaintextMetaData.Equal(&right.metadata.PlaintextMetaData) {
+		return false, fmt.Errorf("private-F lift comparison requires matching plaintext metadata")
+	}
+	leftCoefficients := storageCoefficientRows(left)
+	rightCoefficients := storageCoefficientRows(right)
+	for component := range left.value {
+		for coefficient := 0; coefficient < left.N(); coefficient++ {
+			var leftResidues, rightResidues [3]uint64
+			for row := 0; row < left.activeStorageWidth; row++ {
+				leftResidues[row] = leftCoefficients[component][row][coefficient]
+			}
+			for row := 0; row < right.activeStorageWidth; row++ {
+				rightResidues[row] = rightCoefficients[component][row][coefficient]
+			}
+			leftLift, err := left.basis.decodeFixed(leftResidues, left.activeStorageWidth)
+			if err != nil {
+				return false, fmt.Errorf("decode left component %d coefficient %d: %w", component, coefficient, err)
+			}
+			rightLift, err := right.basis.decodeFixed(rightResidues, right.activeStorageWidth)
+			if err != nil {
+				return false, fmt.Errorf("decode right component %d coefficient %d: %w", component, coefficient, err)
+			}
+			if leftLift.negative != rightLift.negative || storageCmp(leftLift.magnitude, rightLift.magnitude) != 0 {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+func storageCoefficientRows(ct *FastCiphertext) [][][]uint64 {
+	rows := make([][][]uint64, len(ct.value))
+	for component := range ct.value {
+		rows[component] = make([][]uint64, ct.activeStorageWidth)
+		for row := 0; row < ct.activeStorageWidth; row++ {
+			rows[component][row] = make([]uint64, ct.N())
+			if ct.metadata.IsNTT {
+				subring, _ := ct.basis.subring(row)
+				subring.INTT(ct.value[component].Coeffs[row], rows[component][row])
+			} else {
+				copy(rows[component][row], ct.value[component].Coeffs[row])
+			}
+		}
+	}
+	return rows
+}
+
 // FastStorageAdd computes a standalone private-F ciphertext sum. It does not
 // modify either input or use the logical-Q arithmetic path.
 func FastStorageAdd(left, right *FastCiphertext) (*FastCiphertext, error) {
