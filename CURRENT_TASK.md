@@ -1,26 +1,25 @@
 # Current Task
 
-Task: FAST-STORAGE-008
-Status: READY_FOR_CODEX
+Status: WAITING_FOR_PRIMARY_TASK
 
-Authoritative Primary specification:
-`xuejin-lu/heart-lattigo-bootstrap@main`
-`specs/FAST-STORAGE-008-C2S-WIDTH2-EXPERIMENT.md`
+FAST-STORAGE-008 is accepted at:
+`1aafc442595da9af41fdc97b03b91ccb2431fe3a`
 
-Task class:
-`E — Experiment / bounded implementation`
+Classification:
+`FAST_STORAGE_008_WIDTH2_VALID_NOT_COMPETITIVE`
 
-Accepted prerequisites:
-- FAST-STORAGE-007 at `1a8018efda159f1dc9ab7078ce80a40c6db28e71`.
-- Explicit stage-local width experiment rule at `04396c94a3bb063e93b00bb80a500dfcc2891e21`.
+Accepted evidence:
+- explicit 3->2 contraction is correct under strict capacity proof;
+- actual LogN13 C2S fits width 2 for all four factors;
+- F2/F3 authoritative lifts and logical maintained rows match exactly;
+- F2 is about 30% faster than F3;
+- F2 full four-factor chain is still about 1.93x slower than existing Logical Fast.
 
-Implement only:
-- explicit storage contraction 3->2 under strict bound proof;
-- width-2 plaintext mirror and LinearTransform support;
-- actual LogN13 C2S capacity experiment;
-- exact Logical/F3/F2 comparisons;
-- representative factor and full-chain benchmarks.
+Production Bootstrap/C2S remains unchanged.
 
-Do not modify production Bootstrap/C2S or enable adaptive runtime width.
+A final bounded C2S performance-root-cause experiment is appropriate before closing this direction:
+- scratch/workspace parity for private-F LinearTransform;
+- per-stage timing breakdown for LinearTransform, Rescale, and restore;
+- no production routing changes.
 
-Commit/push `fast-ckks` and report `READY_FOR_WEB_REVIEW`, or `NEEDS_WEB_REVIEW` only for architecture/math conflicts.
+Wait for the next Primary task.
