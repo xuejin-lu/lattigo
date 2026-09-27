@@ -1,27 +1,17 @@
 # Current Task
 
-Task: QPREFIX-IMPL-004-REVIEW-FIX
-Status: READY_FOR_CODEX
+Task: QPREFIX-IMPL-004
+Status: COMPLETE
 
-Accepted candidate:
+Accepted commit:
 `18f4da53f03acd065d18550a8f2106725462896f`
 
-Revised Primary spec:
-`specs/QPREFIX-IMPL-004-RESCALE-LEVEL-TRANSITIONS.md`
-at
-`a7bf5f2c68662f66c7b955b75a566e5eff4e0816`
-
-Review blocker:
-`DropLevelCanonical` must not accept targetLevel > 3.
+The temporary review-fix instruction restricting `DropLevelCanonical` to targetLevel <= 3 is withdrawn.
 
 Reason:
-for targetLevel > 3, q0123 does not determine the canonical centered representative
-modulo full logical Q_target.
+under the Fast authoritative-lift invariant, the maintained prefix uniquely determines the bounded integer lift X. For targetLevel >= 3, a valid q0123-bounded X is already inside the centered interval of the larger logical target modulus, so canonical contraction equals same-lift contraction and does not require dormant q4+ rows.
 
-Required bounded fix:
-- reject canonical targetLevel > 3 before mutating output;
-- add transactional 5->4 (or equivalent) rejection test;
-- keep existing <=3 canonical behavior unchanged;
-- do not modify SameLift or any other subsystem.
+Do not make further QPREFIX-IMPL-004 changes.
 
-Run focused and full regressions, commit/push, then report `READY_FOR_WEB_REVIEW`.
+Status:
+WAITING_FOR_PRIMARY_TASK
