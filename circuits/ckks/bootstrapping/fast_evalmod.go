@@ -26,7 +26,10 @@ func (eval *FastEvaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext) (*rlwe
 	if err := eval.ensureFastBootstrapCircuit(); err != nil {
 		return nil, err
 	}
-	rows := fastckks.MaintainedLimbCount(&eval.Parameters.BootstrappingParameters, ctReal.Level())
+	rows, err := fastckks.QPrefixWidth(ctReal.Level())
+	if err != nil {
+		return nil, err
+	}
 	return eval.DFTEvaluator.SlotsToCoeffsNewQPrefixRows(ctReal, ctImag, eval.S2CDFTMatrix, rows)
 }
 

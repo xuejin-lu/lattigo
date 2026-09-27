@@ -271,7 +271,7 @@ func TestFastLogN13C2SExplicitRowsConsumeQ3(t *testing.T) {
 	}
 }
 
-func TestFastLogN13S2CLegacyEvalModBoundaryDoesNotPromoteQ3(t *testing.T) {
+func TestFastLogN13S2CEvalModQPrefixBoundaryConsumesQ3(t *testing.T) {
 	params, residual := fastLogN13CompressionParameters(t)
 	eval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
@@ -292,8 +292,9 @@ func TestFastLogN13S2CLegacyEvalModBoundaryDoesNotPromoteQ3(t *testing.T) {
 	ctImag, err = eval.EvalMod(ctImag)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, ctReal.Level(), 3, "EvalMod fixture must have a physical q3 row")
-	legacyRows := fastckks.MaintainedLimbCount(&params.BootstrappingParameters, ctReal.Level())
-	require.Equal(t, 3, legacyRows, "the current LogN13 EvalMod producer guarantees q012, not q0123")
+	rows, err := fastckks.QPrefixWidth(ctReal.Level())
+	require.NoError(t, err)
+	require.Equal(t, 4, rows, "P93 EvalMod output must provide q0123 to production S2C")
 
 	poison := func(ct *rlwe.Ciphertext) *rlwe.Ciphertext {
 		out := ct.CopyNew()
@@ -305,15 +306,27 @@ func TestFastLogN13S2CLegacyEvalModBoundaryDoesNotPromoteQ3(t *testing.T) {
 		}
 		return out
 	}
+	cleanPrefix, poisonedPrefix := ctReal.CopyNew(), poison(ctReal)
+	firstMatrix := ltcommon.LinearTransformation(eval.S2CDFTMatrix.Matrices[0])
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(cleanPrefix, firstMatrix, rows, cleanPrefix))
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(poisonedPrefix, firstMatrix, rows, poisonedPrefix))
+	for component := range cleanPrefix.Value {
+		for row := 0; row < 3; row++ {
+			require.Equal(t, cleanPrefix.Value[component].Coeffs[row], poisonedPrefix.Value[component].Coeffs[row], "S2C q3 poison must not affect q%d component=%d", row, component)
+		}
+		require.NotEqual(t, cleanPrefix.Value[component].Coeffs[3], poisonedPrefix.Value[component].Coeffs[3], "the production S2C transform must consume q3 component=%d", component)
+	}
 	cleanOut, err := eval.SlotsToCoeffs(ctReal, ctImag)
 	require.NoError(t, err)
-	poisonedOut, err := eval.SlotsToCoeffs(poison(ctReal), poison(ctImag))
+	outputRows, err := fastckks.QPrefixWidth(cleanOut.Level())
 	require.NoError(t, err)
-	require.Equal(t, cleanOut.Level(), poisonedOut.Level())
-	require.Equal(t, cleanOut.Scale, poisonedOut.Scale)
 	for component := range cleanOut.Value {
-		for row := 0; row < min(legacyRows, cleanOut.Level()+1); row++ {
-			require.Equal(t, cleanOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "production S2C read poisoned q3 component=%d q%d", component, row)
+		require.GreaterOrEqual(t, len(cleanOut.Value[component].Coeffs), cleanOut.Level()+1)
+		for row := 0; row < outputRows; row++ {
+			require.Len(t, cleanOut.Value[component].Coeffs[row], params.BootstrappingParameters.N())
+		}
+		for row := outputRows; row <= cleanOut.Level(); row++ {
+			require.Empty(t, cleanOut.Value[component].Coeffs[row], "S2C may contract q3 only when the logical Level contracts")
 		}
 	}
 }

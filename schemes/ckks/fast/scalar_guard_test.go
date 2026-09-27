@@ -144,3 +144,56 @@ func TestMulThenAddOneBitScalarGuardRestoresNativeMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestCenteredRoundedDivideByTwoQ0123MatchesIndependentCRTOracle(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            4,
+		LogQ:            []int{55, 39, 40, 40, 45},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	eval := NewEvaluator(params)
+	const level, rows = 3, 4
+	ct := NewCiphertext(params, 1, level)
+	ct.IsNTT, ct.IsMontgomery = true, true
+	ct.Scale = rlwe.NewScale(1 << 30)
+	inputs := [][]int64{
+		{0, 1, -1, 2, -2, 3, -3, 5, -5, 7, -7, 9, -9, 11, -11, 13},
+		{17, -17, 19, -19, 23, -23, 29, -29, 31, -31, 37, -37, 41, -41, 43, -43},
+	}
+	for component := range ct.Value {
+		coeff := params.RingQ().AtLevel(level).NewPoly()
+		for i, value := range inputs[component] {
+			for row := 0; row < rows; row++ {
+				q := params.Q()[row]
+				coeff.Coeffs[row][i] = new(big.Int).Mod(big.NewInt(value), new(big.Int).SetUint64(q)).Uint64()
+			}
+		}
+		for row := 0; row < rows; row++ {
+			params.RingQ().SubRings[row].NTT(coeff.Coeffs[row], ct.Value[component].Coeffs[row])
+			params.RingQ().SubRings[row].MForm(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
+		}
+	}
+	require.NoError(t, eval.contractCenteredRoundedDivideByTwoRows(ct, rows))
+	for component := range ct.Value {
+		coeff := params.RingQ().AtLevel(level).NewPoly()
+		for row := 0; row < rows; row++ {
+			params.RingQ().SubRings[row].IMForm(ct.Value[component].Coeffs[row], coeff.Coeffs[row])
+			params.RingQ().SubRings[row].INTT(coeff.Coeffs[row], coeff.Coeffs[row])
+		}
+		for coefficient, input := range inputs[component] {
+			want := new(big.Int).SetInt64(input)
+			negative := want.Sign() < 0
+			want.Abs(want)
+			want.Add(want, big.NewInt(1)).Rsh(want, 1)
+			if negative {
+				want.Neg(want)
+			}
+			for row := 0; row < rows; row++ {
+				q := new(big.Int).SetUint64(params.Q()[row])
+				wantResidue := new(big.Int).Mod(new(big.Int).Set(want), q).Uint64()
+				require.Equal(t, wantResidue, coeff.Coeffs[row][coefficient], "component=%d coefficient=%d q%d", component, coefficient, row)
+			}
+		}
+	}
+}

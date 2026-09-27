@@ -22,7 +22,7 @@ func TestFastRescaleMatchesBigIntCenteredCRTOracleAtEveryPrefixWidth(t *testing.
 			fastIn, standardIn := makeRescaleOracleInputs(params, level, sourceRows, values)
 			fastOut := NewCiphertext(params, fastIn.Degree(), level-1)
 			standardOut := ckks.NewCiphertext(params, standardIn.Degree(), level-1)
-			require.NoError(t, fastEval.rescaleNQPrefix(fastIn, 1, sourceRows, fastOut))
+			require.NoError(t, fastEval.RescaleQPrefixRows(fastIn, sourceRows, fastOut))
 			require.NoError(t, standardEval.Rescale(standardIn, standardOut))
 			require.Equal(t, level-1, fastOut.Level())
 			require.Equal(t, standardOut.Level(), fastOut.Level())
@@ -62,7 +62,7 @@ func TestFastRescaleToMatchesSequentialBigIntOracleAcrossContractions(t *testing
 				standardOut := ckks.NewCiphertext(params, standardIn.Degree(), tc.level)
 				var err error
 				if authority.explicit {
-					err = fastEval.rescaleToNQPrefix(fastIn, minScale, authority.rows, fastOut)
+					err = fastEval.RescaleToQPrefixRows(fastIn, minScale, authority.rows, fastOut)
 				} else {
 					err = fastEval.RescaleTo(fastIn, minScale, fastOut)
 				}

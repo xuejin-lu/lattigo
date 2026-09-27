@@ -17,6 +17,20 @@ func (eval *Evaluator) MulThenAddOneBitScalarGuard(op0 *rlwe.Ciphertext, op1 rlw
 	if eval == nil || op0 == nil || opOut == nil {
 		return errors.New("Fast one-bit scalar guard evaluator and operands cannot be nil")
 	}
+	level := opOut.Level()
+	if op0.Level() < level {
+		level = op0.Level()
+	}
+	return eval.MulThenAddOneBitScalarGuardQPrefixRows(op0, op1, maintainedLimbCount(&eval.Parameters, level), opOut)
+}
+
+// MulThenAddOneBitScalarGuardQPrefixRows performs the explicit guarded scalar
+// accumulation and centered contraction over exactly rows authoritative Q
+// prefix residues.
+func (eval *Evaluator) MulThenAddOneBitScalarGuardQPrefixRows(op0 *rlwe.Ciphertext, op1 rlwe.Operand, rows int, opOut *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || opOut == nil {
+		return errors.New("Fast one-bit scalar guard evaluator and operands cannot be nil")
+	}
 	if opOut.MetaData == nil || op0.MetaData == nil {
 		return errors.New("Fast one-bit scalar guard metadata cannot be nil")
 	}
@@ -29,6 +43,23 @@ func (eval *Evaluator) MulThenAddOneBitScalarGuard(op0 *rlwe.Ciphertext, op1 rlw
 	if opOut.Degree() != op0.Degree() {
 		return errors.New("Fast one-bit scalar guard requires matching degrees")
 	}
+	level := opOut.Level()
+	if op0.Level() < level {
+		level = op0.Level()
+	}
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
+	for d := range opOut.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), opOut.Level(), rows, opOut.Value[d]); err != nil {
+			return err
+		}
+	}
+	for d := range op0.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), op0.Level(), rows, op0.Value[d]); err != nil {
+			return err
+		}
+	}
 
 	nativeLevel := opOut.Level()
 	nativeDegree := opOut.Degree()
@@ -36,21 +67,21 @@ func (eval *Evaluator) MulThenAddOneBitScalarGuard(op0 *rlwe.Ciphertext, op1 rlw
 	nativeMontgomery := opOut.IsMontgomery
 	nativeMeta := *opOut.MetaData
 
-	if err := eval.MulIntegerMaintained(opOut, big.NewInt(2), opOut); err != nil {
+	if err := eval.MulIntegerQPrefixRows(opOut, big.NewInt(2), rows, opOut); err != nil {
 		return fmtGuardError("promote accumulator", err)
 	}
 	nativeScale := opOut.Scale
 	opOut.Scale = nativeScale.Mul(rlwe.NewScale(2))
 	guardedScale := opOut.Scale
 
-	if err := eval.MulThenAdd(op0, op1, opOut); err != nil {
+	if err := eval.MulThenAddQPrefixRows(op0, op1, rows, opOut); err != nil {
 		return fmtGuardError("scalar MulThenAdd", err)
 	}
 	if opOut.Level() != nativeLevel || opOut.Degree() != nativeDegree || opOut.IsNTT != nativeNTT || opOut.IsMontgomery != nativeMontgomery {
 		return errors.New("Fast one-bit scalar guard changed ciphertext structure before contraction")
 	}
 
-	if err := eval.contractCenteredRoundedDivideByTwo(opOut); err != nil {
+	if err := eval.contractCenteredRoundedDivideByTwoRows(opOut, rows); err != nil {
 		return fmtGuardError("centered rounded divide by two", err)
 	}
 	if opOut.Level() != nativeLevel || opOut.Degree() != nativeDegree || opOut.IsNTT != nativeNTT || opOut.IsMontgomery != nativeMontgomery {
@@ -71,42 +102,64 @@ func fmtGuardError(operation string, err error) error {
 }
 
 func (eval *Evaluator) contractCenteredRoundedDivideByTwo(ct *rlwe.Ciphertext) error {
+	if eval == nil || ct == nil {
+		return errors.New("Fast centered divide-by-two operands cannot be nil")
+	}
+	return eval.contractCenteredRoundedDivideByTwoRows(ct, maintainedLimbCount(&eval.Parameters, ct.Level()))
+}
+
+func (eval *Evaluator) contractCenteredRoundedDivideByTwoRows(ct *rlwe.Ciphertext, rows int) error {
 	if eval == nil || ct == nil || ct.MetaData == nil {
 		return errors.New("Fast centered divide-by-two operands cannot be nil")
 	}
 	if !ct.IsNTT || len(ct.Value) == 0 || ct.Level() < 1 {
 		return errors.New("Fast centered divide-by-two requires NTT q0/q1 ciphertexts")
 	}
-	if err := validateFastRescaleRange(eval.Parameters.RingQ().SubRings[0].Modulus, eval.Parameters.RingQ().SubRings[1].Modulus, 1<<32); err != nil {
+	if err := eval.validateExplicitRows(ct.Level(), rows); err != nil {
 		return err
 	}
 
 	ringQ := eval.Parameters.RingQ()
 	scratch := &eval.rescaleScratch
 	for component := range ct.Value {
-		if err := FastPartialINTT(ringQ, ct.Value[component], scratch.coeff); err != nil {
+		if err := prefixToCoefficientRows(ringQ, ct.Value[component], rows, true, ct.IsMontgomery, scratch.coeff); err != nil {
 			return err
 		}
-		if ct.IsMontgomery {
-			for limb := 0; limb < 2; limb++ {
-				ringQ.SubRings[limb].IMForm(scratch.coeff.Coeffs[limb], scratch.coeff.Coeffs[limb])
+		for k := 0; k < ringQ.N(); k++ {
+			var residues [MaxQPrefixWidth]uint64
+			for row := 0; row < rows; row++ {
+				residues[row] = scratch.coeff.Coeffs[row][k]
+			}
+			value := reconstructQPrefix(rows, residues, scratch)
+			magnitude, negative := centeredQPrefix(value, scratch.modulus[rows-1], scratch.half[rows-1])
+			magnitude = roundedMagnitude192ByTwo(magnitude)
+			for row := 0; row < rows; row++ {
+				scratch.result.Coeffs[row][k] = signedResidue192(magnitude, negative, scratch.q[row])
 			}
 		}
-		for k := 0; k < ringQ.N(); k++ {
-			xLo, xHi := crtQ01(scratch.coeff.Coeffs[0][k], scratch.coeff.Coeffs[1][k], scratch.q0, scratch.q1, scratch.q0InverseModQ1)
-			magnitudeLo, magnitudeHi, negative := roundedMagnitude128ByTwo(xLo, xHi, scratch.q01Lo, scratch.q01Hi, scratch.halfLo, scratch.halfHi)
-			scratch.result.Coeffs[0][k] = signedResidue128(magnitudeLo, magnitudeHi, negative, scratch.q0)
-			scratch.result.Coeffs[1][k] = signedResidue128(magnitudeLo, magnitudeHi, negative, scratch.q1)
-		}
-		ringQ.SubRings[0].NTT(scratch.result.Coeffs[0], ct.Value[component].Coeffs[0])
-		ringQ.SubRings[1].NTT(scratch.result.Coeffs[1], ct.Value[component].Coeffs[1])
-		if ct.IsMontgomery {
-			for limb := 0; limb < 2; limb++ {
-				ringQ.SubRings[limb].MForm(ct.Value[component].Coeffs[limb], ct.Value[component].Coeffs[limb])
+		for row := 0; row < rows; row++ {
+			ringQ.SubRings[row].NTT(scratch.result.Coeffs[row], ct.Value[component].Coeffs[row])
+			if ct.IsMontgomery {
+				ringQ.SubRings[row].MForm(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
 			}
 		}
 	}
 	return nil
+}
+
+func roundedMagnitude192ByTwo(value uint192) uint192 {
+	quotient := uint192{
+		lo:  (value.lo >> 1) | (value.mid << 63),
+		mid: (value.mid >> 1) | (value.hi << 63),
+		hi:  value.hi >> 1,
+	}
+	if value.lo&1 != 0 {
+		var carry uint64
+		quotient.lo, carry = bits.Add64(quotient.lo, 1, 0)
+		quotient.mid, carry = bits.Add64(quotient.mid, 0, carry)
+		quotient.hi, _ = bits.Add64(quotient.hi, 0, carry)
+	}
+	return quotient
 }
 
 func roundedMagnitude128ByTwo(xLo, xHi, qLo, qHi, halfLo, halfHi uint64) (uint64, uint64, bool) {

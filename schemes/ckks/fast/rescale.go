@@ -171,6 +171,22 @@ func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOu
 	return eval.rescaleToNQPrefix(op0, minScale, sourceRows, opOut)
 }
 
+// RescaleToQPrefixRows applies the Standard RescaleTo stopping rule using an
+// explicit source-prefix authority. Intermediate and final outputs contract
+// only according to their logical levels.
+func (eval *Evaluator) RescaleToQPrefixRows(op0 *rlwe.Ciphertext, minScale rlwe.Scale, rows int, opOut *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || opOut == nil {
+		return errors.New("Fast RescaleTo evaluator and ciphertexts cannot be nil")
+	}
+	if op0.Level() < 1 {
+		return errors.New("cannot RescaleTo: input Ciphertext already at level 0")
+	}
+	if err := eval.validateExplicitRows(op0.Level(), rows); err != nil {
+		return err
+	}
+	return eval.rescaleToNQPrefix(op0, minScale, rows, opOut)
+}
+
 // rescaleToNQPrefix applies RescaleTo's Standard stopping rule while keeping
 // source authority explicit. Production wrappers pass the current legacy
 // width; same-package Q-prefix tests and later migrated owners may pass 4.

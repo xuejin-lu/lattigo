@@ -174,7 +174,7 @@ func TestFastMod1MatchesStandardCosDiscrete(t *testing.T) {
 func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            13,
-		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
+		LogQ:            []int{56, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
 		LogDefaultScale: 45,
 	})
 	require.NoError(t, err)
@@ -206,9 +206,47 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	standardEval := ckks.NewEvaluator(params, rlwe.NewMemEvaluationKeySet(kgen.GenRelinearizationKeyNew(sk)))
 	standard, err := NewEvaluator(standardEval, ckkspolynomial.NewEvaluator(params, standardEval), mod1Params).EvaluateNew(standardInput)
 	require.NoError(t, err)
-	fastPolynomialEval := ckkspolynomial.NewFastEvaluator(params, nil)
-	fast, err := NewFastEvaluator(fastckks.NewEvaluator(params), fastPolynomialEval, mod1Params).EvaluateNew(fastInput)
+	fastCKKSEval := fastckks.NewEvaluator(params)
+	var capacityCheckpoints []fastckks.QPrefixCapacitySnapshot
+	fastCKKSEval.SetQPrefixCapacityObserver(func(snapshot fastckks.QPrefixCapacitySnapshot) error {
+		capacityCheckpoints = append(capacityCheckpoints, snapshot)
+		return nil
+	})
+	fastPolynomialEval := ckkspolynomial.NewFastEvaluator(params, fastCKKSEval)
+	fast, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNew(fastInput)
 	require.NoError(t, err)
+	checkpointNames := make(map[string]bool, len(capacityCheckpoints))
+	for _, checkpoint := range capacityCheckpoints {
+		t.Logf("capacity name=%s L=%d rows=%d scale=%s degree=%d max_abs=%v prefix_product=%s strict_2B_lt_SQ=%t", checkpoint.Name, checkpoint.Level, checkpoint.Rows, checkpoint.Scale, checkpoint.Degree, checkpoint.MaxAbs, checkpoint.PrefixProduct, checkpoint.StrictFit)
+		checkpointNames[checkpoint.Name] = true
+		require.True(t, checkpoint.StrictFit, "%s exact centered component bound must satisfy strict Q-prefix capacity", checkpoint.Name)
+		require.Equal(t, 4, checkpoint.Rows, "%s must retain q0123 on the accepted P93 path", checkpoint.Name)
+		require.Len(t, checkpoint.MaxAbs, checkpoint.Degree+1, "%s must report every ciphertext component", checkpoint.Name)
+		product, err := fastckks.QPrefixProduct(params.Q(), checkpoint.Level)
+		require.NoError(t, err)
+		require.Equal(t, product.String(), checkpoint.PrefixProduct)
+	}
+	for _, name := range []string{
+		"evalmod-entry", "generated-power-2",
+		"ps-baby-0", "ps-baby-1", "ps-baby-2", "ps-baby-3", "ps-baby-4",
+		"ps-giant-0", "ps-giant-1", "ps-giant-2", "ps-giant-3",
+		"polynomial-before-final-rescale", "polynomial-after-final-rescale",
+		"double-angle-0-before", "double-angle-0-after-rescale",
+		"double-angle-1-before", "double-angle-1-after-rescale",
+		"double-angle-2-before", "double-angle-2-after-rescale", "evalmod-output",
+	} {
+		require.True(t, checkpointNames[name], "missing required P93 checkpoint %s", name)
+	}
+	fastCKKSEval.SetQPrefixCapacityObserver(nil)
+	poisonedInput := fastInput.CopyNew()
+	q3 := params.Q()[3]
+	for i, residue := range poisonedInput.Value[0].Coeffs[3] {
+		poisonedInput.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
+	}
+	poisonedOutput, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNew(poisonedInput)
+	require.NoError(t, err)
+	require.Equal(t, fast.Level(), poisonedOutput.Level())
+	require.NotEqual(t, fast.Value[0].Coeffs[3], poisonedOutput.Value[0].Coeffs[3], "EvalMod output q3 must follow the q3 input history")
 	guardEvidence := fastPolynomialEval.LastGuardSelectionEvidence()
 	require.Zero(t, guardEvidence.Operations)
 	require.Equal(t, -1, guardEvidence.PlanIndex)
@@ -220,6 +258,17 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	require.True(t, standard.Scale.Equal(fast.Scale))
 	require.True(t, fast.IsNTT)
 	require.True(t, fast.IsMontgomery)
+	outputRows, err := fastckks.QPrefixWidth(fast.Level())
+	require.NoError(t, err)
+	require.Equal(t, 4, outputRows)
+	for component := range fast.Value {
+		for row := 0; row < outputRows; row++ {
+			require.Len(t, fast.Value[component].Coeffs[row], params.N())
+		}
+		for row := outputRows; row <= fast.Level(); row++ {
+			require.Empty(t, fast.Value[component].Coeffs[row])
+		}
+	}
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb < 2; limb++ {
 			require.Equal(t, fastBefore.Value[d].Coeffs[limb], fastInput.Value[d].Coeffs[limb])
@@ -266,8 +315,10 @@ func TestFastMod1IgnoresDormantResiduesAndPreservesInput(t *testing.T) {
 	input := newFastMod1PlaintextInput(t, params, mod1Params.LevelQ)
 	before := input.CopyNew()
 	poisoned := input.CopyNew()
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
 	for d := range poisoned.Value {
-		for limb := 2; limb <= poisoned.Level(); limb++ {
+		for limb := rows; limb <= poisoned.Level(); limb++ {
 			for i := range poisoned.Value[d].Coeffs[limb] {
 				poisoned.Value[d].Coeffs[limb][i] = ^uint64(0) - uint64(i+limb+d)
 			}
@@ -280,7 +331,9 @@ func TestFastMod1IgnoresDormantResiduesAndPreservesInput(t *testing.T) {
 	poisonedGot, err := eval.EvaluateNew(poisoned)
 	require.NoError(t, err)
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		outputRows, err := fastckks.QPrefixWidth(got.Level())
+		require.NoError(t, err)
+		for limb := 0; limb < outputRows; limb++ {
 			require.Equal(t, got.Value[d].Coeffs[limb], poisonedGot.Value[d].Coeffs[limb])
 		}
 	}

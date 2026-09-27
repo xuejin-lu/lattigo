@@ -48,18 +48,53 @@ func (eval *Evaluator) SubNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (*rlwe.Cip
 }
 
 func (eval *Evaluator) addSub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext, sub bool) error {
+	if eval == nil || op0 == nil || opOut == nil {
+		return errors.New("Fast evaluator and operands cannot be nil")
+	}
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	level := utils.Min(op0.Level(), opOut.Level())
+	return eval.addSubRows(op0, op1, opOut, sub, maintainedLimbCount(&eval.Parameters, level))
+}
+
+// AddScalarQPrefixRows adds a scalar to a ciphertext over exactly rows
+// authoritative Q-prefix residues.
+func (eval *Evaluator) AddScalarQPrefixRows(op0 *rlwe.Ciphertext, scalar rlwe.Operand, rows int, opOut *rlwe.Ciphertext) error {
+	return eval.addSubScalarQPrefixRows(op0, scalar, rows, opOut, false)
+}
+
+// SubScalarQPrefixRows subtracts a scalar from a ciphertext over exactly rows
+// authoritative Q-prefix residues.
+func (eval *Evaluator) SubScalarQPrefixRows(op0 *rlwe.Ciphertext, scalar rlwe.Operand, rows int, opOut *rlwe.Ciphertext) error {
+	return eval.addSubScalarQPrefixRows(op0, scalar, rows, opOut, true)
+}
+
+func (eval *Evaluator) addSubScalarQPrefixRows(op0 *rlwe.Ciphertext, scalar rlwe.Operand, rows int, opOut *rlwe.Ciphertext, sub bool) error {
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	if err := eval.validateExplicitRows(utils.Min(op0.Level(), opOut.Level()), rows); err != nil {
+		return err
+	}
+	return eval.addSubRows(op0, scalar, opOut, sub, rows)
+}
+
+func (eval *Evaluator) addSubRows(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext, sub bool, rows int) error {
 	if err := eval.validateUnary(op0, opOut); err != nil {
 		return err
 	}
 	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
-		return eval.addSubElement(op0, el.El(), opOut, sub)
+		return eval.addSubElementRows(op0, el.El(), opOut, sub, rows)
 	}
 	c, err := eval.scalar(op1)
 	if err != nil {
 		return err
 	}
 	level := utils.Min(op0.Level(), opOut.Level())
-	rows := maintainedLimbCount(&eval.Parameters, level)
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
 	for d := range op0.Value {
 		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
 			return fmt.Errorf("input component %d: %w", d, err)
@@ -91,6 +126,14 @@ func (eval *Evaluator) addSub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlw
 }
 
 func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, sub bool) error {
+	if op0 == nil || op1 == nil || opOut == nil {
+		return errors.New("Fast Add/Sub operands cannot be nil")
+	}
+	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
+	return eval.addSubElementRows(op0, op1, opOut, sub, maintainedLimbCount(&eval.Parameters, level))
+}
+
+func (eval *Evaluator) addSubElementRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, sub bool, rows int) error {
 	if err := eval.validateBinary(op0.El(), op1, opOut); err != nil {
 		return err
 	}
@@ -99,7 +142,9 @@ func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[rin
 	}
 	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
 	maxDegree, minDegree := utils.Max(op0.Degree(), op1.Degree()), utils.Min(op0.Degree(), op1.Degree())
-	rows := maintainedLimbCount(&eval.Parameters, level)
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
 	for d := range op0.Value {
 		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
 			return fmt.Errorf("op0 component %d: %w", d, err)
@@ -287,6 +332,19 @@ func (eval *Evaluator) Relinearize(op0, opOut *rlwe.Ciphertext) error {
 
 // MulThenAdd adds the product directly into q0/q1 output storage.
 func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || opOut == nil {
+		return errors.New("Fast evaluator and operands cannot be nil")
+	}
+	level := utils.Min(op0.Level(), opOut.Level())
+	if el, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+		level = utils.Min(level, el.Level())
+	}
+	return eval.MulThenAddQPrefixRows(op0, op1, maintainedLimbCount(&eval.Parameters, level), opOut)
+}
+
+// MulThenAddQPrefixRows accumulates a scalar or RLWE product over exactly
+// rows authoritative Q-prefix residues.
+func (eval *Evaluator) MulThenAddQPrefixRows(op0 *rlwe.Ciphertext, op1 rlwe.Operand, rows int, opOut *rlwe.Ciphertext) error {
 	if err := eval.validateUnary(op0, opOut); err != nil {
 		return err
 	}
@@ -304,7 +362,9 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			return errors.New("Fast MulThenAdd RLWE requires output scale equal to product scale")
 		}
 		level := utils.Min(utils.Min(op0.Level(), el.Level()), opOut.Level())
-		rows := maintainedLimbCount(&eval.Parameters, level)
+		if err := eval.validateExplicitRows(level, rows); err != nil {
+			return err
+		}
 		Resize(opOut, opOut.Degree(), level, eval.Parameters.N())
 		return eval.mulElementThenAdd(op0, el.El(), opOut, rows)
 	}
@@ -316,6 +376,14 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		return errors.New("Fast scalar MulThenAdd requires matching input/output degrees")
 	}
 	level := utils.Min(op0.Level(), opOut.Level())
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
+	for d := range op0.Value {
+		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
+			return fmt.Errorf("input component %d: %w", d, err)
+		}
+	}
 	source := op0.Value
 	var scale rlwe.Scale
 	if cmp := op0.Scale.Cmp(opOut.Scale); cmp == 0 {
@@ -326,7 +394,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			// must not also change the multiplicand used by the fused add.
 			if op0 == opOut {
 				for d := range op0.Value {
-					copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], eval.nttScratch[d])
+					copyPrefixRowsUnchecked(rows, op0.Value[d], eval.nttScratch[d])
 				}
 				source = eval.nttScratch[:len(op0.Value)]
 			}
@@ -334,7 +402,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			if err != nil {
 				return err
 			}
-			if err = eval.mulScalarAtScale(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut); err != nil {
+			if err = eval.mulScalarAtScaleRows(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut, rows); err != nil {
 				return err
 			}
 			opOut.Scale = opOut.Scale.Mul(scale)
@@ -350,7 +418,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		if ratio.Sign() <= 0 {
 			return errors.New("invalid Fast MulThenAdd scale promotion ratio")
 		}
-		if err := eval.MulIntegerMaintained(opOut, ratio, opOut); err != nil {
+		if err := eval.MulIntegerQPrefixRows(opOut, ratio, rows, opOut); err != nil {
 			return err
 		}
 		opOut.Scale = op0.Scale
@@ -359,7 +427,7 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 		} else {
 			if op0 == opOut {
 				for d := range op0.Value {
-					copyMaintained(eval.Parameters.RingQ().AtLevel(level), op0.Value[d], eval.nttScratch[d])
+					copyPrefixRowsUnchecked(rows, op0.Value[d], eval.nttScratch[d])
 				}
 				source = eval.nttScratch[:len(op0.Value)]
 			}
@@ -367,13 +435,12 @@ func (eval *Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 			if err != nil {
 				return err
 			}
-			if err = eval.mulScalarAtScale(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut); err != nil {
+			if err = eval.mulScalarAtScaleRows(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut, rows); err != nil {
 				return err
 			}
 			opOut.Scale = opOut.Scale.Mul(scale)
 		}
 	}
-	rows := maintainedLimbCount(&eval.Parameters, level)
 	values, err := eval.scalarNTTRows(c, &scale.Value, false, level, rows)
 	if err != nil {
 		return err

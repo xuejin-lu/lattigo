@@ -450,6 +450,156 @@ func TestPrefixCompleteTruncateAndDegreeOneMulFormulas(t *testing.T) {
 	}
 }
 
+func TestEvaluatorExplicitQPrefixRowsArithmeticBoundaries(t *testing.T) {
+	params := testFastCKKSParameters(t)
+	ringQ := params.RingQ()
+	eval := NewEvaluator(params)
+	const level, rows = 3, 4
+	a, b := NewCiphertext(params, 1, level), NewCiphertext(params, 1, level)
+	fillPrefixCiphertext(a, ringQ, 307)
+	fillPrefixCiphertext(b, ringQ, 401)
+	for _, ct := range []*rlwe.Ciphertext{a, b} {
+		for component := range ct.Value {
+			for row := 0; row < rows; row++ {
+				ringQ.SubRings[row].MForm(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
+			}
+		}
+		ct.IsNTT, ct.IsMontgomery = true, true
+		ct.Scale = rlwe.NewScale(1)
+	}
+
+	for _, operation := range []struct {
+		name string
+		call func(*rlwe.Ciphertext, *rlwe.Ciphertext, *rlwe.Ciphertext) error
+		sub  bool
+	}{
+		{"add", func(x, y, out *rlwe.Ciphertext) error { return eval.AddQPrefixRows(x, y, out, rows) }, false},
+		{"sub", func(x, y, out *rlwe.Ciphertext) error { return eval.SubQPrefixRows(x, y, out, rows) }, true},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			out := NewCiphertext(params, 1, level)
+			fillPrefixCiphertext(out, ringQ, 503)
+			require.NoError(t, operation.call(a, b, out))
+			for component := 0; component <= 1; component++ {
+				for row := 0; row < rows; row++ {
+					want := make([]uint64, params.N())
+					if operation.sub {
+						ringQ.SubRings[row].Sub(a.Value[component].Coeffs[row], b.Value[component].Coeffs[row], want)
+					} else {
+						ringQ.SubRings[row].Add(a.Value[component].Coeffs[row], b.Value[component].Coeffs[row], want)
+					}
+					require.Equal(t, want, out.Value[component].Coeffs[row], "component=%d q%d", component, row)
+				}
+			}
+		})
+	}
+
+	constant := bignum.ToComplex(int64(5), params.EncodingPrecision())
+	scalarValues, err := eval.scalarNTTRows(constant, &a.Scale.Value, a.IsMontgomery, level, rows)
+	require.NoError(t, err)
+	for _, operation := range []struct {
+		name string
+		call func(*rlwe.Ciphertext, rlwe.Operand, int, *rlwe.Ciphertext) error
+		sub  bool
+	}{
+		{"add-scalar", eval.AddScalarQPrefixRows, false},
+		{"sub-scalar", eval.SubScalarQPrefixRows, true},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			out := a.CopyNew()
+			require.NoError(t, operation.call(a, int64(5), rows, out))
+			for row := 0; row < rows; row++ {
+				s := ringQ.SubRings[row]
+				half := params.N() >> 1
+				want := append([]uint64(nil), a.Value[0].Coeffs[row]...)
+				if operation.sub {
+					s.SubScalar(want[:half], scalarValues[row][0], want[:half])
+					s.SubScalar(want[half:], scalarValues[row][1], want[half:])
+				} else {
+					s.AddScalar(want[:half], scalarValues[row][0], want[:half])
+					s.AddScalar(want[half:], scalarValues[row][1], want[half:])
+				}
+				require.Equal(t, want, out.Value[0].Coeffs[row], "q%d scalar component=0", row)
+				require.Equal(t, a.Value[1].Coeffs[row], out.Value[1].Coeffs[row], "scalar operand must leave c1 unchanged q%d", row)
+			}
+		})
+	}
+
+	product, relinProduct := NewCiphertext(params, 2, level), NewCiphertext(params, 1, level)
+	product.IsNTT, product.IsMontgomery = true, true
+	relinProduct.IsNTT, relinProduct.IsMontgomery = true, true
+	require.NoError(t, eval.MulElementQPrefixRows(a, b.El(), rows, product))
+	require.NoError(t, eval.MulRelinElementQPrefixRows(a, b.El(), rows, relinProduct))
+	for row := 0; row < rows; row++ {
+		subring := ringQ.SubRings[row]
+		want0, want1a, want1b, want2 := make([]uint64, params.N()), make([]uint64, params.N()), make([]uint64, params.N()), make([]uint64, params.N())
+		subring.MulCoeffsMontgomery(a.Value[0].Coeffs[row], b.Value[0].Coeffs[row], want0)
+		subring.MulCoeffsMontgomery(a.Value[0].Coeffs[row], b.Value[1].Coeffs[row], want1a)
+		subring.MulCoeffsMontgomery(a.Value[1].Coeffs[row], b.Value[0].Coeffs[row], want1b)
+		subring.Add(want1a, want1b, want1a)
+		subring.MulCoeffsMontgomery(a.Value[1].Coeffs[row], b.Value[1].Coeffs[row], want2)
+		require.Equal(t, want0, product.Value[0].Coeffs[row], "product c0 q%d", row)
+		require.Equal(t, want1a, product.Value[1].Coeffs[row], "product c1 q%d", row)
+		require.Equal(t, want2, product.Value[2].Coeffs[row], "product c2 q%d", row)
+		require.Equal(t, want0, relinProduct.Value[0].Coeffs[row], "relinearized c0 q%d", row)
+		require.Equal(t, want1a, relinProduct.Value[1].Coeffs[row], "relinearized c1 q%d", row)
+	}
+	truncated := NewCiphertext(params, 1, level)
+	fillPrefixCiphertext(truncated, ringQ, 601)
+	truncated.IsNTT, truncated.IsMontgomery = true, true
+	require.NoError(t, eval.RelinearizeQPrefixRows(product, truncated, rows))
+	for component := 0; component <= 1; component++ {
+		for row := 0; row < rows; row++ {
+			require.Equal(t, product.Value[component].Coeffs[row], truncated.Value[component].Coeffs[row])
+		}
+	}
+
+	accumulator := NewCiphertext(params, 2, level)
+	fillPrefixCiphertext(accumulator, ringQ, 701)
+	for component := range accumulator.Value {
+		for row := 0; row < rows; row++ {
+			ringQ.SubRings[row].MForm(accumulator.Value[component].Coeffs[row], accumulator.Value[component].Coeffs[row])
+		}
+	}
+	accumulator.IsNTT, accumulator.IsMontgomery = true, true
+	accumulator.Scale = a.Scale.Mul(b.Scale)
+	wantAccum := accumulator.CopyNew()
+	for row := 0; row < rows; row++ {
+		subring := ringQ.SubRings[row]
+		subring.MulCoeffsMontgomeryThenAdd(a.Value[0].Coeffs[row], b.Value[0].Coeffs[row], wantAccum.Value[0].Coeffs[row])
+		subring.MulCoeffsMontgomeryThenAdd(a.Value[0].Coeffs[row], b.Value[1].Coeffs[row], wantAccum.Value[1].Coeffs[row])
+		subring.MulCoeffsMontgomeryThenAdd(a.Value[1].Coeffs[row], b.Value[0].Coeffs[row], wantAccum.Value[1].Coeffs[row])
+		subring.MulCoeffsMontgomeryThenAdd(a.Value[1].Coeffs[row], b.Value[1].Coeffs[row], wantAccum.Value[2].Coeffs[row])
+	}
+	require.NoError(t, eval.MulThenAddQPrefixRows(a, b, rows, accumulator))
+	for component := range wantAccum.Value {
+		for row := 0; row < rows; row++ {
+			require.Equal(t, wantAccum.Value[component].Coeffs[row], accumulator.Value[component].Coeffs[row], "MulThenAdd component=%d q%d", component, row)
+		}
+	}
+
+	scalarAccumulator := NewCiphertext(params, 1, level)
+	fillPrefixCiphertext(scalarAccumulator, ringQ, 809)
+	for component := range scalarAccumulator.Value {
+		for row := 0; row < rows; row++ {
+			ringQ.SubRings[row].MForm(scalarAccumulator.Value[component].Coeffs[row], scalarAccumulator.Value[component].Coeffs[row])
+		}
+	}
+	scalarAccumulator.IsNTT, scalarAccumulator.IsMontgomery = true, true
+	scalarAccumulator.Scale = a.Scale
+	wantScalar := scalarAccumulator.CopyNew()
+	term := NewCiphertext(params, 1, level)
+	term.IsNTT, term.IsMontgomery = true, true
+	require.NoError(t, eval.MulQPrefixRows(a, int64(3), rows, term))
+	require.NoError(t, eval.AddQPrefixRows(wantScalar, term, wantScalar, rows))
+	require.NoError(t, eval.MulThenAddQPrefixRows(a, int64(3), rows, scalarAccumulator))
+	for component := range wantScalar.Value {
+		for row := 0; row < rows; row++ {
+			require.Equal(t, wantScalar.Value[component].Coeffs[row], scalarAccumulator.Value[component].Coeffs[row], "scalar MulThenAdd component=%d q%d", component, row)
+		}
+	}
+}
+
 func TestPrefixRowValidationRejectsInvalidWidthBeforeWriting(t *testing.T) {
 	params := testFastCKKSParameters(t)
 	ringQ := params.RingQ()

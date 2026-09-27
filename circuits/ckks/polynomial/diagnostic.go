@@ -7,12 +7,13 @@ import (
 
 	commonpolynomial "github.com/tuneinsight/lattigo/v6/circuits/common/polynomial"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
 
 // DiagnosticPower is an independently-owned snapshot of one generated Fast
-// Chebyshev power. It exposes only the maintained q0/q1 ciphertext state for
-// explicit experiment diagnostics; it is not part of the evaluation hot path.
+// Chebyshev power. It exposes only the explicitly authoritative Q-prefix
+// ciphertext state for diagnostics; it is not part of the evaluation hot path.
 type DiagnosticPower struct {
 	N          int
 	Ciphertext *rlwe.Ciphertext
@@ -35,7 +36,7 @@ type DiagnosticPlan struct {
 }
 
 // DiagnosticGeneratePowers runs the same Fast power-generation schedule used
-// by Evaluate and returns maintained-state snapshots plus planner metadata.
+// by Evaluate and returns Q-prefix snapshots plus planner metadata.
 // It is an explicit reference/diagnostic boundary and never materializes
 // dormant q2...qL rows or invokes Standard/full-Q arithmetic.
 func (eval *FastEvaluator) DiagnosticGeneratePowers(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale) ([]DiagnosticPower, DiagnosticPlan, error) {
@@ -54,8 +55,12 @@ func (eval *FastEvaluator) DiagnosticGeneratePowers(input *rlwe.Ciphertext, p bi
 		return nil, DiagnosticPlan{}, fmt.Errorf("%d levels < %d log(d) -> cannot diagnose poly", input.Level(), levelsConsumed*commonPoly.Depth())
 	}
 
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	if err != nil {
+		return nil, DiagnosticPlan{}, err
+	}
 	ws := &eval.workspace
-	ws.reset(eval.Parameters, input)
+	ws.reset(eval.Parameters, input, rows)
 	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly); err != nil {
 		return nil, DiagnosticPlan{}, err
 	}
@@ -67,7 +72,11 @@ func (eval *FastEvaluator) DiagnosticGeneratePowers(input *rlwe.Ciphertext, p bi
 	sort.Ints(keys)
 	powers := make([]DiagnosticPower, 0, len(keys))
 	for _, n := range keys {
-		powers = append(powers, DiagnosticPower{N: n, Ciphertext: cloneMaintainedResult(eval.Parameters, ws.powers[n])})
+		powerRows, err := ws.rowsAt(ws.powers[n].Level())
+		if err != nil {
+			return nil, DiagnosticPlan{}, err
+		}
+		powers = append(powers, DiagnosticPower{N: n, Ciphertext: cloneQPrefixResult(eval.Parameters, ws.powers[n], powerRows)})
 	}
 
 	sim := simEvaluator{params: eval.Parameters, levelsConsumedPerRescaling: levelsConsumed}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/bits"
+	"sort"
 
 	commonpolynomial "github.com/tuneinsight/lattigo/v6/circuits/common/polynomial"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
@@ -143,8 +144,15 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 		return nil, fmt.Errorf("%d levels < %d log(d) -> cannot evaluate poly", input.Level(), levelsConsumed*commonPoly.Depth())
 	}
 
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	if err != nil {
+		return nil, fmt.Errorf("Fast polynomial input Q-prefix: %w", err)
+	}
 	ws := &eval.workspace
-	ws.reset(eval.Parameters, input)
+	ws.reset(eval.Parameters, input, rows)
+	if err := eval.Evaluator.ObserveQPrefixCapacity("polynomial-entry", input, rows); err != nil {
+		return nil, err
+	}
 
 	// Degree zero has no power-generation or PS planning work. This also keeps
 	// the bounded Fast surface well-defined for constant Chebyshev polynomials.
@@ -153,17 +161,31 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 			return nil, errors.New("Fast polynomial constant coefficient cannot be nil")
 		}
 		out := ws.babyBuffer(eval.Parameters, 0, 1, input.Level())
-		zeroMaintained(out)
+		zeroQPrefix(out, rows)
 		*out.MetaData = *input.MetaData
 		out.Scale = targetScale
-		if err := eval.Evaluator.Add(out, p.Coeffs[0], out); err != nil {
+		if err := eval.Evaluator.AddScalarQPrefixRows(out, p.Coeffs[0], rows, out); err != nil {
 			return nil, fmt.Errorf("Fast polynomial constant: %w", err)
 		}
-		return cloneMaintainedResult(eval.Parameters, out), nil
+		return cloneQPrefixResult(eval.Parameters, out, rows), nil
 	}
 
 	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly); err != nil {
 		return nil, err
+	}
+	powerKeys := make([]int, 0, len(ws.powers))
+	for power := range ws.powers {
+		powerKeys = append(powerKeys, power)
+	}
+	sort.Ints(powerKeys)
+	for _, power := range powerKeys {
+		powerRows, err := ws.rowsAt(ws.powers[power].Level())
+		if err != nil {
+			return nil, err
+		}
+		if err := eval.Evaluator.ObserveQPrefixCapacity(fmt.Sprintf("generated-power-%d", power), ws.powers[power], powerRows); err != nil {
+			return nil, err
+		}
 	}
 
 	// Reuse the common PS planner and simulation so that Fast and Standard
@@ -185,11 +207,16 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 	if err != nil {
 		return nil, err
 	}
-	return cloneMaintainedResult(eval.Parameters, result), nil
+	resultRows, err := ws.rowsAt(result.Level())
+	if err != nil {
+		return nil, err
+	}
+	return cloneQPrefixResult(eval.Parameters, result, resultRows), nil
 }
 
 type fastPolynomialWorkspace struct {
 	x1                  *rlwe.Ciphertext
+	rows                int
 	powers              map[int]*rlwe.Ciphertext
 	powerBuffers        map[int]*rlwe.Ciphertext
 	balancedLeft        *rlwe.Ciphertext
@@ -213,19 +240,31 @@ type fastBabyStep struct {
 	GuardedScalarDegree int
 }
 
-func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Ciphertext) {
+func (ws *fastPolynomialWorkspace) reset(params ckks.Parameters, input *rlwe.Ciphertext, rows int) {
 	ws.planScaleOverride = false
 	ws.guardedPlanIndex = -1
 	ws.guardedPlanCount = 0
 	ws.guardedScalarDegree = 0
 	ws.guardedOperations = 0
 	ws.guardedContraction = false
+	ws.rows = rows
 	ws.x1 = ws.ensureCiphertext(params, ws.x1, 1, input.Level())
-	copyMaintained(params, input, ws.x1)
+	copyQPrefix(params, input, ws.x1, rows)
 	for key := range ws.powers {
 		delete(ws.powers, key)
 	}
 	ws.powers[1] = ws.x1
+}
+
+func (ws *fastPolynomialWorkspace) rowsAt(level int) (int, error) {
+	width, err := fastckks.QPrefixWidth(level)
+	if err != nil {
+		return 0, err
+	}
+	if ws.rows == 0 || ws.rows > width {
+		return width, nil
+	}
+	return ws.rows, nil
 }
 
 func (ws *fastPolynomialWorkspace) ensureCiphertext(params ckks.Parameters, ct *rlwe.Ciphertext, degree, level int) *rlwe.Ciphertext {
@@ -392,18 +431,20 @@ func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, comm
 	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
 }
 
-// postProductQ012Schedule selects the proven LogN13 Q012 Chebyshev power
+// postProductLogN13Schedule selects the proven LogN13 Chebyshev power
 // schedule. In this bounded profile the generated power must keep the full
 // product scale through the Chebyshev recurrence and consume exactly one
 // level only after the recurrence is complete. Other profiles retain the
 // established balanced/low-scale schedule.
-func (pb *fastPowerBasis) postProductQ012Schedule(commonLevel int) bool {
+func (pb *fastPowerBasis) postProductLogN13Schedule(commonLevel int) bool {
+	q := pb.params.Q()
+	isP93Schedule := len(q) >= 3 && bits.Len64(q[0]) == 56 && bits.Len64(q[1]) <= 40 && bits.Len64(q[2]) <= 40
 	return pb.basis == bignum.Chebyshev &&
 		pb.params.LogN() == 13 &&
 		pb.params.RingType() == ring.Standard &&
 		pb.params.LevelsConsumedPerRescaling() == 1 &&
 		commonLevel >= 2 &&
-		fastckks.MaintainedLimbCount(&pb.params, commonLevel) == 3
+		isP93Schedule
 }
 
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
@@ -442,56 +483,64 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		degree = 1
 	}
 	commonLevel := utils.Min(left.Level(), right.Level())
+	rows, err := pb.workspace.rowsAt(commonLevel)
+	if err != nil {
+		return fmt.Errorf("Fast power %d Q-prefix: %w", n, err)
+	}
 	schedule, err := pb.balancedScheduleFor(left, right, commonLevel)
 	if err != nil {
 		return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
 	}
 	var out *rlwe.Ciphertext
-	postProduct := pb.postProductQ012Schedule(commonLevel)
+	postProduct := pb.postProductLogN13Schedule(commonLevel)
 	balanced := schedule.balanced && !postProduct
 	if balanced {
-		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, true)
+		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, rows, true)
 		if err != nil {
 			return fmt.Errorf("Fast power %d: copy balanced left: %w", n, err)
 		}
-		rightCopy, err := pb.workspace.balancedCopy(pb.params, right, commonLevel, false)
+		rightCopy, err := pb.workspace.balancedCopy(pb.params, right, commonLevel, rows, false)
 		if err != nil {
 			return fmt.Errorf("Fast power %d: copy balanced right: %w", n, err)
 		}
 		if lazy {
 			if leftCopy.Degree() == 2 {
-				if err := pb.eval.Relinearize(leftCopy, leftCopy); err != nil {
+				if err := pb.eval.RelinearizeQPrefixRows(leftCopy, leftCopy, rows); err != nil {
 					return fmt.Errorf("Fast power %d: relinearize balanced left: %w", n, err)
 				}
 			}
 			if rightCopy.Degree() == 2 {
-				if err := pb.eval.Relinearize(rightCopy, rightCopy); err != nil {
+				if err := pb.eval.RelinearizeQPrefixRows(rightCopy, rightCopy, rows); err != nil {
 					return fmt.Errorf("Fast power %d: relinearize balanced right: %w", n, err)
 				}
 			}
 		}
-		if err := pb.eval.MulIntegerMaintained(leftCopy, new(big.Int).SetUint64(schedule.factors.left), leftCopy); err != nil {
+		if err := pb.eval.MulIntegerQPrefixRows(leftCopy, new(big.Int).SetUint64(schedule.factors.left), rows, leftCopy); err != nil {
 			return fmt.Errorf("Fast power %d: scale balanced left: %w", n, err)
 		}
-		if err := pb.eval.MulIntegerMaintained(rightCopy, new(big.Int).SetUint64(schedule.factors.right), rightCopy); err != nil {
+		if err := pb.eval.MulIntegerQPrefixRows(rightCopy, new(big.Int).SetUint64(schedule.factors.right), rows, rightCopy); err != nil {
 			return fmt.Errorf("Fast power %d: scale balanced right: %w", n, err)
 		}
 		leftCopy.Scale = left.Scale.Mul(rlwe.NewScale(schedule.factors.left))
 		rightCopy.Scale = right.Scale.Mul(rlwe.NewScale(schedule.factors.right))
-		if err := pb.eval.Rescale(leftCopy, leftCopy); err != nil {
+		if err := pb.eval.RescaleQPrefixRows(leftCopy, rows, leftCopy); err != nil {
 			return fmt.Errorf("Fast power %d: balanced left rescale: %w", n, err)
 		}
-		if err := pb.eval.Rescale(rightCopy, rightCopy); err != nil {
+		if err := pb.eval.RescaleQPrefixRows(rightCopy, rows, rightCopy); err != nil {
 			return fmt.Errorf("Fast power %d: balanced right rescale: %w", n, err)
 		}
 		if leftCopy.Level() != commonLevel-1 || rightCopy.Level() != commonLevel-1 {
 			return fmt.Errorf("Fast power %d: balanced operands consumed unexpected levels", n)
 		}
 		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel-1, pb.values[1])
+		productRows, err := pb.workspace.rowsAt(commonLevel - 1)
+		if err != nil {
+			return fmt.Errorf("Fast power %d post-rescale Q-prefix: %w", n, err)
+		}
 		if lazy {
-			err = pb.eval.Mul(leftCopy, rightCopy, out)
+			err = pb.eval.MulElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		} else {
-			err = pb.eval.MulRelin(leftCopy, rightCopy, out)
+			err = pb.eval.MulRelinElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		}
 	} else {
 		// Low-scale inputs retain the established post-product schedule because
@@ -499,21 +548,21 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		// documented precision floor.
 		if lazy {
 			if left.Degree() == 2 {
-				if err := pb.eval.Relinearize(left, left); err != nil {
+				if err := pb.eval.RelinearizeQPrefixRows(left, left, rows); err != nil {
 					return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
 				}
 			}
 			if right.Degree() == 2 {
-				if err := pb.eval.Relinearize(right, right); err != nil {
+				if err := pb.eval.RelinearizeQPrefixRows(right, right, rows); err != nil {
 					return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
 				}
 			}
 		}
 		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
 		if lazy {
-			err = pb.eval.Mul(left, right, out)
+			err = pb.eval.MulElementQPrefixRows(left, right.El(), rows, out)
 		} else {
-			err = pb.eval.MulRelin(left, right, out)
+			err = pb.eval.MulRelinElementQPrefixRows(left, right.El(), rows, out)
 		}
 	}
 	if err != nil {
@@ -521,7 +570,11 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	}
 
 	if pb.basis == bignum.Chebyshev {
-		if err = pb.eval.Add(out, out, out); err != nil {
+		outRows, rowErr := pb.workspace.rowsAt(out.Level())
+		if rowErr != nil {
+			return fmt.Errorf("Fast power %d doubling Q-prefix: %w", n, rowErr)
+		}
+		if err = pb.eval.AddQPrefixRows(out, out, out, outRows); err != nil {
 			return fmt.Errorf("Fast power %d: double: %w", n, err)
 		}
 	}
@@ -531,7 +584,11 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		}
 		out.Scale = schedule.targetScale
 	} else if !postProduct {
-		if err := pb.eval.Rescale(out, out); err != nil {
+		outRows, rowErr := pb.workspace.rowsAt(out.Level())
+		if rowErr != nil {
+			return fmt.Errorf("Fast power %d rescale Q-prefix: %w", n, rowErr)
+		}
+		if err := pb.eval.RescaleQPrefixRows(out, outRows, out); err != nil {
 			return fmt.Errorf("Fast power %d: rescale: %w", n, err)
 		}
 	}
@@ -542,7 +599,11 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			c = -c
 		}
 		if c == 0 {
-			if err = pb.eval.Add(out, -1, out); err != nil {
+			outRows, rowErr := pb.workspace.rowsAt(out.Level())
+			if rowErr != nil {
+				return fmt.Errorf("Fast power %d subtract-one Q-prefix: %w", n, rowErr)
+			}
+			if err = pb.eval.AddScalarQPrefixRows(out, -1, outRows, out); err != nil {
 				return fmt.Errorf("Fast power %d: subtract one: %w", n, err)
 			}
 		} else {
@@ -555,7 +616,11 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		}
 	}
 	if postProduct {
-		if err := pb.eval.Rescale(out, out); err != nil {
+		outRows, rowErr := pb.workspace.rowsAt(out.Level())
+		if rowErr != nil {
+			return fmt.Errorf("Fast power %d post-product Q-prefix: %w", n, rowErr)
+		}
+		if err := pb.eval.RescaleQPrefixRows(out, outRows, out); err != nil {
 			return fmt.Errorf("Fast power %d: post-product rescale: %w", n, err)
 		}
 	}
@@ -588,11 +653,19 @@ func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fa
 			ws.guardedContraction = true
 		}
 		ws.babySteps[split-i-1] = step
+		rows, err := ws.rowsAt(step.Value.Level())
+		if err != nil {
+			return nil, err
+		}
+		if err := eval.ObserveQPrefixCapacity(fmt.Sprintf("ps-baby-%d", i), step.Value, rows); err != nil {
+			return nil, err
+		}
 	}
 	if guardFinalParent && guardedOperations != 1 {
 		return nil, fmt.Errorf("Fast polynomial guarded path selected %d final-parent scalar operations, want exactly one", guardedOperations)
 	}
 	ws.guardedOperations = guardedOperations
+	giantCheckpointIndex := 0
 	for len(ws.babySteps) != 1 {
 		if cap(ws.giantSteps) < len(ws.babySteps) {
 			ws.giantSteps = make([]int, len(ws.babySteps))
@@ -619,6 +692,14 @@ func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fa
 				if err := ws.evaluateMonomial(params, eval, even.Value, odd.Value, powers[deg]); err != nil {
 					return nil, fmt.Errorf("Fast polynomial giant step %d: %w", i, err)
 				}
+				rows, err := ws.rowsAt(odd.Value.Level())
+				if err != nil {
+					return nil, err
+				}
+				if err := eval.ObserveQPrefixCapacity(fmt.Sprintf("ps-giant-%d", giantCheckpointIndex), odd.Value, rows); err != nil {
+					return nil, err
+				}
+				giantCheckpointIndex++
 				odd.Degree = 2*deg - 1
 				ws.babySteps[i] = nil
 				i++
@@ -635,13 +716,27 @@ func (ws *fastPolynomialWorkspace) evaluatePlan(params ckks.Parameters, eval *fa
 	}
 
 	result := ws.babySteps[0].Value
+	rows, err := ws.rowsAt(result.Level())
+	if err != nil {
+		return nil, fmt.Errorf("Fast polynomial final Q-prefix: %w", err)
+	}
 	if result.Degree() == 2 {
-		if err := eval.Relinearize(result, result); err != nil {
+		if err := eval.RelinearizeQPrefixRows(result, result, rows); err != nil {
 			return nil, fmt.Errorf("Fast polynomial final relinearization: %w", err)
 		}
 	}
-	if err := eval.Rescale(result, result); err != nil {
+	if err := eval.ObserveQPrefixCapacity("polynomial-before-final-rescale", result, rows); err != nil {
+		return nil, err
+	}
+	if err := eval.RescaleQPrefixRows(result, rows, result); err != nil {
 		return nil, fmt.Errorf("Fast polynomial final rescale: %w", err)
+	}
+	resultRows, err := ws.rowsAt(result.Level())
+	if err != nil {
+		return nil, err
+	}
+	if err := eval.ObserveQPrefixCapacity("polynomial-after-final-rescale", result, resultRows); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -652,8 +747,12 @@ func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval
 	}
 	level := poly.Level
 	scale := poly.Scale
+	rows, err := ws.rowsAt(level)
+	if err != nil {
+		return nil, fmt.Errorf("baby-step Q-prefix: %w", err)
+	}
 	out := ws.babyBuffer(params, index, 1, level)
-	zeroMaintained(out)
+	zeroQPrefix(out, rows)
 	*out.MetaData = *powers[1].MetaData
 	out.Scale = scale
 
@@ -661,7 +760,7 @@ func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval
 		if poly.Coeffs[0] == nil {
 			return nil, errors.New("nil even polynomial constant coefficient")
 		}
-		if err := eval.Add(out, poly.Coeffs[0], out); err != nil {
+		if err := eval.AddScalarQPrefixRows(out, poly.Coeffs[0], rows, out); err != nil {
 			return nil, fmt.Errorf("constant: %w", err)
 		}
 	}
@@ -692,10 +791,10 @@ func (ws *fastPolynomialWorkspace) evaluateBabyStep(params ckks.Parameters, eval
 			}
 			var err error
 			if guardFinalParent && key == guardKey {
-				err = eval.MulThenAddOneBitScalarGuard(powers[key], poly.Coeffs[key], out)
+				err = eval.MulThenAddOneBitScalarGuardQPrefixRows(powers[key], poly.Coeffs[key], rows, out)
 				guardApplied = true
 			} else {
-				err = eval.MulThenAdd(powers[key], poly.Coeffs[key], out)
+				err = eval.MulThenAddQPrefixRows(powers[key], poly.Coeffs[key], rows, out)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("coefficient %d: %w", key, err)
@@ -716,15 +815,23 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	if xpow == nil {
 		return errors.New("missing Fast giant-step power")
 	}
+	rows, err := ws.rowsAt(min(min(a.Level(), b.Level()), xpow.Level()))
+	if err != nil {
+		return err
+	}
 	if b.Degree() == 2 {
-		if err := eval.Relinearize(b, b); err != nil {
+		if err := eval.RelinearizeQPrefixRows(b, b, rows); err != nil {
 			return fmt.Errorf("relinearize: %w", err)
 		}
 	}
-	if err := eval.Rescale(b, b); err != nil {
+	if err := eval.RescaleQPrefixRows(b, rows, b); err != nil {
 		return fmt.Errorf("rescale: %w", err)
 	}
-	if err := eval.Mul(b, xpow, b); err != nil {
+	rows, err = ws.rowsAt(min(b.Level(), xpow.Level()))
+	if err != nil {
+		return err
+	}
+	if err := eval.MulElementQPrefixRows(b, xpow.El(), rows, b); err != nil {
 		return fmt.Errorf("multiply: %w", err)
 	}
 	toleranceBits := float64(rlwe.ScalePrecision - 12)
@@ -736,7 +843,11 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	}
 	if ws.planScaleOverride && !a.Scale.Equal(b.Scale) {
 		b.Scale = a.Scale
-		return eval.Add(b, a, b)
+		rows, err = ws.rowsAt(min(a.Level(), b.Level()))
+		if err != nil {
+			return err
+		}
+		return eval.AddQPrefixRows(b, a, b, rows)
 	}
 	if err := ws.addAligned(params, eval, a, b); err != nil {
 		return fmt.Errorf("add: %w", err)
@@ -744,13 +855,13 @@ func (ws *fastPolynomialWorkspace) evaluateMonomial(params ckks.Parameters, eval
 	return nil
 }
 
-func copyMaintained(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
-	_ = copyMaintainedAtLevel(params, src, dst, src.Level())
+func copyQPrefix(params ckks.Parameters, src, dst *rlwe.Ciphertext, rows int) {
+	_ = copyQPrefixAtLevel(params, src, dst, src.Level(), rows)
 }
 
-func copyMaintainedAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, level int) error {
+func copyQPrefixAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, level, rows int) error {
 	if src == nil || dst == nil {
-		return errors.New("Fast polynomial maintained copy operands cannot be nil")
+		return errors.New("Fast polynomial Q-prefix copy operands cannot be nil")
 	}
 	if level < 0 || level > src.Level() {
 		return fmt.Errorf("Fast polynomial maintained copy level %d is outside source level %d", level, src.Level())
@@ -760,32 +871,43 @@ func copyMaintainedAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, le
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
 	dst.Scale = src.Scale
+	width, err := fastckks.QPrefixWidth(level)
+	if err != nil {
+		return err
+	}
+	if rows < 1 || rows > width {
+		return fmt.Errorf("Fast polynomial Q-prefix rows %d exceed Level %d width %d", rows, level, width)
+	}
 	for d := range src.Value {
-		for limb := 0; limb < fastckks.MaintainedLimbCount(params, level); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
 	return nil
 }
 
-func (ws *fastPolynomialWorkspace) balancedCopy(params ckks.Parameters, src *rlwe.Ciphertext, level int, left bool) (*rlwe.Ciphertext, error) {
+func (ws *fastPolynomialWorkspace) balancedCopy(params ckks.Parameters, src *rlwe.Ciphertext, level, rows int, left bool) (*rlwe.Ciphertext, error) {
 	if left {
 		ws.balancedLeft = ws.ensureCiphertext(params, ws.balancedLeft, src.Degree(), level)
-		if err := copyMaintainedAtLevel(params, src, ws.balancedLeft, level); err != nil {
+		if err := copyQPrefixAtLevel(params, src, ws.balancedLeft, level, rows); err != nil {
 			return nil, err
 		}
 		return ws.balancedLeft, nil
 	}
 	ws.balancedRight = ws.ensureCiphertext(params, ws.balancedRight, src.Degree(), level)
-	if err := copyMaintainedAtLevel(params, src, ws.balancedRight, level); err != nil {
+	if err := copyQPrefixAtLevel(params, src, ws.balancedRight, level, rows); err != nil {
 		return nil, err
 	}
 	return ws.balancedRight, nil
 }
 
 func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fastckks.Evaluator, out, sub *rlwe.Ciphertext) error {
+	rows, err := ws.rowsAt(min(out.Level(), sub.Level()))
+	if err != nil {
+		return err
+	}
 	if out.Scale.Equal(sub.Scale) {
-		return eval.Sub(out, sub, out)
+		return eval.SubQPrefixRows(out, sub, out, rows)
 	}
 
 	if out.Scale.Cmp(sub.Scale) > 0 {
@@ -797,11 +919,11 @@ func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fast
 		if ratio.Sign() <= 0 {
 			return errors.New("invalid Fast polynomial scale alignment ratio")
 		}
-		if err := eval.MulIntegerMaintained(sub, ratio, ws.scaleScratch); err != nil {
+		if err := eval.MulIntegerQPrefixRows(sub, ratio, rows, ws.scaleScratch); err != nil {
 			return err
 		}
 		ws.scaleScratch.Scale = out.Scale
-		return eval.Sub(out, ws.scaleScratch, out)
+		return eval.SubQPrefixRows(out, ws.scaleScratch, out, rows)
 	}
 
 	ws.scaleScratch = ws.ensureCiphertext(params, ws.scaleScratch, out.Degree(), utils.Min(out.Level(), sub.Level()))
@@ -812,20 +934,24 @@ func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fast
 	if ratio.Sign() <= 0 {
 		return errors.New("invalid Fast polynomial scale alignment ratio")
 	}
-	if err := eval.MulIntegerMaintained(out, ratio, ws.scaleScratch); err != nil {
+	if err := eval.MulIntegerQPrefixRows(out, ratio, rows, ws.scaleScratch); err != nil {
 		return err
 	}
 	ws.scaleScratch.Scale = sub.Scale
-	if err := eval.Sub(ws.scaleScratch, sub, ws.scaleScratch); err != nil {
+	if err := eval.SubQPrefixRows(ws.scaleScratch, sub, ws.scaleScratch, rows); err != nil {
 		return err
 	}
-	copyMaintainedElement(params, ws.scaleScratch, out)
+	copyQPrefixElement(params, ws.scaleScratch, out, rows)
 	return nil
 }
 
 func (ws *fastPolynomialWorkspace) addAligned(params ckks.Parameters, eval *fastckks.Evaluator, a, b *rlwe.Ciphertext) error {
+	rows, err := ws.rowsAt(min(a.Level(), b.Level()))
+	if err != nil {
+		return err
+	}
 	if a.Scale.Equal(b.Scale) {
-		return eval.Add(b, a, b)
+		return eval.AddQPrefixRows(b, a, b, rows)
 	}
 
 	if b.Scale.Cmp(a.Scale) > 0 {
@@ -837,11 +963,11 @@ func (ws *fastPolynomialWorkspace) addAligned(params ckks.Parameters, eval *fast
 		if ratio.Sign() <= 0 {
 			return errors.New("invalid Fast polynomial scale alignment ratio")
 		}
-		if err := eval.MulIntegerMaintained(a, ratio, ws.scaleScratch); err != nil {
+		if err := eval.MulIntegerQPrefixRows(a, ratio, rows, ws.scaleScratch); err != nil {
 			return err
 		}
 		ws.scaleScratch.Scale = b.Scale
-		return eval.Add(b, ws.scaleScratch, b)
+		return eval.AddQPrefixRows(b, ws.scaleScratch, b, rows)
 	}
 
 	ws.scaleScratch = ws.ensureCiphertext(params, ws.scaleScratch, b.Degree(), utils.Min(a.Level(), b.Level()))
@@ -852,41 +978,41 @@ func (ws *fastPolynomialWorkspace) addAligned(params ckks.Parameters, eval *fast
 	if ratio.Sign() <= 0 {
 		return errors.New("invalid Fast polynomial scale alignment ratio")
 	}
-	if err := eval.MulIntegerMaintained(b, ratio, ws.scaleScratch); err != nil {
+	if err := eval.MulIntegerQPrefixRows(b, ratio, rows, ws.scaleScratch); err != nil {
 		return err
 	}
 	ws.scaleScratch.Scale = a.Scale
-	if err := eval.Add(ws.scaleScratch, a, ws.scaleScratch); err != nil {
+	if err := eval.AddQPrefixRows(ws.scaleScratch, a, ws.scaleScratch, rows); err != nil {
 		return err
 	}
-	copyMaintainedElement(params, ws.scaleScratch, b)
+	copyQPrefixElement(params, ws.scaleScratch, b, rows)
 	return nil
 }
 
-func copyMaintainedElement(params ckks.Parameters, src, dst *rlwe.Ciphertext) {
+func copyQPrefixElement(params ckks.Parameters, src, dst *rlwe.Ciphertext, rows int) {
 	fastckks.Resize(dst, src.Degree(), src.Level(), params.N())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
 	dst.Scale = src.Scale
 	for d := range src.Value {
-		for limb := 0; limb < fastckks.MaintainedLimbCount(params, src.Level()); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])
 		}
 	}
 }
 
-// cloneMaintainedResult creates an independently-owned Fast ciphertext
-// without reading or materializing dormant q2...qL rows from the workspace.
-func cloneMaintainedResult(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Ciphertext {
+// cloneQPrefixResult creates an independently-owned Fast ciphertext
+// without reading or materializing rows above the selected Q-prefix.
+func cloneQPrefixResult(params ckks.Parameters, src *rlwe.Ciphertext, rows int) *rlwe.Ciphertext {
 	dst := fastckks.NewCiphertext(params, src.Degree(), src.Level())
-	copyMaintainedElement(params, src, dst)
+	copyQPrefixElement(params, src, dst, rows)
 	return dst
 }
 
-func zeroMaintained(ct *rlwe.Ciphertext) {
+func zeroQPrefix(ct *rlwe.Ciphertext, rows int) {
 	for d := range ct.Value {
-		for limb := 0; limb < len(ct.Value[d].Coeffs) && limb < 3; limb++ {
+		for limb := 0; limb < rows; limb++ {
 			ring.ZeroVec(ct.Value[d].Coeffs[limb])
 		}
 	}

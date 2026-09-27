@@ -91,15 +91,19 @@ func TestFastPolynomialPowerBasisQ01Oracle(t *testing.T) {
 	reference.IsNTT = input.IsNTT
 	reference.IsMontgomery = input.IsMontgomery
 	fastEval := eval.Evaluator
-	require.NoError(t, fastEval.MulRelin(input, input, reference))
-	require.NoError(t, fastEval.Add(reference, reference, reference))
-	require.NoError(t, fastEval.Rescale(reference, reference))
-	require.NoError(t, fastEval.Add(reference, -1, reference))
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	require.NoError(t, fastEval.MulRelinElementQPrefixRows(input, input.El(), rows, reference))
+	require.NoError(t, fastEval.AddQPrefixRows(reference, reference, reference, rows))
+	require.NoError(t, fastEval.RescaleQPrefixRows(reference, rows, reference))
+	rows, err = fastckks.QPrefixWidth(reference.Level())
+	require.NoError(t, err)
+	require.NoError(t, fastEval.AddScalarQPrefixRows(reference, -1, rows, reference))
 
 	require.Equal(t, reference.Level(), got.Level())
 	require.True(t, reference.Scale.Equal(got.Scale), "reference scale=%v got=%v", reference.Scale.Float64(), got.Scale.Float64())
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < rows; limb++ {
 			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb])
 		}
 	}
@@ -122,28 +126,32 @@ func TestFastPolynomialNonPowerOfTwoChebyshevOracle(t *testing.T) {
 	fastEval := eval.Evaluator
 
 	t2 := fastPolynomialReferenceCiphertext(params, input)
-	require.NoError(t, fastEval.MulRelin(input, input, t2))
-	require.NoError(t, fastEval.Add(t2, t2, t2))
-	require.NoError(t, fastEval.Rescale(t2, t2))
-	require.NoError(t, fastEval.Add(t2, -1, t2))
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	require.NoError(t, fastEval.MulRelinElementQPrefixRows(input, input.El(), rows, t2))
+	require.NoError(t, fastEval.AddQPrefixRows(t2, t2, t2, rows))
+	require.NoError(t, fastEval.RescaleQPrefixRows(t2, rows, t2))
+	rows, err = fastckks.QPrefixWidth(t2.Level())
+	require.NoError(t, err)
+	require.NoError(t, fastEval.AddScalarQPrefixRows(t2, -1, rows, t2))
 
 	t3 := fastPolynomialReferenceCiphertext(params, input)
-	require.NoError(t, fastEval.MulRelin(t2, input, t3))
-	require.NoError(t, fastEval.Add(t3, t3, t3))
-	require.NoError(t, fastEval.Rescale(t3, t3))
+	require.NoError(t, fastEval.MulRelinElementQPrefixRows(t2, input.El(), rows, t3))
+	require.NoError(t, fastEval.AddQPrefixRows(t3, t3, t3, rows))
+	require.NoError(t, fastEval.RescaleQPrefixRows(t3, rows, t3))
 	require.NoError(t, eval.workspace.subAligned(params, fastEval, t3, input))
 
 	t5 := fastPolynomialReferenceCiphertext(params, input)
-	require.NoError(t, fastEval.MulRelin(t3, t2, t5))
-	require.NoError(t, fastEval.Add(t5, t5, t5))
-	require.NoError(t, fastEval.Rescale(t5, t5))
+	require.NoError(t, fastEval.MulRelinElementQPrefixRows(t3, t2.El(), rows, t5))
+	require.NoError(t, fastEval.AddQPrefixRows(t5, t5, t5, rows))
+	require.NoError(t, fastEval.RescaleQPrefixRows(t5, rows, t5))
 	require.NoError(t, eval.workspace.subAligned(params, fastEval, t5, input))
 
 	require.Equal(t, t5.Level(), got.Level())
 	require.True(t, t5.Scale.Equal(got.Scale), "reference scale=%v got=%v", t5.Scale.Float64(), got.Scale.Float64())
 	require.Equal(t, t5.Degree(), got.Degree())
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < min(rows, got.Level()+1); limb++ {
 			require.Equal(t, t5.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb])
 		}
 	}
@@ -290,8 +298,10 @@ func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
 	poly := fastPolynomialTestPoly(3)
 	inputA := fastPolynomialTestCiphertext(params, 19)
 	inputB := inputA.CopyNew()
+	inputRows, err := fastckks.QPrefixWidth(inputA.Level())
+	require.NoError(t, err)
 	for d := range inputB.Value {
-		for limb := 2; limb <= inputB.Level(); limb++ {
+		for limb := inputRows; limb <= inputB.Level(); limb++ {
 			for i := range inputB.Value[d].Coeffs[limb] {
 				inputB.Value[d].Coeffs[limb][i] ^= uint64(0x5a5a5a5a) + uint64(31*d+limb+i)
 			}
@@ -302,14 +312,16 @@ func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
 	require.NoError(t, err)
 	gotB, err := NewFastEvaluator(params, nil).Evaluate(inputB, poly, params.DefaultScale())
 	require.NoError(t, err)
+	outputRows, err := fastckks.QPrefixWidth(gotA.Level())
+	require.NoError(t, err)
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < outputRows; limb++ {
 			require.Equal(t, gotA.Value[d].Coeffs[limb], gotB.Value[d].Coeffs[limb])
 		}
 	}
 }
 
-func TestFastPolynomialMaintainedCopyAtLevel(t *testing.T) {
+func TestFastPolynomialQPrefixCopyAtLevel(t *testing.T) {
 	params := fastPolynomialTestParameters(t)
 	src := fastPolynomialTestCiphertext(params, 29)
 	for d := range src.Value {
@@ -321,7 +333,7 @@ func TestFastPolynomialMaintainedCopyAtLevel(t *testing.T) {
 	}
 	srcBefore := src.CopyNew()
 	dst := fastckks.NewCiphertext(params, 1, 1)
-	require.NoError(t, copyMaintainedAtLevel(params, src, dst, 1))
+	require.NoError(t, copyQPrefixAtLevel(params, src, dst, 1, 2))
 
 	require.Equal(t, 1, dst.Level())
 	require.Equal(t, src.Scale, dst.Scale)
@@ -340,7 +352,7 @@ func TestFastPolynomialMaintainedCopyAtLevel(t *testing.T) {
 	require.Len(t, dst.Value[0].Coeffs, 2)
 }
 
-func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
+func TestFastPolynomialPublicResultCopiesQPrefixOnly(t *testing.T) {
 	params := fastPolynomialTestParameters(t)
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 37)
@@ -349,30 +361,24 @@ func TestFastPolynomialPublicResultCopiesMaintainedResiduesOnly(t *testing.T) {
 	_, err := eval.Evaluate(input, poly, params.DefaultScale())
 	require.NoError(t, err)
 	workspaceResult := eval.workspace.babySteps[0].Value
+	width, err := fastckks.QPrefixWidth(workspaceResult.Level())
+	require.NoError(t, err)
 	for d := range workspaceResult.Value {
-		for limb := 2; limb <= workspaceResult.Level(); limb++ {
+		for limb := width; limb <= workspaceResult.Level(); limb++ {
 			for i := range workspaceResult.Value[d].Coeffs[limb] {
 				workspaceResult.Value[d].Coeffs[limb][i] = uint64(0xdead0000 + 101*d + 17*limb + i)
 			}
 		}
 	}
 
-	public := cloneMaintainedResult(params, workspaceResult)
+	public := cloneQPrefixResult(params, workspaceResult, width)
 	require.Equal(t, workspaceResult.Level(), public.Level())
 	require.Equal(t, workspaceResult.Scale, public.Scale)
 	require.Equal(t, workspaceResult.IsNTT, public.IsNTT)
 	require.Equal(t, workspaceResult.IsMontgomery, public.IsMontgomery)
-	width, err := fastckks.QPrefixWidth(public.Level())
-	require.NoError(t, err)
 	for d := range workspaceResult.Value {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < width; limb++ {
 			require.Equal(t, workspaceResult.Value[d].Coeffs[limb], public.Value[d].Coeffs[limb])
-		}
-		for limb := 2; limb < width; limb++ {
-			require.Len(t, public.Value[d].Coeffs[limb], params.N())
-			for _, coefficient := range public.Value[d].Coeffs[limb] {
-				require.Zero(t, coefficient, "unwritten prefix limb %d must remain non-authoritative", limb)
-			}
 		}
 		for limb := width; limb <= public.Level(); limb++ {
 			require.Empty(t, public.Value[d].Coeffs[limb])
@@ -480,7 +486,9 @@ func TestFastPolynomialFormalScaleT2CapacitySafe(t *testing.T) {
 	}, [2]float64{-1, 1})
 	eval := NewFastEvaluator(params, nil)
 	commonPoly := commonpolynomial.NewPolynomial(poly)
-	eval.workspace.reset(params, input)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	eval.workspace.reset(params, input, rows)
 	require.NoError(t, eval.workspace.generatePowers(params, eval.Evaluator, poly, commonPoly))
 	got := eval.workspace.powers[2]
 	require.Equal(t, inputLevel-1, got.Level())
@@ -520,7 +528,9 @@ func TestFastPolynomialFormalScaleT3CapacitySafe(t *testing.T) {
 	input.IsMontgomery = pt.IsMontgomery
 
 	eval := NewFastEvaluator(params, nil)
-	eval.workspace.reset(params, input)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	eval.workspace.reset(params, input, rows)
 	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
 	require.NoError(t, pb.genPower(3, false))
 	got := eval.workspace.powers[3]
@@ -544,7 +554,9 @@ func TestFastPolynomialBalancedLazyMetadata(t *testing.T) {
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 47)
 	input.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
-	eval.workspace.reset(params, input)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	eval.workspace.reset(params, input, rows)
 	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
 	require.NoError(t, pb.genPower(3, true))
 	got := eval.workspace.powers[3]
@@ -599,8 +611,8 @@ func TestPostProductQ012ScheduleSelection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	q012 := fastPowerBasis{basis: bignum.Chebyshev, params: q012Params}
-	require.False(t, q012.postProductQ012Schedule(1), "Q012 must not be selected before three maintained limbs are active")
-	require.True(t, q012.postProductQ012Schedule(2))
+	require.False(t, q012.postProductLogN13Schedule(1), "the validated schedule must not be selected before its level floor")
+	require.True(t, q012.postProductLogN13Schedule(2))
 
 	legacyParams, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            13,
@@ -609,10 +621,10 @@ func TestPostProductQ012ScheduleSelection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	legacy := fastPowerBasis{basis: bignum.Chebyshev, params: legacyParams}
-	require.False(t, legacy.postProductQ012Schedule(2), "non-Q012 profiles must retain the fallback schedule")
+	require.False(t, legacy.postProductLogN13Schedule(2), "non-P93 profiles must retain the fallback schedule")
 
 	monomial := fastPowerBasis{basis: bignum.Monomial, params: q012Params}
-	require.False(t, monomial.postProductQ012Schedule(2), "the post-product recurrence is Chebyshev-specific")
+	require.False(t, monomial.postProductLogN13Schedule(2), "the post-product recurrence is Chebyshev-specific")
 }
 
 func TestPostProductQ012PowerContract(t *testing.T) {
@@ -624,22 +636,26 @@ func TestPostProductQ012PowerContract(t *testing.T) {
 	require.NoError(t, err)
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 17)
-	eval.workspace.reset(params, input)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	eval.workspace.reset(params, input, rows)
 	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
 	require.NoError(t, pb.genPower(2, false))
 	got := eval.workspace.powers[2]
 
 	reference := fastPolynomialReferenceCiphertext(params, input)
-	require.NoError(t, eval.Evaluator.MulRelin(input, input, reference))
-	require.NoError(t, eval.Evaluator.Add(reference, reference, reference))
-	require.NoError(t, eval.Evaluator.Add(reference, -1, reference))
-	require.NoError(t, eval.Evaluator.Rescale(reference, reference))
+	require.NoError(t, eval.Evaluator.MulRelinElementQPrefixRows(input, input.El(), rows, reference))
+	require.NoError(t, eval.Evaluator.AddQPrefixRows(reference, reference, reference, rows))
+	require.NoError(t, eval.Evaluator.AddScalarQPrefixRows(reference, -1, rows, reference))
+	require.NoError(t, eval.Evaluator.RescaleQPrefixRows(reference, rows, reference))
 
 	require.Equal(t, input.Level()-1, got.Level(), "the repaired recurrence consumes exactly one level")
 	require.Equal(t, 1, got.Degree())
 	require.True(t, got.Scale.Equal(reference.Scale), "post-product scale=%v reference=%v", got.Scale.Float64(), reference.Scale.Float64())
+	rows, err = fastckks.QPrefixWidth(got.Level())
+	require.NoError(t, err)
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < fastckks.MaintainedLimbCount(params, got.Level()); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb], "component=%d limb=%d", d, limb)
 		}
 	}
@@ -655,7 +671,9 @@ func TestBalancedPowerSourceImmutabilityAndScratchOwnership(t *testing.T) {
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 7)
 	input.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
-	eval.workspace.reset(params, input)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	eval.workspace.reset(params, input, rows)
 	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
 	require.NoError(t, pb.genPower(2, false))
 	leftBefore := eval.workspace.powers[1].CopyNew()
@@ -685,8 +703,10 @@ func TestBalancedPowerIgnoresDormantResidues(t *testing.T) {
 	inputA := fastPolynomialTestCiphertext(params, 17)
 	inputA.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
 	inputB := inputA.CopyNew()
+	inputRows, err := fastckks.QPrefixWidth(inputA.Level())
+	require.NoError(t, err)
 	for d := range inputB.Value {
-		for limb := 2; limb <= inputB.Level(); limb++ {
+		for limb := inputRows; limb <= inputB.Level(); limb++ {
 			for i := range inputB.Value[d].Coeffs[limb] {
 				inputB.Value[d].Coeffs[limb][i] ^= uint64(0x9e3779b9) + uint64(13*d+limb+i)
 			}
@@ -694,15 +714,19 @@ func TestBalancedPowerIgnoresDormantResidues(t *testing.T) {
 	}
 	run := func(input *rlwe.Ciphertext) *rlwe.Ciphertext {
 		eval := NewFastEvaluator(params, nil)
-		eval.workspace.reset(params, input)
+		rows, err := fastckks.QPrefixWidth(input.Level())
+		require.NoError(t, err)
+		eval.workspace.reset(params, input, rows)
 		pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
 		require.NoError(t, pb.genPower(3, false))
 		return eval.workspace.powers[3]
 	}
 	gotA := run(inputA)
 	gotB := run(inputB)
+	outputRows, err := fastckks.QPrefixWidth(gotA.Level())
+	require.NoError(t, err)
 	for d := range gotA.Value {
-		for limb := 0; limb < 2; limb++ {
+		for limb := 0; limb < outputRows; limb++ {
 			require.Equal(t, gotA.Value[d].Coeffs[limb], gotB.Value[d].Coeffs[limb])
 		}
 	}

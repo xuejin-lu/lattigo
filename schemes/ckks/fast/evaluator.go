@@ -16,13 +16,14 @@ import (
 // and are intended for one execution stream at a time; use separate instances
 // for concurrent evaluation.
 type Evaluator struct {
-	Parameters             ckks.Parameters
-	rescaleScratch         fastRescaleScratch
-	nttScratch             [3]ring.Poly
-	linearTransformScratch fastLinearTransformScratch
-	automorphismIndexCache map[uint64][]uint64
-	automorphismScratch    [][]uint64
-	lastBSGSBabyRotations  int
+	Parameters              ckks.Parameters
+	rescaleScratch          fastRescaleScratch
+	nttScratch              [3]ring.Poly
+	linearTransformScratch  fastLinearTransformScratch
+	automorphismIndexCache  map[uint64][]uint64
+	automorphismScratch     [][]uint64
+	lastBSGSBabyRotations   int
+	qPrefixCapacityObserver func(QPrefixCapacitySnapshot) error
 }
 
 // NewEvaluator creates an explicit Fast Q-prefix evaluator. Individual
@@ -80,17 +81,14 @@ func (eval *Evaluator) MulIntegerQPrefixRows(op0 *rlwe.Ciphertext, scalar *big.I
 	if eval == nil || op0 == nil || opOut == nil {
 		return errors.New("Fast integer multiplication evaluator and operands cannot be nil")
 	}
-	width, err := QPrefixWidth(op0.Level())
-	if err != nil {
+	level := min(op0.Level(), opOut.Level())
+	if err := eval.validateExplicitRows(level, rows); err != nil {
 		return err
 	}
-	if rows < 1 || rows > width {
-		return fmt.Errorf("Fast integer multiplication row count %d must be in [1,%d] at level %d", rows, width, op0.Level())
+	if opOut.Level() == op0.Level() && opOut.Degree() == op0.Degree() {
+		return eval.mulIntegerRowsPreservingHigherRows(op0, scalar, opOut, rows)
 	}
-	if opOut.Level() != op0.Level() || opOut.Degree() != op0.Degree() {
-		return errors.New("Fast integer Q-prefix multiplication requires matching input/output level and degree")
-	}
-	return eval.mulIntegerRowsPreservingHigherRows(op0, scalar, opOut, rows)
+	return eval.mulIntegerRows(op0, scalar, opOut, rows)
 }
 
 // MulQPrefixRows multiplies a ciphertext by a scalar over exactly rows
@@ -123,6 +121,60 @@ func (eval *Evaluator) MulQPrefixRows(op0 *rlwe.Ciphertext, scalar rlwe.Operand,
 		}
 	}
 	return eval.mulScalarAtScaleRows(op0, c, scale, opOut, rows)
+}
+
+// MulElementQPrefixRows multiplies an RLWE element operand using exactly rows
+// authoritative Q-prefix residues.
+func (eval *Evaluator) MulElementQPrefixRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], rows int, opOut *rlwe.Ciphertext) error {
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	if err := eval.validateBinaryPrefix(op0, op1, opOut); err != nil {
+		return err
+	}
+	level := min(op0.Level(), min(op1.Level(), opOut.Level()))
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
+	return eval.mulElementRows(op0, op1.El(), opOut, false, rows)
+}
+
+// MulRelinElementQPrefixRows multiplies and applies Fast's zero-secret
+// degree-two truncation over exactly rows authoritative Q-prefix residues.
+func (eval *Evaluator) MulRelinElementQPrefixRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], rows int, opOut *rlwe.Ciphertext) error {
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	if err := eval.validateBinaryPrefix(op0, op1, opOut); err != nil {
+		return err
+	}
+	level := min(op0.Level(), min(op1.Level(), opOut.Level()))
+	if err := eval.validateExplicitRows(level, rows); err != nil {
+		return err
+	}
+	return eval.mulElementRows(op0, op1.El(), opOut, true, rows)
+}
+
+// RelinearizeQPrefixRows truncates c2 while copying exactly rows residues.
+func (eval *Evaluator) RelinearizeQPrefixRows(op0, opOut *rlwe.Ciphertext, rows int) error {
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	if err := eval.validateExplicitRows(op0.Level(), rows); err != nil {
+		return err
+	}
+	return fastTruncateDegree2To1Rows(eval.Parameters.RingQ(), op0, opOut, rows)
+}
+
+func (eval *Evaluator) validateExplicitRows(level, rows int) error {
+	width, err := QPrefixWidth(level)
+	if err != nil {
+		return err
+	}
+	if rows < 1 || rows > width || rows > level+1 {
+		return fmt.Errorf("Fast explicit row count %d must be in [1,%d] at level %d", rows, min(width, level+1), level)
+	}
+	return nil
 }
 
 func (eval *Evaluator) mulIntegerRows(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int) error {
