@@ -1,26 +1,27 @@
 # Current Task
 
-Task: QPREFIX-IMPL-004
+Task: QPREFIX-IMPL-004-REVIEW-FIX
 Status: READY_FOR_CODEX
 
-Authoritative revised Primary specification:
+Accepted candidate:
+`18f4da53f03acd065d18550a8f2106725462896f`
+
+Revised Primary spec:
 `specs/QPREFIX-IMPL-004-RESCALE-LEVEL-TRANSITIONS.md`
-at Primary commit:
-`87125e13570a4e88dc26343d88810c23966768f7`
+at
+`a7bf5f2c68662f66c7b955b75a566e5eff4e0816`
 
-Important correction:
-q0123 Rescale **capability** is implemented now, but production activation remains legacy-width until upstream producers are migrated.
+Review blocker:
+`DropLevelCanonical` must not accept targetLevel > 3.
 
-Current C2S LinearTransform still owns q012 only. Therefore:
-- production Rescale/RescaleTo must continue selecting legacy authoritative rows;
-- explicit-width kernel/tests must support q0123;
-- q3 backing must never be treated as authority automatically.
+Reason:
+for targetLevel > 3, q0123 does not determine the canonical centered representative
+modulo full logical Q_target.
 
-Controlled recovery:
-local uncommitted changes from the stopped first 004 attempt are expected.
-Do not reset/clean/stash them away indiscriminately.
-Continue from them and revise toward the updated contract.
+Required bounded fix:
+- reject canonical targetLevel > 3 before mutating output;
+- add transactional 5->4 (or equivalent) rejection test;
+- keep existing <=3 canonical behavior unchanged;
+- do not modify SameLift or any other subsystem.
 
-Do not modify LinearTransform/DFT production routing, ModUp/Trace, EvalMod/PS/DA, Bootstrap orchestration, or `fast-ckks`.
-
-Commit/push `fast-qprefix` after all focused and full regressions pass, then report `READY_FOR_WEB_REVIEW`.
+Run focused and full regressions, commit/push, then report `READY_FOR_WEB_REVIEW`.
