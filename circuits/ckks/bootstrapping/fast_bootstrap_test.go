@@ -494,3 +494,59 @@ func TestFastBootstrapCoreIgnoresDormantResidues(t *testing.T) {
 		}
 	}
 }
+
+func TestFastBootstrapCoreS2CConsumesEvalModQ3(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	require.NoError(t, eval.ensureFastBootstrapCircuit())
+	require.Equal(t, 3, eval.S2CDFTMatrix.LevelQ)
+	require.Equal(t, eval.S2CDFTMatrix.LevelQ, eval.Mod1Parameters.LevelQ-eval.Parameters.Mod1ParametersLiteral.Depth())
+
+	input := fastBootstrapPlainCiphertext(t, residual, residual.MaxLevel(), 2)
+	baseline, _, err := eval.bootstrapCore(input.CopyNew())
+	require.NoError(t, err)
+	require.Equal(t, 1, baseline.Level(), "two S2C groups should contract Level 3 to Level 1")
+
+	// Poison only q3 in the first production S2C factor. The real bootstrapCore
+	// path must have passed all four EvalMod rows to S2C, so this change must
+	// affect the q012 result after the first Rescale contracts Level 3 to 2.
+	changedQ3 := 0
+	for diagonal, poly := range eval.S2CDFTMatrix.Matrices[0].Vec {
+		if len(poly.Q.Coeffs) <= 3 {
+			continue
+		}
+		for i, value := range poly.Q.Coeffs[3] {
+			if value != 0 {
+				changedQ3++
+			}
+			poly.Q.Coeffs[3][i] = 0
+		}
+		eval.S2CDFTMatrix.Matrices[0].Vec[diagonal] = poly
+	}
+	require.Greater(t, changedQ3, 0, "first S2C factor must contain encoded q3 data")
+
+	poisoned, _, err := eval.bootstrapCore(input.CopyNew())
+	require.NoError(t, err)
+	require.Equal(t, baseline.Level(), poisoned.Level())
+	require.Equal(t, baseline.Scale, poisoned.Scale)
+	different := false
+	for component := range baseline.Value {
+		for row := 0; row <= baseline.Level(); row++ {
+			for i, value := range baseline.Value[component].Coeffs[row] {
+				if value != poisoned.Value[component].Coeffs[row][i] {
+					different = true
+					break
+				}
+			}
+			if different {
+				break
+			}
+		}
+		if different {
+			break
+		}
+	}
+	require.True(t, different, "production Bootstrap S2C output must depend on the authoritative EvalMod q3 row")
+}

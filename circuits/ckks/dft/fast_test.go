@@ -212,7 +212,7 @@ func TestFastDFTS2CQPrefixCapabilityMatchesStandard(t *testing.T) {
 	requireFastDFTMatchesStandard(t, params, fastOut, standardOut, 2)
 }
 
-func TestFastDFTS2CProductionDoesNotPromoteEvalModQ3(t *testing.T) {
+func TestFastDFTSlotsToCoeffsLegacyWrapperDoesNotPromoteQ3(t *testing.T) {
 	params := fastDFTTestParameters(t)
 	matrices := fastDFTMatrixAtLevel(t, params, HomomorphicDecode, Standard, 3, []int{1, 1})
 	fastEval := NewFastEvaluator(params)
@@ -230,12 +230,12 @@ func TestFastDFTS2CProductionDoesNotPromoteEvalModQ3(t *testing.T) {
 	poisoned, err := fastEval.SlotsToCoeffsNew(poisonedInput, nil, matrices)
 	require.NoError(t, err)
 	legacyRows := fastckks.MaintainedLimbCount(&params, cleanInput.Level())
-	require.Less(t, legacyRows, 4, "production S2C must not promote allocated q3")
+	require.Less(t, legacyRows, 4, "legacy S2C wrapper must not promote allocated q3")
 	require.Equal(t, clean.Level(), poisoned.Level())
 	require.Equal(t, clean.Scale, poisoned.Scale)
 	for d := range clean.Value {
 		for row := 0; row < min(legacyRows, clean.Level()+1); row++ {
-			require.Equal(t, clean.Value[d].Coeffs[row], poisoned.Value[d].Coeffs[row], "S2C consumed poisoned non-authoritative q3 component=%d q%d", d, row)
+			require.Equal(t, clean.Value[d].Coeffs[row], poisoned.Value[d].Coeffs[row], "legacy S2C wrapper must not promote allocated q3 component=%d q%d", d, row)
 		}
 	}
 }

@@ -177,7 +177,7 @@ func (eval *FastEvaluator) bootstrapCore(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Cip
 			return nil, nil, err
 		}
 	}
-	if ctOut, err = eval.DFTEvaluator.SlotsToCoeffsNew(ctReal, ctImag, eval.S2CDFTMatrix); err != nil {
+	if ctOut, err = eval.SlotsToCoeffs(ctReal, ctImag); err != nil {
 		return nil, nil, err
 	}
 	return ctOut, errScale, nil
