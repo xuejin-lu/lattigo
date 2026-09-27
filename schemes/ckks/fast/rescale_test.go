@@ -7,18 +7,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 )
 
 func rescaleTestParameters(t *testing.T) ckks.Parameters {
 	t.Helper()
-	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
-		LogN:            4,
-		LogQ:            []int{55, 39, 50, 50},
-		LogDefaultScale: 30,
-	})
-	require.NoError(t, err)
-	return params
+	return q012TestParameters(t)
 }
 
 func generatedLogN16RescaleParameters(t *testing.T) ckks.Parameters {
@@ -125,8 +120,10 @@ func TestFastRescaleMatchesStandardGeneratedLogN16(t *testing.T) {
 	require.NoError(t, fastEval.RescaleTo(in, minScale, fastOut))
 	require.Equal(t, standardOut.Scale, fastOut.Scale)
 	require.Equal(t, standardOut.Level(), fastOut.Level())
+	rows, err := QPrefixWidth(fastOut.Level())
+	require.NoError(t, err)
 	for component := range fastOut.Value {
-		for limb := 0; limb <= fastOut.Level() && limb < 2; limb++ {
+		for limb := 0; limb < rows; limb++ {
 			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
 		}
 	}
@@ -275,9 +272,11 @@ func TestFastRescaleMatchesStandardAtHigherLevels(t *testing.T) {
 		require.NoError(t, standard.Rescale(in, standardOut))
 		require.NoError(t, fastEval.Rescale(in, fastOut))
 		require.Equal(t, standardOut.Scale, fastOut.Scale)
+		rows, err := QPrefixWidth(fastOut.Level())
+		require.NoError(t, err)
 		for component := range fastOut.Value {
 			require.NotEqual(t, make([]uint64, len(fastOut.Value[component].Coeffs[0])), fastOut.Value[component].Coeffs[0])
-			for limb := 0; limb <= level-1 && limb < 2; limb++ {
+			for limb := 0; limb < rows; limb++ {
 				require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
 			}
 		}
@@ -297,8 +296,10 @@ func TestFastRescaleToSequentialLevelsAndInPlace(t *testing.T) {
 	require.NoError(t, fastEval.RescaleTo(in, minScale, fastOut))
 	require.Equal(t, standardOut.Level(), fastOut.Level())
 	require.Equal(t, standardOut.Scale, fastOut.Scale)
+	rows, err := QPrefixWidth(fastOut.Level())
+	require.NoError(t, err)
 	for component := range fastOut.Value {
-		for limb := 0; limb <= fastOut.Level() && limb < 2; limb++ {
+		for limb := 0; limb < rows; limb++ {
 			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb])
 		}
 	}
@@ -308,8 +309,10 @@ func TestFastRescaleToSequentialLevelsAndInPlace(t *testing.T) {
 	require.NoError(t, fastEval.RescaleTo(inPlace, minScale, inPlace))
 	require.NoError(t, fastEval.RescaleTo(in, minScale, outOfPlace))
 	require.Equal(t, outOfPlace.Level(), inPlace.Level())
+	rows, err = QPrefixWidth(inPlace.Level())
+	require.NoError(t, err)
 	for component := range inPlace.Value {
-		for limb := 0; limb <= inPlace.Level() && limb < 2; limb++ {
+		for limb := 0; limb < rows; limb++ {
 			require.Equal(t, outOfPlace.Value[component].Coeffs[limb], inPlace.Value[component].Coeffs[limb])
 		}
 	}
@@ -337,25 +340,97 @@ func TestFastRescaleSupportsBothNTTRepresentations(t *testing.T) {
 }
 
 func TestFastRescaleIgnoresDormantResidues(t *testing.T) {
-	params := rescaleTestParameters(t)
+	params := rescaleHighLevelParameters(t)
 	fastEval := NewEvaluator(params)
-	a := makeFastRescaleCiphertext(params, 2, []int64{1, -2, 3, -4}, 17)
-	b := a.CopyNew()
-	for component := range b.Value {
-		for limb := 2; limb < len(b.Value[component].Coeffs); limb++ {
-			for k := range b.Value[component].Coeffs[limb] {
-				b.Value[component].Coeffs[limb][k] = uint64(1000 + limb + k)
-			}
-		}
-	}
-	outA := ckks.NewCiphertext(params, 1, 1)
-	outB := ckks.NewCiphertext(params, 1, 1)
+	a := makeQPrefixLevelFourInput(params, false)
+	b := makeQPrefixLevelFourInput(params, true)
+	outA := NewCiphertext(params, 1, 3)
+	outB := NewCiphertext(params, 1, 3)
 	require.NoError(t, fastEval.Rescale(a, outA))
 	require.NoError(t, fastEval.Rescale(b, outB))
+	standardOut := ckks.NewCiphertext(params, 1, 3)
+	require.NoError(t, ckks.NewEvaluator(params, nil).Rescale(a, standardOut))
+	require.Equal(t, 3, outA.Level())
 	for component := range outA.Value {
-		require.Equal(t, outA.Value[component].Coeffs[0], outB.Value[component].Coeffs[0])
-		require.Equal(t, outA.Value[component].Coeffs[1], outB.Value[component].Coeffs[1])
+		for row := 0; row < 3; row++ {
+			require.Equal(t, standardOut.Value[component].Coeffs[row], outA.Value[component].Coeffs[row], "Standard q%d", row)
+			require.Equal(t, outA.Value[component].Coeffs[row], outB.Value[component].Coeffs[row], "dormant logical q4 row q%d", row)
+		}
 	}
+	// X=(q4/2)+1 rounds to 1 only when Rescale divides by logical q4.
+	for row := 0; row < 3; row++ {
+		want := make([]uint64, params.N())
+		for coefficient := range want {
+			want[coefficient] = 1
+		}
+		params.RingQ().SubRings[row].NTT(want, want)
+		require.Equal(t, want, outA.Value[0].Coeffs[row])
+	}
+}
+
+func TestFastRescaleProductionIgnoresAllocatedQ3Backing(t *testing.T) {
+	params := q012TestParameters(t)
+	fastEval := NewEvaluator(params)
+	standardEval := ckks.NewEvaluator(params, nil)
+	input := makeFastRescaleCiphertext(params, 3, []int64{0, 1, -1, 17, -29}, 0)
+	poisoned := input.CopyNew()
+	q3 := params.Q()[3]
+	for component := range poisoned.Value {
+		for i, residue := range poisoned.Value[component].Coeffs[3] {
+			poisoned.Value[component].Coeffs[3][i] = (residue + uint64(101+i+component)) % q3
+		}
+	}
+	require.NotEqual(t, input.Value[0].Coeffs[3], poisoned.Value[0].Coeffs[3], "fixture must poison allocated q3 backing")
+
+	fastOut := NewCiphertext(params, 1, 2)
+	poisonedOut := NewCiphertext(params, 1, 2)
+	standardOut := ckks.NewCiphertext(params, 1, 2)
+	require.NoError(t, fastEval.Rescale(input, fastOut))
+	require.NoError(t, fastEval.Rescale(poisoned, poisonedOut))
+	require.NoError(t, standardEval.Rescale(input, standardOut))
+	require.Equal(t, 3, maintainedLimbCount(&params, input.Level()))
+	for component := range fastOut.Value {
+		for row := 0; row < 3; row++ {
+			require.Equal(t, standardOut.Value[component].Coeffs[row], fastOut.Value[component].Coeffs[row], "Standard component=%d q%d", component, row)
+			require.Equal(t, fastOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "production must ignore q3 component=%d q%d", component, row)
+		}
+	}
+}
+
+func rescaleHighLevelParameters(t *testing.T) ckks.Parameters {
+	t.Helper()
+	base := q012TestParameters(t)
+	generator := ring.NewNTTFriendlyPrimesGenerator(50, 2*2*16)
+	q4, err := generator.NextAlternatingPrimes(1)
+	require.NoError(t, err)
+	q := append(append([]uint64(nil), base.Q()...), q4[0])
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{LogN: 4, Q: q, LogDefaultScale: 30})
+	require.NoError(t, err)
+	return params
+}
+
+func makeQPrefixLevelFourInput(params ckks.Parameters, poisonQ4 bool) *rlwe.Ciphertext {
+	ct := ckks.NewCiphertext(params, 1, 4)
+	ct.IsNTT = true
+	ct.Scale = rlwe.NewScale(1 << 40)
+	q4 := params.Q()[4]
+	for component := range ct.Value {
+		for coefficient := 0; coefficient < params.N(); coefficient++ {
+			value := new(big.Int).SetUint64(q4/2 + 1 + uint64(coefficient+component))
+			for row := 0; row <= 4; row++ {
+				modulus := params.Q()[row]
+				residue := new(big.Int).Mod(new(big.Int).Set(value), new(big.Int).SetUint64(modulus)).Uint64()
+				if row == 4 && poisonQ4 {
+					residue = (residue + uint64(101+coefficient+component)) % modulus
+				}
+				ct.Value[component].Coeffs[row][coefficient] = residue
+			}
+		}
+		for row := 0; row <= 4; row++ {
+			params.RingQ().SubRings[row].NTT(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
+		}
+	}
+	return ct
 }
 
 func makeFastRescaleCiphertext(params ckks.Parameters, level int, values []int64, poison uint64, montgomery ...bool) *rlwe.Ciphertext {

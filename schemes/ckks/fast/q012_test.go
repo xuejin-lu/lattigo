@@ -107,7 +107,7 @@ func TestQ012FixedWidthRoundedDivideMatchesBigInt(t *testing.T) {
 	}
 }
 
-func TestQ012FastRescaleMatchesStandardForBoundedCoefficients(t *testing.T) {
+func TestQ0123FastRescaleMatchesStandardForBoundedCoefficients(t *testing.T) {
 	params := q012TestParameters(t)
 	fastEval := NewEvaluator(params)
 	standardEval := ckks.NewEvaluator(params, nil)
@@ -122,13 +122,13 @@ func TestQ012FastRescaleMatchesStandardForBoundedCoefficients(t *testing.T) {
 			x := big.NewInt(values[i])
 			for limb, modulus := range params.Q() {
 				residue := new(big.Int).Mod(new(big.Int).Set(x), new(big.Int).SetUint64(modulus)).Uint64()
-				if limb < 3 {
+				if limb < MaxQPrefixWidth {
 					fast.Value[component].Coeffs[limb][i] = residue
 				}
 				standard.Value[component].Coeffs[limb][i] = residue
 			}
 		}
-		for limb := 0; limb <= 2; limb++ {
+		for limb := 0; limb <= 3; limb++ {
 			params.RingQ().SubRings[limb].NTT(fast.Value[component].Coeffs[limb], fast.Value[component].Coeffs[limb])
 		}
 		for limb := 0; limb <= 3; limb++ {
@@ -138,13 +138,56 @@ func TestQ012FastRescaleMatchesStandardForBoundedCoefficients(t *testing.T) {
 	fastOut := NewCiphertext(params, 1, 2)
 	standardOut := ckks.NewCiphertext(params, 1, 2)
 	fastOut.IsNTT, standardOut.IsNTT = true, true
-	require.NoError(t, fastEval.Rescale(fast, fastOut))
+	require.NoError(t, fastEval.rescaleNQPrefix(fast, 1, MaxQPrefixWidth, fastOut))
 	require.NoError(t, standardEval.Rescale(standard, standardOut))
 	for component := 0; component <= 1; component++ {
 		for limb := 0; limb <= 2; limb++ {
 			require.Equal(t, standardOut.Value[component].Coeffs[limb], fastOut.Value[component].Coeffs[limb], "component=%d limb=%d", component, limb)
 		}
 	}
+}
+
+func TestQ0123ExplicitRescaleUsesQ3WhenQ012RowsAreIdentical(t *testing.T) {
+	params := q012TestParameters(t)
+	fastEval := NewEvaluator(params)
+	standardEval := ckks.NewEvaluator(params, nil)
+
+	zeroValues := make([]*big.Int, params.N())
+	for i := range zeroValues {
+		zeroValues[i] = big.NewInt(0)
+	}
+	q012 := new(big.Int).SetUint64(params.Q()[0])
+	for _, q := range params.Q()[1:3] {
+		q012.Mul(q012, new(big.Int).SetUint64(q))
+	}
+	q012Values := make([]*big.Int, params.N())
+	for i := range q012Values {
+		q012Values[i] = new(big.Int).Set(q012)
+	}
+	zeroFast, zeroStandard := makeRescaleOracleInputs(params, 3, 4, zeroValues)
+	q012Fast, q012Standard := makeRescaleOracleInputs(params, 3, 4, q012Values)
+
+	// Both sources have identical q0/q1/q2 rows; only their q3 residues differ.
+	for component := range zeroFast.Value {
+		for row := 0; row < 3; row++ {
+			require.Equal(t, zeroFast.Value[component].Coeffs[row], q012Fast.Value[component].Coeffs[row], "component=%d q%d", component, row)
+		}
+	}
+	fastZeroOut := NewCiphertext(params, 1, 2)
+	fastQ012Out := NewCiphertext(params, 1, 2)
+	standardZeroOut := ckks.NewCiphertext(params, 1, 2)
+	standardQ012Out := ckks.NewCiphertext(params, 1, 2)
+	require.NoError(t, fastEval.rescaleNQPrefix(zeroFast, 1, 4, fastZeroOut))
+	require.NoError(t, fastEval.rescaleNQPrefix(q012Fast, 1, 4, fastQ012Out))
+	require.NoError(t, standardEval.Rescale(zeroStandard, standardZeroOut))
+	require.NoError(t, standardEval.Rescale(q012Standard, standardQ012Out))
+	for component := range fastQ012Out.Value {
+		for row := 0; row < 3; row++ {
+			require.Equal(t, standardZeroOut.Value[component].Coeffs[row], fastZeroOut.Value[component].Coeffs[row], "zero component=%d q%d", component, row)
+			require.Equal(t, standardQ012Out.Value[component].Coeffs[row], fastQ012Out.Value[component].Coeffs[row], "q012 component=%d q%d", component, row)
+		}
+	}
+	require.NotEqual(t, fastZeroOut.Value[0].Coeffs[0], fastQ012Out.Value[0].Coeffs[0], "explicit width 4 must consume q3")
 }
 
 func bitsMul64ForTest(a, b uint64) (uint64, uint64) {

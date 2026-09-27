@@ -25,11 +25,18 @@ const (
 )
 
 type fastRescaleScratch struct {
-	coeff, result                        ring.Poly
-	q0, q1, q2, q0InverseModQ1, q01InvQ2 uint64
-	q01Lo, q01Hi, halfLo, halfHi         uint64
-	q012Lo, q012Mid, q012Hi, q012HalfLo  uint64
-	q012HalfMid, q012HalfHi              uint64
+	coeff, result ring.Poly
+	q             [MaxQPrefixWidth]uint64
+	inverse       [MaxQPrefixWidth]uint64
+	modulus       [MaxQPrefixWidth]uint192
+	half          [MaxQPrefixWidth]uint192
+	initErr       error
+	widthErr      [MaxQPrefixWidth]error
+	// Scalar guards still use the legacy Q01 CRT scratch; Rescale itself uses
+	// the explicit prefix arrays above.
+	q0, q1, q0InverseModQ1 uint64
+	q01Lo, q01Hi           uint64
+	halfLo, halfHi         uint64
 }
 
 func newFastRescaleScratch(ringQ *ring.Ring) fastRescaleScratch {
@@ -37,27 +44,73 @@ func newFastRescaleScratch(ringQ *ring.Ring) fastRescaleScratch {
 	if ringQ == nil || ringQ.Level() < 1 {
 		return scratch
 	}
-	maintained := maintainedLimbCountForRing(ringQ)
 	prefixWidth := qPrefixWidthOrPanic(ringQ.Level())
 	scratch.coeff = ring.NewPoly(ringQ.N(), prefixWidth-1)
 	scratch.result = ring.NewPoly(ringQ.N(), prefixWidth-1)
-	scratch.q0 = ringQ.SubRings[0].Modulus
-	scratch.q1 = ringQ.SubRings[1].Modulus
-	scratch.q0InverseModQ1, _ = inverseMod(scratch.q0%scratch.q1, scratch.q1)
-	scratch.q01Hi, scratch.q01Lo = bits.Mul64(scratch.q0, scratch.q1)
-	scratch.halfLo = (scratch.q01Lo >> 1) | (scratch.q01Hi << 63)
-	scratch.halfHi = scratch.q01Hi >> 1
-	if maintained == 3 {
-		scratch.q2 = ringQ.SubRings[2].Modulus
-		scratch.q012Lo, scratch.q012Mid, scratch.q012Hi, scratch.q012HalfLo, scratch.q012HalfMid, scratch.q012HalfHi = q012Words(scratch.q0, scratch.q1, scratch.q2)
-		scratch.q01InvQ2, _ = inverseMod(mod128By64(scratch.q01Lo, scratch.q01Hi, scratch.q2), scratch.q2)
+	if len(ringQ.SubRings) < prefixWidth {
+		scratch.initErr = fmt.Errorf("Fast Rescale requires %d configured q subrings", prefixWidth)
+		return scratch
+	}
+	product := uint192{lo: 1}
+	productValid := true
+	for row := 0; row < prefixWidth; row++ {
+		q := ringQ.SubRings[row].Modulus
+		if q < 3 || q&1 == 0 || q > uint64(^uint64(0)>>1) {
+			scratch.widthErr[row] = fmt.Errorf("unsupported Fast Rescale modulus q%d=%d", row, q)
+			productValid = false
+			continue
+		}
+		scratch.q[row] = q
+		if !productValid {
+			scratch.widthErr[row] = fmt.Errorf("Fast Rescale Q-prefix through q%d is unavailable", row)
+			continue
+		}
+		var overflow bool
+		product, overflow = mul192By64(product, q)
+		if overflow {
+			scratch.widthErr[row] = fmt.Errorf("Fast Rescale Q-prefix product through q%d exceeds 192 bits", row)
+			productValid = false
+			continue
+		}
+		scratch.modulus[row] = product
+		scratch.half[row] = half192(product)
+		if row > 0 {
+			inverse, ok := inverseMod(mod192By64(scratch.modulus[row-1], q), q)
+			if !ok {
+				scratch.widthErr[row] = fmt.Errorf("Fast Rescale Q-prefix through q%d is not pairwise coprime", row)
+				productValid = false
+				continue
+			}
+			scratch.inverse[row] = inverse
+		}
+	}
+	if prefixWidth >= 2 {
+		scratch.q0, scratch.q1 = scratch.q[0], scratch.q[1]
+		scratch.q0InverseModQ1 = scratch.inverse[1]
+		scratch.q01Hi, scratch.q01Lo = bits.Mul64(scratch.q0, scratch.q1)
+		scratch.halfLo = (scratch.q01Lo >> 1) | (scratch.q01Hi << 63)
+		scratch.halfHi = scratch.q01Hi >> 1
 	}
 	return scratch
 }
 
-// Rescale applies the Standard CKKS rescale semantics using only the
-// actively-maintained q0/q1 residues. The input must be NTT-domain. Both
-// ordinary and Montgomery-form NTT representations are supported and the
+func (scratch *fastRescaleScratch) validateWidth(rows int) error {
+	if scratch == nil {
+		return errors.New("Fast Rescale scratch cannot be nil")
+	}
+	if scratch.initErr != nil {
+		return scratch.initErr
+	}
+	if rows < 1 || rows > MaxQPrefixWidth {
+		return fmt.Errorf("invalid Fast Rescale Q-prefix width %d", rows)
+	}
+	return scratch.widthErr[rows-1]
+}
+
+// Rescale applies Standard CKKS rescale semantics using the legacy producer
+// authority selected by maintainedLimbCount. The logical top modulus is the
+// divisor even when it is outside that prefix. The input must be NTT-domain.
+// Both ordinary and Montgomery-form NTT representations are supported and the
 // output preserves the input representation.
 func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
@@ -73,13 +126,28 @@ func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
 	if op0.Level() < nbRescales {
 		return errors.New("cannot Rescale: input Ciphertext level is too low")
 	}
-	return eval.rescaleN(op0, nbRescales, opOut)
+	sourceRows := maintainedLimbCount(&eval.Parameters, op0.Level())
+	return eval.rescaleNQPrefix(op0, nbRescales, sourceRows, opOut)
 }
 
 // RescaleTo repeatedly rescales until the scale reaches minScale, or another
 // rescale would take it below minScale/2. It preserves the Standard stopping
 // rule while allowing the output to reach Level 0.
 func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	if op0 == nil {
+		return errors.New("op0 cannot be nil")
+	}
+	sourceRows := maintainedLimbCount(&eval.Parameters, op0.Level())
+	return eval.rescaleToNQPrefix(op0, minScale, sourceRows, opOut)
+}
+
+// rescaleToNQPrefix applies RescaleTo's Standard stopping rule while keeping
+// source authority explicit. Production wrappers pass the current legacy
+// width; same-package Q-prefix tests and later migrated owners may pass 4.
+func (eval *Evaluator) rescaleToNQPrefix(op0 *rlwe.Ciphertext, minScale rlwe.Scale, sourceRows int, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
@@ -98,13 +166,29 @@ func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOu
 	if op0.Level() == 0 {
 		return errors.New("cannot RescaleTo: input Ciphertext already at level 0")
 	}
+	if op0.N() != eval.Parameters.N() || opOut.N() != eval.Parameters.N() {
+		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
+	}
+	maxSourceRows, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
+	if sourceRows < 1 || sourceRows > maxSourceRows {
+		return fmt.Errorf("explicit Fast Rescale source width %d is outside [1,%d] at Level %d", sourceRows, maxSourceRows, op0.Level())
+	}
+	ringQ := eval.Parameters.RingQ()
+	if ringQ == nil || op0.Level() > ringQ.Level() {
+		return fmt.Errorf("Fast RescaleTo input Level %d exceeds configured ring Level", op0.Level())
+	}
 
 	threshold := minScale.Div(rlwe.NewScale(2))
 	scale := op0.Scale
 	newLevel := op0.Level()
-	ringQ := eval.Parameters.RingQ()
 	nbRescales := 0
 	for newLevel > 0 {
+		if newLevel >= len(ringQ.SubRings) || ringQ.SubRings[newLevel] == nil || ringQ.SubRings[newLevel].Modulus < 2 {
+			return fmt.Errorf("Fast RescaleTo logical divisor q%d is unavailable", newLevel)
+		}
 		candidate := scale.Div(rlwe.NewScale(ringQ.SubRings[newLevel].Modulus))
 		if candidate.Cmp(threshold) == -1 {
 			break
@@ -120,164 +204,7 @@ func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOu
 		}
 		return nil
 	}
-	return eval.rescaleN(op0, nbRescales, opOut)
-}
-
-func (eval *Evaluator) rescaleN(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlwe.Ciphertext) error {
-	if nbRescales <= 0 || op0.Level() < nbRescales {
-		return errors.New("invalid number of Fast rescale levels")
-	}
-	if op0.N() != eval.Parameters.N() || opOut.N() != eval.Parameters.N() {
-		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
-	}
-	validate := validateFastRescaleDomain(op0)
-	if validate != nil {
-		return validate
-	}
-
-	targetLevel := op0.Level() - nbRescales
-	if op0 != opOut {
-		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
-	}
-
-	ringQ := eval.Parameters.RingQ()
-	if eval.rescaleScratch.coeff.N() != ringQ.N() ||
-		eval.rescaleScratch.q0 != ringQ.SubRings[0].Modulus ||
-		eval.rescaleScratch.q1 != ringQ.SubRings[1].Modulus {
-		eval.rescaleScratch = newFastRescaleScratch(eval.Parameters.RingQ())
-	}
-	scratch := &eval.rescaleScratch
-	if scratch.q0InverseModQ1 == 0 {
-		return errors.New("Fast Rescale requires coprime q0 and q1")
-	}
-	if err := validateFastRescaleRange(scratch.q0, scratch.q1, ringQ.SubRings[op0.Level()].Modulus); err != nil {
-		return err
-	}
-	if maintainedLimbCountForRing(ringQ.AtLevel(op0.Level())) == 3 {
-		return eval.rescaleNQ012(op0, nbRescales, opOut, targetLevel, scratch)
-	}
-
-	// The Ring primitive is the exact Standard rescale operation for an
-	// ordinary NTT polynomial. At level one it only needs q0 and q1 and can
-	// write q0 in place while reading q1, avoiding the fixed-width CRT/INTT
-	// path below. Montgomery data deliberately remains on the generic path:
-	// DivRoundByLastModulusNTT operates on the ordinary representation.
-	if op0.Level() == 1 && nbRescales == 1 && !op0.IsMontgomery {
-		ringQLevelOne := ringQ.AtLevel(1)
-		for component := range op0.Value {
-			ringQLevelOne.DivRoundByLastModulusNTT(op0.Value[component], opOut.Value[component])
-		}
-		*opOut.MetaData = *op0.MetaData
-		opOut.Scale = op0.Scale.Div(rlwe.NewScale(ringQ.SubRings[1].Modulus))
-		if op0 == opOut {
-			Resize(opOut, op0.Degree(), 0, eval.Parameters.N())
-		}
-		return nil
-	}
-
-	for component := range op0.Value {
-		if err := FastPartialINTT(ringQ, op0.Value[component], scratch.coeff); err != nil {
-			return err
-		}
-		if op0.IsMontgomery {
-			for limb := 0; limb < 2; limb++ {
-				ringQ.SubRings[limb].IMForm(scratch.coeff.Coeffs[limb], scratch.coeff.Coeffs[limb])
-			}
-		}
-		for step := 0; step < nbRescales; step++ {
-			d := ringQ.SubRings[op0.Level()-step].Modulus
-			if err := validateFastRescaleRange(scratch.q0, scratch.q1, d); err != nil {
-				return err
-			}
-		}
-		firstDivisor := ringQ.SubRings[op0.Level()].Modulus
-		for k := 0; k < ringQ.N(); k++ {
-			xLo, xHi := crtQ01(scratch.coeff.Coeffs[0][k], scratch.coeff.Coeffs[1][k], scratch.q0, scratch.q1, scratch.q0InverseModQ1)
-			magnitude, negative := roundedMagnitude128(xLo, xHi, scratch.q01Lo, scratch.q01Hi, scratch.halfLo, scratch.halfHi, firstDivisor)
-			for step := 1; step < nbRescales; step++ {
-				magnitude = roundedMagnitude64(magnitude, ringQ.SubRings[op0.Level()-step].Modulus)
-			}
-			scratch.result.Coeffs[0][k] = signedResidue(magnitude, negative, scratch.q0)
-			if targetLevel >= 1 {
-				scratch.result.Coeffs[1][k] = signedResidue(magnitude, negative, scratch.q1)
-			}
-		}
-
-		ringQ.SubRings[0].NTT(scratch.result.Coeffs[0], opOut.Value[component].Coeffs[0])
-		if targetLevel >= 1 {
-			ringQ.SubRings[1].NTT(scratch.result.Coeffs[1], opOut.Value[component].Coeffs[1])
-		}
-		if op0.IsMontgomery {
-			for limb := 0; limb <= targetLevel && limb < 2; limb++ {
-				ringQ.SubRings[limb].MForm(opOut.Value[component].Coeffs[limb], opOut.Value[component].Coeffs[limb])
-			}
-		}
-	}
-
-	*opOut.MetaData = *op0.MetaData
-	opOut.Scale = op0.Scale
-	for step := 0; step < nbRescales; step++ {
-		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(ringQ.SubRings[op0.Level()-step].Modulus))
-	}
-	if op0 == opOut {
-		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
-	}
-	return nil
-}
-
-func (eval *Evaluator) rescaleNQ012(op0 *rlwe.Ciphertext, nbRescales int, opOut *rlwe.Ciphertext, targetLevel int, scratch *fastRescaleScratch) error {
-	ringQ := eval.Parameters.RingQ()
-	if op0 != opOut {
-		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
-	}
-	for step := 0; step < nbRescales; step++ {
-		if err := validateFastRescaleQ012Range(scratch.q0, scratch.q1, scratch.q2, ringQ.SubRings[op0.Level()-step].Modulus); err != nil {
-			return err
-		}
-	}
-	modulus := uint192{lo: scratch.q012Lo, mid: scratch.q012Mid, hi: scratch.q012Hi}
-	half := uint192{lo: scratch.q012HalfLo, mid: scratch.q012HalfMid, hi: scratch.q012HalfHi}
-	for component := range op0.Value {
-		if err := FastPartialINTT(ringQ, op0.Value[component], scratch.coeff); err != nil {
-			return err
-		}
-		if op0.IsMontgomery {
-			for limb := 0; limb < 3; limb++ {
-				ringQ.SubRings[limb].IMForm(scratch.coeff.Coeffs[limb], scratch.coeff.Coeffs[limb])
-			}
-		}
-		for k := 0; k < ringQ.N(); k++ {
-			x := crtQ012(scratch.coeff.Coeffs[0][k], scratch.coeff.Coeffs[1][k], scratch.coeff.Coeffs[2][k], scratch.q0, scratch.q1, scratch.q2, scratch.q0InverseModQ1, scratch.q01InvQ2)
-			magnitude, negative := centeredQ012(x, modulus, half)
-			for step := 0; step < nbRescales; step++ {
-				magnitude = roundedMagnitude192(magnitude, ringQ.SubRings[op0.Level()-step].Modulus)
-			}
-			scratch.result.Coeffs[0][k] = signedResidue192(magnitude, negative, scratch.q0)
-			if targetLevel >= 1 {
-				scratch.result.Coeffs[1][k] = signedResidue192(magnitude, negative, scratch.q1)
-			}
-			if targetLevel >= 2 {
-				scratch.result.Coeffs[2][k] = signedResidue192(magnitude, negative, scratch.q2)
-			}
-		}
-		for limb := 0; limb <= targetLevel && limb < 3; limb++ {
-			ringQ.SubRings[limb].NTT(scratch.result.Coeffs[limb], opOut.Value[component].Coeffs[limb])
-		}
-		if op0.IsMontgomery {
-			for limb := 0; limb <= targetLevel && limb < 3; limb++ {
-				ringQ.SubRings[limb].MForm(opOut.Value[component].Coeffs[limb], opOut.Value[component].Coeffs[limb])
-			}
-		}
-	}
-	*opOut.MetaData = *op0.MetaData
-	opOut.Scale = op0.Scale
-	for step := 0; step < nbRescales; step++ {
-		opOut.Scale = opOut.Scale.Div(rlwe.NewScale(ringQ.SubRings[op0.Level()-step].Modulus))
-	}
-	if op0 == opOut {
-		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
-	}
-	return nil
+	return eval.rescaleNQPrefix(op0, nbRescales, sourceRows, opOut)
 }
 
 func validateFastRescaleDomain(ct *rlwe.Ciphertext) error {
@@ -285,7 +212,7 @@ func validateFastRescaleDomain(ct *rlwe.Ciphertext) error {
 		return errors.New("Fast Rescale requires NTT-domain ciphertexts")
 	}
 	if len(ct.Value) == 0 || ct.Value[0].Level() < 1 {
-		return errors.New("Fast Rescale requires maintained q0 and q1 storage")
+		return errors.New("Fast Rescale requires a non-zero logical Level")
 	}
 	return nil
 }
@@ -297,16 +224,6 @@ func validateFastRescaleRange(q0, q1, divisor uint64) error {
 	q01Hi, q01Lo := bits.Mul64(q0, q1)
 	if q01Hi != 0 && bits.Len64(q01Hi)+64 > fastRescaleMaxQ01Bits || q01Hi == 0 && bits.Len64(q01Lo) > fastRescaleMaxQ01Bits {
 		return fmt.Errorf("unsupported Fast Rescale q0*q1 range: requires product < 2^%d", fastRescaleMaxQ01Bits)
-	}
-	if bits.Len64(divisor) < fastRescaleMinDivisorBits {
-		return fmt.Errorf("unsupported Fast Rescale divisor: requires at least %d bits", fastRescaleMinDivisorBits)
-	}
-	return nil
-}
-
-func validateFastRescaleQ012Range(q0, q1, q2, divisor uint64) error {
-	if bits.Len64(q0) > 56 || bits.Len64(q1) > 39 || bits.Len64(q2) > 40 {
-		return fmt.Errorf("unsupported Fast Q012 Rescale moduli")
 	}
 	if bits.Len64(divisor) < fastRescaleMinDivisorBits {
 		return fmt.Errorf("unsupported Fast Rescale divisor: requires at least %d bits", fastRescaleMinDivisorBits)

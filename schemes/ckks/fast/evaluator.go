@@ -25,7 +25,9 @@ type Evaluator struct {
 	lastBSGSBabyRotations  int
 }
 
-// NewEvaluator creates an explicit q0/q1-authoritative evaluator.
+// NewEvaluator creates an explicit Fast Q-prefix evaluator. Individual
+// production operations continue to select the row authority defined by
+// their current producer contract.
 func NewEvaluator(params ckks.Parameters) *Evaluator {
 	prefixWidth := qPrefixWidthOrPanic(params.MaxLevel())
 	eval := &Evaluator{
