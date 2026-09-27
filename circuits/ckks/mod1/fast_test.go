@@ -34,6 +34,35 @@ func fastMod1TestParameters(t *testing.T) (ckks.Parameters, Parameters) {
 	return params, mod1Params
 }
 
+func fastMod1Q012TestParameters(t *testing.T) (ckks.Parameters, Parameters) {
+	t.Helper()
+	q3Generator := ring.NewNTTFriendlyPrimesGenerator(45, 2*2*16)
+	q3, err := q3Generator.NextAlternatingPrimes(1)
+	require.NoError(t, err)
+	remainingGenerator := ring.NewNTTFriendlyPrimesGenerator(60, 2*2*16)
+	remainingQ, err := remainingGenerator.NextAlternatingPrimes(6)
+	require.NoError(t, err)
+	q := append([]uint64{72057594037616641, 549755731969, 549756026881}, q3...)
+	q = append(q, remainingQ...)
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            4,
+		Q:               q,
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	mod1Params, err := NewParametersFromLiteral(params, ParametersLiteral{
+		LevelQ:          8,
+		LogScale:        60,
+		Mod1Type:        CosDiscrete,
+		LogMessageRatio: 2,
+		K:               4,
+		Mod1Degree:      6,
+		DoubleAngle:     2,
+	})
+	require.NoError(t, err)
+	return params, mod1Params
+}
+
 func newFastMod1PlaintextInput(t *testing.T, params ckks.Parameters, level int) *rlwe.Ciphertext {
 	values := make([]complex128, params.MaxSlots())
 	return newFastMod1EncodedInput(t, params, level, rlwe.NewScale(math.Exp2(60)), values)
@@ -213,7 +242,7 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 		return nil
 	})
 	fastPolynomialEval := ckkspolynomial.NewFastEvaluator(params, fastCKKSEval)
-	fast, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNew(fastInput)
+	fast, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNewQPrefixRows(fastInput, fastckks.MaxQPrefixWidth)
 	require.NoError(t, err)
 	checkpointNames := make(map[string]bool, len(capacityCheckpoints))
 	for _, checkpoint := range capacityCheckpoints {
@@ -243,7 +272,7 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	for i, residue := range poisonedInput.Value[0].Coeffs[3] {
 		poisonedInput.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
 	}
-	poisonedOutput, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNew(poisonedInput)
+	poisonedOutput, err := NewFastEvaluator(fastCKKSEval, fastPolynomialEval, mod1Params).EvaluateNewQPrefixRows(poisonedInput, fastckks.MaxQPrefixWidth)
 	require.NoError(t, err)
 	require.Equal(t, fast.Level(), poisonedOutput.Level())
 	require.NotEqual(t, fast.Value[0].Coeffs[3], poisonedOutput.Value[0].Coeffs[3], "EvalMod output q3 must follow the q3 input history")
@@ -311,18 +340,14 @@ func decodeFastMod1MaintainedPlaintext(t *testing.T, params ckks.Parameters, ct 
 }
 
 func TestFastMod1IgnoresDormantResiduesAndPreservesInput(t *testing.T) {
-	params, mod1Params := fastMod1TestParameters(t)
+	params, mod1Params := fastMod1Q012TestParameters(t)
 	input := newFastMod1PlaintextInput(t, params, mod1Params.LevelQ)
+	require.Equal(t, 3, fastckks.MaintainedLimbCount(&params, input.Level()), "fixture must exercise legacy q012 authority")
 	before := input.CopyNew()
 	poisoned := input.CopyNew()
-	rows, err := fastckks.QPrefixWidth(input.Level())
-	require.NoError(t, err)
-	for d := range poisoned.Value {
-		for limb := rows; limb <= poisoned.Level(); limb++ {
-			for i := range poisoned.Value[d].Coeffs[limb] {
-				poisoned.Value[d].Coeffs[limb][i] = ^uint64(0) - uint64(i+limb+d)
-			}
-		}
+	q3 := params.Q()[3]
+	for i, residue := range poisoned.Value[0].Coeffs[3] {
+		poisoned.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
 	}
 
 	eval := NewFastEvaluator(fastckks.NewEvaluator(params), ckkspolynomial.NewFastEvaluator(params, nil), mod1Params)
@@ -331,8 +356,7 @@ func TestFastMod1IgnoresDormantResiduesAndPreservesInput(t *testing.T) {
 	poisonedGot, err := eval.EvaluateNew(poisoned)
 	require.NoError(t, err)
 	for d := 0; d <= 1; d++ {
-		outputRows, err := fastckks.QPrefixWidth(got.Level())
-		require.NoError(t, err)
+		outputRows := fastckks.MaintainedLimbCount(&params, got.Level())
 		for limb := 0; limb < outputRows; limb++ {
 			require.Equal(t, got.Value[d].Coeffs[limb], poisonedGot.Value[d].Coeffs[limb])
 		}
@@ -353,6 +377,8 @@ func TestFastMod1Validation(t *testing.T) {
 
 	_, err := eval.EvaluateNew(nil)
 	require.Error(t, err)
+	_, err = eval.EvaluateNewQPrefixRows(input, 0)
+	require.Error(t, err, "an invalid explicit row count must not fall back to legacy authority")
 
 	nonNTT := input.CopyNew()
 	nonNTT.IsNTT = false

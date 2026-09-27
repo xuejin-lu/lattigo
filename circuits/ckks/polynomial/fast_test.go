@@ -27,6 +27,20 @@ func fastPolynomialTestParameters(t *testing.T) ckks.Parameters {
 	return params
 }
 
+func fastPolynomialQ012TestParameters(t *testing.T) ckks.Parameters {
+	t.Helper()
+	generator := ring.NewNTTFriendlyPrimesGenerator(45, 2*2*16)
+	remainingQ, err := generator.NextAlternatingPrimes(5)
+	require.NoError(t, err)
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            4,
+		Q:               append([]uint64{72057594037616641, 549755731969, 549756026881}, remainingQ...),
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	return params
+}
+
 func fastPolynomialTestCiphertext(params ckks.Parameters, offset uint64) *rlwe.Ciphertext {
 	ct := ckks.NewCiphertext(params, 1, params.MaxLevel())
 	ct.IsNTT = true
@@ -82,8 +96,10 @@ func TestFastPolynomialPowerBasisQPrefixRowsOracle(t *testing.T) {
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 7)
 	poly := fastPolynomialTestPoly(3)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
 
-	_, err := eval.Evaluate(input, poly, params.DefaultScale())
+	_, err = eval.EvaluateQPrefixRows(input, poly, params.DefaultScale(), rows)
 	require.NoError(t, err)
 
 	got := eval.workspace.powers[2]
@@ -91,8 +107,6 @@ func TestFastPolynomialPowerBasisQPrefixRowsOracle(t *testing.T) {
 	reference.IsNTT = input.IsNTT
 	reference.IsMontgomery = input.IsMontgomery
 	fastEval := eval.Evaluator
-	rows, err := fastckks.QPrefixWidth(input.Level())
-	require.NoError(t, err)
 	require.NoError(t, fastEval.MulRelinElementQPrefixRows(input, input.El(), rows, reference))
 	require.NoError(t, fastEval.AddQPrefixRows(reference, reference, reference, rows))
 	require.NoError(t, fastEval.RescaleQPrefixRows(reference, rows, reference))
@@ -119,15 +133,15 @@ func TestFastPolynomialNonPowerOfTwoChebyshevOracle(t *testing.T) {
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 13)
 	poly := fastPolynomialTestPoly(30)
+	rows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
 
-	_, err = eval.Evaluate(input, poly, params.DefaultScale())
+	_, err = eval.EvaluateQPrefixRows(input, poly, params.DefaultScale(), rows)
 	require.NoError(t, err)
 	got := eval.workspace.powers[5]
 	fastEval := eval.Evaluator
 
 	t2 := fastPolynomialReferenceCiphertext(params, input)
-	rows, err := fastckks.QPrefixWidth(input.Level())
-	require.NoError(t, err)
 	require.NoError(t, fastEval.MulRelinElementQPrefixRows(input, input.El(), rows, t2))
 	require.NoError(t, fastEval.AddQPrefixRows(t2, t2, t2, rows))
 	require.NoError(t, fastEval.RescaleQPrefixRows(t2, rows, t2))
@@ -284,6 +298,7 @@ func TestFastPolynomialFinalParentOneBitScalarGuardSelection(t *testing.T) {
 	planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 91))
 	got, err := eval.EvaluateWithPlanScaleFinalParentOneBitScalarGuard(input, poly, rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60)), planScale)
 	require.NoError(t, err)
+	require.Equal(t, fastckks.MaintainedLimbCount(&params, input.Level()), eval.workspace.rows, "legacy guarded wrapper must preserve maintained-row authority")
 	require.Equal(t, 1, got.Degree())
 	require.True(t, got.IsNTT)
 	require.True(t, got.IsMontgomery)
@@ -291,6 +306,21 @@ func TestFastPolynomialFinalParentOneBitScalarGuardSelection(t *testing.T) {
 	require.Equal(t, 1, eval.workspace.guardedOperations)
 	require.Equal(t, eval.workspace.guardedPlanCount-1, eval.workspace.guardedPlanIndex)
 	require.Equal(t, 2, eval.workspace.guardedScalarDegree)
+
+	targetScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
+	explicitEval := NewFastEvaluator(params, nil)
+	explicit, err := explicitEval.EvaluateWithPlanScaleFinalParentOneBitScalarGuardQPrefixRows(input, poly, targetScale, planScale, fastckks.MaxQPrefixWidth)
+	require.NoError(t, err)
+	require.Equal(t, fastckks.MaxQPrefixWidth, explicitEval.workspace.rows)
+	poisonedInput := input.CopyNew()
+	q3 := params.Q()[3]
+	for i, residue := range poisonedInput.Value[0].Coeffs[3] {
+		poisonedInput.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
+	}
+	explicitPoisonedEval := NewFastEvaluator(params, nil)
+	explicitPoisoned, err := explicitPoisonedEval.EvaluateWithPlanScaleFinalParentOneBitScalarGuardQPrefixRows(poisonedInput, poly, targetScale, planScale, fastckks.MaxQPrefixWidth)
+	require.NoError(t, err)
+	require.NotEqual(t, explicit.Value[0].Coeffs[3], explicitPoisoned.Value[0].Coeffs[3], "explicit guarded wrapper must consume and produce q3")
 }
 
 func TestFastPolynomialIgnoresDormantResidues(t *testing.T) {
@@ -387,7 +417,8 @@ func TestFastPolynomialPublicResultCopiesQPrefixOnly(t *testing.T) {
 }
 
 func TestFastPolynomialQ3PoisonPropagatesAcrossBabyGiantAndFinalPS(t *testing.T) {
-	params := fastPolynomialTestParameters(t)
+	params := fastPolynomialQ012TestParameters(t)
+	require.Equal(t, 3, fastckks.MaintainedLimbCount(&params, params.MaxLevel()), "fixture must exercise legacy q012 authority; Q0..Q2=%v", params.Q()[:3])
 	const rows = fastckks.MaxQPrefixWidth
 	poisonQ3 := func(ct *rlwe.Ciphertext) *rlwe.Ciphertext {
 		poisoned := ct.CopyNew()
@@ -463,13 +494,52 @@ func TestFastPolynomialQ3PoisonPropagatesAcrossBabyGiantAndFinalPS(t *testing.T)
 	// Public PS output must not inherit a stale q3 row when the input q3
 	// history differs.
 	finalInput := fastPolynomialTestCiphertext(params, 271)
-	cleanFinalEval := NewFastEvaluator(params, nil)
-	cleanFinal, err := cleanFinalEval.Evaluate(finalInput, fastPolynomialTestPoly(3), params.DefaultScale())
-	require.NoError(t, err)
-	poisonedFinal, err := cleanFinalEval.Evaluate(poisonQ3(finalInput), fastPolynomialTestPoly(3), params.DefaultScale())
-	require.NoError(t, err)
-	require.Equal(t, cleanFinal.Level(), poisonedFinal.Level())
-	require.NotEqual(t, cleanFinal.Value[0].Coeffs[3], poisonedFinal.Value[0].Coeffs[3], "final PS q3 must follow the input q3 history")
+	polynomial := fastPolynomialTestPoly(3)
+	planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 29))
+	for _, testCase := range []struct {
+		name     string
+		legacy   func(*FastEvaluator, *rlwe.Ciphertext) (*rlwe.Ciphertext, error)
+		explicit func(*FastEvaluator, *rlwe.Ciphertext) (*rlwe.Ciphertext, error)
+	}{
+		{
+			name: "evaluate",
+			legacy: func(eval *FastEvaluator, input *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.Evaluate(input, polynomial, params.DefaultScale())
+			},
+			explicit: func(eval *FastEvaluator, input *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.EvaluateQPrefixRows(input, polynomial, params.DefaultScale(), rows)
+			},
+		},
+		{
+			name: "plan-scale",
+			legacy: func(eval *FastEvaluator, input *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.EvaluateWithPlanScale(input, fastPolynomialTestPoly(1), params.DefaultScale(), planScale)
+			},
+			explicit: func(eval *FastEvaluator, input *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.EvaluateWithPlanScaleQPrefixRows(input, fastPolynomialTestPoly(1), params.DefaultScale(), planScale, rows)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			legacyFinal, err := testCase.legacy(NewFastEvaluator(params, nil), finalInput)
+			require.NoError(t, err)
+			legacyPoisoned, err := testCase.legacy(NewFastEvaluator(params, nil), poisonQ3(finalInput))
+			require.NoError(t, err)
+			require.Equal(t, legacyFinal.Level(), legacyPoisoned.Level())
+			for d := 0; d <= 1; d++ {
+				for row := 0; row < 3; row++ {
+					require.Equal(t, legacyFinal.Value[d].Coeffs[row], legacyPoisoned.Value[d].Coeffs[row], "legacy wrapper q%d component=%d", row, d)
+				}
+			}
+
+			explicitFinal, err := testCase.explicit(NewFastEvaluator(params, nil), finalInput)
+			require.NoError(t, err)
+			explicitPoisoned, err := testCase.explicit(NewFastEvaluator(params, nil), poisonQ3(finalInput))
+			require.NoError(t, err)
+			require.Equal(t, explicitFinal.Level(), explicitPoisoned.Level())
+			require.NotEqual(t, explicitFinal.Value[0].Coeffs[3], explicitPoisoned.Value[0].Coeffs[3], "explicit-row wrapper must consume and produce q3")
+		})
+	}
 }
 
 func TestFastPolynomialRepresentativeDegree30(t *testing.T) {
@@ -847,6 +917,10 @@ func TestFastPolynomialEvaluatorValidation(t *testing.T) {
 	poly := fastPolynomialTestPoly(3)
 	_, err := eval.Evaluate(input, bignum.Polynomial{}, params.DefaultScale())
 	require.Error(t, err)
+	_, err = eval.EvaluateQPrefixRows(input, poly, params.DefaultScale(), 0)
+	require.Error(t, err, "an invalid explicit row count must not fall back to legacy authority")
+	_, err = eval.EvaluateQPrefixRows(input, poly, params.DefaultScale(), -1)
+	require.Error(t, err, "negative explicit rows must not select legacy authority")
 
 	_, err = eval.Evaluate(nil, poly, params.DefaultScale())
 	require.Error(t, err)

@@ -35,15 +35,33 @@ func NewFastEvaluator(eval *fastckks.Evaluator, evalPoly *ckkspolynomial.FastEva
 // Standard normalization, Chebyshev offset, target-scale schedule, and
 // DoubleAngle recurrence.
 func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
-	if err := eval.validate(ct); err != nil {
+	if eval == nil || eval.FastCKKS == nil || eval.PolynomialEvaluator == nil {
+		return nil, errors.New("Fast Mod1 evaluator and dependencies cannot be nil")
+	}
+	if ct == nil {
+		return nil, errors.New("Fast Mod1 ciphertext and metadata cannot be nil")
+	}
+	rows := fastckks.MaintainedLimbCount(eval.FastCKKS.GetParameters(), ct.Level())
+	return eval.evaluateNew(ct, rows)
+}
+
+// EvaluateNewQPrefixRows evaluates the Fast Mod1 circuit with an explicit
+// arithmetic Q-prefix row count. EvaluateNew retains the legacy maintained-row
+// contract for compatibility.
+func (eval *FastEvaluator) EvaluateNewQPrefixRows(ct *rlwe.Ciphertext, rows int) (*rlwe.Ciphertext, error) {
+	return eval.evaluateNew(ct, rows)
+}
+
+func (eval *FastEvaluator) evaluateNew(ct *rlwe.Ciphertext, authorityRows int) (*rlwe.Ciphertext, error) {
+	if err := eval.validate(ct, authorityRows); err != nil {
 		return nil, err
 	}
 
 	params := eval.FastCKKS.GetParameters()
 	mod1Params := eval.Parameters
 	inputScale := ct.Scale
-	res := cloneFastCiphertext(*params, ct)
-	rows, err := fastckks.QPrefixWidth(res.Level())
+	res := cloneFastCiphertext(*params, ct, authorityRows)
+	rows, err := qPrefixRowsAtLevel(res.Level(), authorityRows)
 	if err != nil {
 		return nil, fmt.Errorf("Fast Mod1 input Q-prefix: %w", err)
 	}
@@ -81,21 +99,21 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 	if normalizedLogN13Profile(params, mod1Params) {
 		planBits := normalizedLogN13PlanScaleBitsForParams(params)
 		planScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(planBits)))
-		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScale(res, mod1Params.Mod1Poly, targetScale, planScale)
+		polynomialResult, err := eval.PolynomialEvaluator.EvaluateWithPlanScaleQPrefixRows(res, mod1Params.Mod1Poly, targetScale, planScale, authorityRows)
 		if err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial evaluation: %w", err)
 		}
-		return eval.evaluateNormalizedLogN13(polynomialResult, inputScale, targetScale, mod1Params, planScale)
+		return eval.evaluateNormalizedLogN13(polynomialResult, inputScale, targetScale, mod1Params, planScale, authorityRows)
 	}
 
-	polynomialResult, err := eval.PolynomialEvaluator.Evaluate(res, mod1Params.Mod1Poly, targetScale)
+	polynomialResult, err := eval.PolynomialEvaluator.EvaluateQPrefixRows(res, mod1Params.Mod1Poly, targetScale, authorityRows)
 	if err != nil {
 		return nil, fmt.Errorf("Fast Mod1 polynomial evaluation: %w", err)
 	}
 	// The polynomial evaluator returns an independently-owned public result;
 	// keep its planned target scale through the DoubleAngle chain.
 	res = polynomialResult
-	rows, err = fastckks.QPrefixWidth(res.Level())
+	rows, err = qPrefixRowsAtLevel(res.Level(), authorityRows)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +124,7 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 	sqrt2pi := mod1Params.Sqrt2Pi
 	for i := 0; i < mod1Params.DoubleAngle; i++ {
 		sqrt2pi *= sqrt2pi
-		rows, err = fastckks.QPrefixWidth(res.Level())
+		rows, err = qPrefixRowsAtLevel(res.Level(), authorityRows)
 		if err != nil {
 			return nil, err
 		}
@@ -114,10 +132,6 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 			return nil, err
 		}
 
-		rows, err = fastckks.QPrefixWidth(res.Level())
-		if err != nil {
-			return nil, fmt.Errorf("Fast Mod1 double angle %d Q-prefix: %w", i, err)
-		}
 		if err := eval.FastCKKS.MulRelinElementQPrefixRows(res, res.El(), rows, res); err != nil {
 			return nil, fmt.Errorf("Fast Mod1 double angle %d multiply: %w", i, err)
 		}
@@ -130,7 +144,7 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 		if err := eval.FastCKKS.RescaleQPrefixRows(res, rows, res); err != nil {
 			return nil, fmt.Errorf("Fast Mod1 double angle %d rescale: %w", i, err)
 		}
-		rows, err = fastckks.QPrefixWidth(res.Level())
+		rows, err = qPrefixRowsAtLevel(res.Level(), authorityRows)
 		if err != nil {
 			return nil, err
 		}
@@ -144,6 +158,20 @@ func (eval *FastEvaluator) EvaluateNew(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, e
 		return nil, err
 	}
 	return res, nil
+}
+
+func qPrefixRowsAtLevel(level, authorityRows int) (int, error) {
+	width, err := fastckks.QPrefixWidth(level)
+	if err != nil {
+		return 0, err
+	}
+	if authorityRows < 1 {
+		return 0, fmt.Errorf("Fast Mod1 Q-prefix rows must be positive, got %d", authorityRows)
+	}
+	if authorityRows > width {
+		authorityRows = width
+	}
+	return authorityRows, nil
 }
 
 func normalizedLogN13Profile(params *ckks.Parameters, mod1Params Parameters) bool {
@@ -186,11 +214,11 @@ func nearestPowerOfTwoExponent(scale rlwe.Scale) (int, error) {
 	return exponent - 1, nil
 }
 
-func qPrefixComponentZero(ct *rlwe.Ciphertext, component int) bool {
+func qPrefixComponentZero(ct *rlwe.Ciphertext, component, authorityRows int) bool {
 	if ct == nil || component < 0 || component >= len(ct.Value) || len(ct.Value[component].Coeffs) < 2 {
 		return false
 	}
-	rows, err := fastckks.QPrefixWidth(ct.Level())
+	rows, err := qPrefixRowsAtLevel(ct.Level(), authorityRows)
 	if err != nil || rows > len(ct.Value[component].Coeffs) {
 		return false
 	}
@@ -204,7 +232,7 @@ func qPrefixComponentZero(ct *rlwe.Ciphertext, component int) bool {
 	return true
 }
 
-func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputScale, targetScale rlwe.Scale, mod1Params Parameters, planScale rlwe.Scale) (*rlwe.Ciphertext, error) {
+func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputScale, targetScale rlwe.Scale, mod1Params Parameters, planScale rlwe.Scale, authorityRows int) (*rlwe.Ciphertext, error) {
 	params := eval.FastCKKS.GetParameters()
 	planBits := normalizedLogN13PlanScaleBitsForParams(params)
 	workingExponent, kExponent, multiplierExponent := 31, 29, 30
@@ -212,7 +240,7 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		workingExponent, kExponent, multiplierExponent = 33, 27, 28
 	}
 	workingScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(workingExponent)))
-	if res.Level() != 7 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(workingScale, 32) || !qPrefixComponentZero(res, 1) {
+	if res.Level() != 7 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(workingScale, 32) || !qPrefixComponentZero(res, 1, authorityRows) {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 polynomial output invariant failed: level=%d degree=%d scale=%s isNTT=%t isMontgomery=%t", res.Level(), res.Degree(), res.Scale.Value.Text('e', 20), res.IsNTT, res.IsMontgomery)
 	}
 	if !planScale.Equal(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), uint(planBits)))) {
@@ -238,7 +266,7 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		if beforeLevel < 1 {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d has insufficient level %d", round, beforeLevel)
 		}
-		rows, err := fastckks.QPrefixWidth(res.Level())
+		rows, err := qPrefixRowsAtLevel(res.Level(), authorityRows)
 		if err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d Q-prefix: %w", round, err)
 		}
@@ -272,10 +300,10 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		if err := eval.FastCKKS.RescaleQPrefixRows(res, rows, res); err != nil {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d rescale: %w", round, err)
 		}
-		if res.Level() != beforeLevel-1 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(nextScale, 32) || !qPrefixComponentZero(res, 1) {
+		if res.Level() != beforeLevel-1 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !res.Scale.InDelta(nextScale, 32) || !qPrefixComponentZero(res, 1, authorityRows) {
 			return nil, fmt.Errorf("Fast Mod1 normalized LogN13 round %d invariant failed: level=%d scale=%s", round, res.Level(), res.Scale.Value.Text('e', 20))
 		}
-		rows, err = fastckks.QPrefixWidth(res.Level())
+		rows, err = qPrefixRowsAtLevel(res.Level(), authorityRows)
 		if err != nil {
 			return nil, err
 		}
@@ -288,14 +316,14 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final recurrence state invalid: level=%d k=%d", res.Level(), currentExponent)
 	}
 	beforeRestoreScale := res.Scale
-	rows, err := fastckks.QPrefixWidth(res.Level())
+	rows, err := qPrefixRowsAtLevel(res.Level(), authorityRows)
 	if err != nil {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final Q-prefix: %w", err)
 	}
 	if err := eval.FastCKKS.MulIntegerQPrefixRows(res, new(big.Int).Lsh(big.NewInt(1), uint(currentExponent)), rows, res); err != nil {
 		return nil, fmt.Errorf("Fast Mod1 normalized LogN13 final restore: %w", err)
 	}
-	if !res.Scale.Equal(beforeRestoreScale) || res.Level() != 4 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !qPrefixComponentZero(res, 1) {
+	if !res.Scale.Equal(beforeRestoreScale) || res.Level() != 4 || res.Degree() != 1 || !res.IsNTT || !res.IsMontgomery || !qPrefixComponentZero(res, 1, authorityRows) {
 		return nil, errors.New("Fast Mod1 normalized LogN13 final restore invariant failed")
 	}
 	res.Scale = inputScale
@@ -308,7 +336,7 @@ func (eval *FastEvaluator) evaluateNormalizedLogN13(res *rlwe.Ciphertext, inputS
 	return res, nil
 }
 
-func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext) error {
+func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext, authorityRows int) error {
 	if eval == nil || eval.FastCKKS == nil || eval.PolynomialEvaluator == nil {
 		return errors.New("Fast Mod1 evaluator and dependencies cannot be nil")
 	}
@@ -333,15 +361,21 @@ func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext) error {
 	if !ct.IsNTT || !ct.IsMontgomery {
 		return errors.New("Fast Mod1 requires NTT-domain Montgomery input")
 	}
-	rows, err := fastckks.QPrefixWidth(ct.Level())
+	width, err := fastckks.QPrefixWidth(ct.Level())
 	if err != nil {
 		return fmt.Errorf("Fast Mod1 input Q-prefix: %w", err)
 	}
+	if authorityRows < 1 || authorityRows > width {
+		return fmt.Errorf("Fast Mod1 input Q-prefix rows %d exceed Level %d width %d", authorityRows, ct.Level(), width)
+	}
 	for d := 0; d <= 1; d++ {
-		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < rows ||
-			len(ct.Value[d].Coeffs[0]) != eval.FastCKKS.GetParameters().N() ||
-			len(ct.Value[d].Coeffs[rows-1]) != eval.FastCKKS.GetParameters().N() {
+		if len(ct.Value) <= d || len(ct.Value[d].Coeffs) < authorityRows {
 			return errors.New("Fast Mod1 input has invalid maintained storage")
+		}
+		for row := 0; row < authorityRows; row++ {
+			if len(ct.Value[d].Coeffs[row]) != eval.FastCKKS.GetParameters().N() {
+				return fmt.Errorf("Fast Mod1 input row %d has invalid maintained storage", row)
+			}
 		}
 	}
 	if len(eval.Parameters.Mod1Poly.Coeffs) == 0 {
@@ -359,15 +393,11 @@ func (eval *FastEvaluator) validate(ct *rlwe.Ciphertext) error {
 // cloneFastCiphertext copies only the authoritative Q-prefix rows. The public
 // ciphertext remains structurally compatible at the logical input level, but
 // dormant higher rows are never read from the Fast input.
-func cloneFastCiphertext(params ckks.Parameters, src *rlwe.Ciphertext) *rlwe.Ciphertext {
+func cloneFastCiphertext(params ckks.Parameters, src *rlwe.Ciphertext, rows int) *rlwe.Ciphertext {
 	dst := fastckks.NewCiphertext(params, 1, src.Level())
 	*dst.MetaData = *src.MetaData
 	dst.IsNTT = src.IsNTT
 	dst.IsMontgomery = src.IsMontgomery
-	rows, err := fastckks.QPrefixWidth(src.Level())
-	if err != nil {
-		panic(err)
-	}
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb < rows; limb++ {
 			copy(dst.Value[d].Coeffs[limb], src.Value[d].Coeffs[limb])

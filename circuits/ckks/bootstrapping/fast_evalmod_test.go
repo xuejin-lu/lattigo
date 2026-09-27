@@ -35,6 +35,27 @@ func fastEvalModParameters(t testing.TB, logN int) (Parameters, ckks.Parameters)
 	return Parameters{BootstrappingParameters: params, Mod1ParametersLiteral: literal}, params
 }
 
+func fastEvalModP93Parameters(t testing.TB) (Parameters, ckks.Parameters) {
+	t.Helper()
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{56, 39, 40, 40, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	literal := mod1.ParametersLiteral{
+		LevelQ:          12,
+		LogScale:        60,
+		Mod1Type:        mod1.CosDiscrete,
+		LogMessageRatio: 10,
+		K:               16,
+		Mod1Degree:      30,
+		DoubleAngle:     3,
+		Mod1InvDegree:   0,
+	}
+	return Parameters{BootstrappingParameters: params, Mod1ParametersLiteral: literal}, params
+}
+
 func newFastEvalModInput(params ckks.Parameters, mod1Params mod1.Parameters) *rlwe.Ciphertext {
 	ct := ckks.NewCiphertext(params, 1, mod1Params.LevelQ)
 	ct.IsNTT = true
@@ -114,4 +135,32 @@ func TestFastEvalModDefaultLikeWrapperScale(t *testing.T) {
 	require.True(t, out.Scale.Equal(params.DefaultScale()))
 	require.True(t, out.IsNTT)
 	require.True(t, out.IsMontgomery)
+}
+
+func TestFastEvalModP93ExplicitQPrefixConsumesQ3(t *testing.T) {
+	bootstrapParams, params := fastEvalModP93Parameters(t)
+	eval, err := NewFastEvaluator(bootstrapParams)
+	require.NoError(t, err)
+	input := newFastEvalModInput(params, eval.Mod1Parameters)
+	poisoned := input.CopyNew()
+	q3 := params.Q()[3]
+	for i, residue := range poisoned.Value[0].Coeffs[3] {
+		poisoned.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
+	}
+
+	cleanOutput, err := eval.EvalMod(input)
+	require.NoError(t, err)
+	poisonedOutput, err := eval.EvalMod(poisoned)
+	require.NoError(t, err)
+	require.Equal(t, 4, cleanOutput.Level())
+	require.Equal(t, cleanOutput.Level(), poisonedOutput.Level())
+	require.True(t, cleanOutput.Scale.Equal(params.DefaultScale()))
+	q3Changed := false
+	for i := range cleanOutput.Value[0].Coeffs[3] {
+		if cleanOutput.Value[0].Coeffs[3][i] != poisonedOutput.Value[0].Coeffs[3][i] {
+			q3Changed = true
+			break
+		}
+	}
+	require.True(t, q3Changed, "Bootstrap EvalMod explicit path must consume and propagate q3")
 }

@@ -39,7 +39,14 @@ func (eval *FastEvaluator) EvalMod(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, err
 	if eval == nil || eval.Mod1Evaluator == nil {
 		return nil, errors.New("Fast Bootstrap Mod1 evaluator cannot be nil")
 	}
-	ctOut, err := eval.Mod1Evaluator.EvaluateNew(ctIn)
+	if ctIn == nil {
+		return nil, errors.New("Fast Bootstrap Mod1 ciphertext cannot be nil")
+	}
+	rows, err := fastckks.QPrefixWidth(ctIn.Level())
+	if err != nil {
+		return nil, err
+	}
+	ctOut, err := eval.Mod1Evaluator.EvaluateNewQPrefixRows(ctIn, rows)
 	if err != nil {
 		return nil, err
 	}

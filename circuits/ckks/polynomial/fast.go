@@ -16,9 +16,9 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
 
-// FastEvaluator evaluates a single Chebyshev polynomial with the explicit
-// Q-prefix-authoritative Fast CKKS evaluator. It is intentionally a bounded
-// polynomial surface and does not implement schemes.Evaluator.
+// FastEvaluator evaluates a single Chebyshev polynomial with the bounded Fast
+// CKKS evaluator. Explicit-row entry points expose Q-prefix authority without
+// changing the maintained-row contract of legacy wrappers.
 //
 // FastEvaluator is not safe for concurrent use. Its workspace is reused by
 // successive calls to Evaluate.
@@ -76,7 +76,14 @@ func (eval *FastEvaluator) LastGuardSelectionEvidence() GuardSelectionEvidence {
 // polynomial surface accepts Chebyshev polynomials in the Standard ring with
 // NTT/Montgomery degree-one input at a level containing q0 and q1.
 func (eval *FastEvaluator) Evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale) (*rlwe.Ciphertext, error) {
-	return eval.evaluate(input, p, targetScale, nil, false)
+	return eval.evaluate(input, p, targetScale, nil, false, 0, false)
+}
+
+// EvaluateQPrefixRows evaluates p while explicitly selecting the arithmetic
+// Q-prefix row count. The legacy Evaluate method intentionally retains the
+// maintained-row contract for compatibility.
+func (eval *FastEvaluator) EvaluateQPrefixRows(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, rows int) (*rlwe.Ciphertext, error) {
+	return eval.evaluate(input, p, targetScale, nil, false, rows, true)
 }
 
 // EvaluateWithPlanScale evaluates the same Paterson-Stockmeyer plan as
@@ -87,7 +94,16 @@ func (eval *FastEvaluator) EvaluateWithPlanScale(input *rlwe.Ciphertext, p bignu
 	if planScale.Value.Sign() <= 0 {
 		return nil, errors.New("Fast polynomial plan scale must be positive")
 	}
-	return eval.evaluate(input, p, targetScale, &planScale, false)
+	return eval.evaluate(input, p, targetScale, &planScale, false, 0, false)
+}
+
+// EvaluateWithPlanScaleQPrefixRows evaluates p with an explicit arithmetic
+// Q-prefix row count and the requested Paterson-Stockmeyer value scale.
+func (eval *FastEvaluator) EvaluateWithPlanScaleQPrefixRows(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale, planScale rlwe.Scale, rows int) (*rlwe.Ciphertext, error) {
+	if planScale.Value.Sign() <= 0 {
+		return nil, errors.New("Fast polynomial plan scale must be positive")
+	}
+	return eval.evaluate(input, p, targetScale, &planScale, false, rows, true)
 }
 
 // EvaluateWithPlanScaleFinalParentOneBitScalarGuard evaluates the normalized
@@ -97,10 +113,19 @@ func (eval *FastEvaluator) EvaluateWithPlanScaleFinalParentOneBitScalarGuard(inp
 	if planScale.Value.Sign() <= 0 {
 		return nil, errors.New("Fast polynomial guarded plan scale must be positive")
 	}
-	return eval.evaluate(input, p, targetScale, &planScale, true)
+	return eval.evaluate(input, p, targetScale, &planScale, true, 0, false)
 }
 
-func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, planScale *rlwe.Scale, guardFinalParent bool) (*rlwe.Ciphertext, error) {
+// EvaluateWithPlanScaleFinalParentOneBitScalarGuardQPrefixRows is the explicit
+// Q-prefix counterpart of the guarded legacy wrapper.
+func (eval *FastEvaluator) EvaluateWithPlanScaleFinalParentOneBitScalarGuardQPrefixRows(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale, planScale rlwe.Scale, rows int) (*rlwe.Ciphertext, error) {
+	if planScale.Value.Sign() <= 0 {
+		return nil, errors.New("Fast polynomial guarded plan scale must be positive")
+	}
+	return eval.evaluate(input, p, targetScale, &planScale, true, rows, true)
+}
+
+func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial, targetScale rlwe.Scale, planScale *rlwe.Scale, guardFinalParent bool, explicitRows int, useExplicitRows bool) (*rlwe.Ciphertext, error) {
 	if eval == nil || eval.Evaluator == nil {
 		return nil, errors.New("Fast polynomial evaluator cannot be nil")
 	}
@@ -144,9 +169,27 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 		return nil, fmt.Errorf("%d levels < %d log(d) -> cannot evaluate poly", input.Level(), levelsConsumed*commonPoly.Depth())
 	}
 
-	rows, err := fastckks.QPrefixWidth(input.Level())
-	if err != nil {
-		return nil, fmt.Errorf("Fast polynomial input Q-prefix: %w", err)
+	rows := explicitRows
+	if !useExplicitRows {
+		rows = fastckks.MaintainedLimbCount(&eval.Parameters, input.Level())
+	} else {
+		width, err := fastckks.QPrefixWidth(input.Level())
+		if err != nil {
+			return nil, fmt.Errorf("Fast polynomial input Q-prefix: %w", err)
+		}
+		if rows < 1 || rows > width {
+			return nil, fmt.Errorf("Fast polynomial Q-prefix rows %d exceed Level %d width %d", rows, input.Level(), width)
+		}
+	}
+	for d := 0; d <= input.Degree(); d++ {
+		if len(input.Value) <= d || len(input.Value[d].Coeffs) < rows {
+			return nil, fmt.Errorf("Fast polynomial input has fewer than %d selected Q-prefix rows", rows)
+		}
+		for limb := 0; limb < rows; limb++ {
+			if len(input.Value[d].Coeffs[limb]) != eval.Parameters.N() {
+				return nil, fmt.Errorf("Fast polynomial input row %d has invalid storage", limb)
+			}
+		}
 	}
 	ws := &eval.workspace
 	ws.reset(eval.Parameters, input, rows)
