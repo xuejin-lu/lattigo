@@ -1,23 +1,29 @@
 # Current Task
 
-Task: QPREFIX-IMPL-006
+Task: QPREFIX-IMPL-007
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
-`specs/QPREFIX-IMPL-006-LINEARTRANSFORM-DFT-C2S-S2C.md`
+`specs/QPREFIX-IMPL-007-EVALMOD-PS-DOUBLEANGLE.md`
 
 Accepted prerequisite:
-`08b36b0b730dcc57eb98466594796c10bffbfdb9`
+`2aaec605951b4469cef6db10c28453422204595e`
 
 Implement:
-- explicit-row LinearTransform direct + BSGS;
-- explicit-row DFT factor execution;
-- production C2S q0123 activation from the migrated ModUp boundary;
-- exact q3 group/checkpoint/capacity evidence;
-- S2C q-prefix capability without premature production q0123 activation.
+- explicit q0123 authority through Mod1 input clone;
+- polynomial workspace/power generation;
+- PS baby/giant steps and scale alignment;
+- explicit-row Mul/MulRelin/Relinearize/MulThenAdd/scalar Add/Sub;
+- q0123 one-bit guard;
+- all EvalMod Rescale boundaries;
+- DoubleAngle;
+- final EvalMod output q0123 contract;
+- production S2C activation only after that contract is proven.
 
-Do not migrate EvalMod/PS/DoubleAngle.
-Do not assume allocated q3 is authoritative at EvalMod->S2C.
-Do not touch packing/N1-N2, parameters, F, full-RNS fallback, or `fast-ckks`.
+For accepted P93, Level remains >=4 through EvalMod, so rows=4 must remain authoritative throughout.
+
+Preserve the existing accepted P93 polynomial/PS/scale/DoubleAngle schedule.
+Do not redesign polynomial coefficients, PS split, parameters, DFT factorization, packing/N1-N2, or public error gates.
+Do not add F/full-RNS fallback or modify `fast-ckks`.
 
 Commit/push `fast-qprefix` after focused and full regressions pass, then report `READY_FOR_WEB_REVIEW`.
