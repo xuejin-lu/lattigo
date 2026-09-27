@@ -1,20 +1,27 @@
 # Current Task
 
-Task: QPREFIX-IMPL-007-REVIEW-FIX-2
+Task: QPREFIX-IMPL-008
 Status: READY_FOR_CODEX
 
-Accepted candidate:
-`4c6d7f207ddbaa531eb6d1010ffa6cd8ab08eace`
+Authoritative Primary specification:
+`specs/QPREFIX-IMPL-008-PUBLIC-BOOTSTRAP-BOUNDARY.md`
 
-Final blocker:
-the real `bootstrapCore` bypasses the q0123-aware Bootstrap SlotsToCoeffs wrapper and still calls legacy `DFTEvaluator.SlotsToCoeffsNew`.
+Accepted prerequisite:
+`74c058ad59655f2a47efcb4faf1cf38324bd6137`
 
-Required fix only:
-- at the actual EvalMod->S2C production handoff, pass explicit `QPrefixWidth(EvalModOutput.Level())`;
-- use the q-prefix-capable S2C API from QPREFIX-IMPL-006;
-- keep the legacy DFT `SlotsToCoeffsNew` wrapper unchanged;
-- add a regression through the real Bootstrap/BootstrapMany call graph proving q3 is consumed by production S2C.
+Implement only the public/structural boundary:
+- explicit-row N1<->N2 conversion up to 4 rows;
+- explicit-row packing/unpacking;
+- production BootstrapMany public authority selection;
+- finalization/public output contract;
+- dormant-row isolation and public API equivalence.
 
-Do not change polynomial/PS/DoubleAngle mathematics, capacity logic, DFT factorization, packing/N1-N2, parameters, or `fast-ckks`.
+Important:
+- current public Residual MaxLevel <=1, so production public rows are only 1 or 2;
+- q0123 remains an internal Bootstrap representation;
+- do not widen public ciphertexts just because internal circuit is q0123;
+- keep legacy ring-degree/packing wrappers legacy-authority.
 
-Run focused/full regressions, push normally, then report `READY_FOR_WEB_REVIEW`.
+Do not alter C2S/EvalMod/S2C mathematics, polynomial/DFT schedules, parameters, F/full-RNS fallback, or `fast-ckks`.
+
+Commit/push `fast-qprefix` after focused and full regressions pass, then report `READY_FOR_WEB_REVIEW`.
