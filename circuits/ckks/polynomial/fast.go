@@ -17,7 +17,7 @@ import (
 )
 
 // FastEvaluator evaluates a single Chebyshev polynomial with the explicit
-// q0/q1-authoritative Fast CKKS evaluator. It is intentionally a bounded
+// Q-prefix-authoritative Fast CKKS evaluator. It is intentionally a bounded
 // polynomial surface and does not implement schemes.Evaluator.
 //
 // FastEvaluator is not safe for concurrent use. Its workspace is reused by
@@ -864,7 +864,7 @@ func copyQPrefixAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, level
 		return errors.New("Fast polynomial Q-prefix copy operands cannot be nil")
 	}
 	if level < 0 || level > src.Level() {
-		return fmt.Errorf("Fast polynomial maintained copy level %d is outside source level %d", level, src.Level())
+		return fmt.Errorf("Fast polynomial Q-prefix copy level %d is outside source level %d", level, src.Level())
 	}
 	fastckks.Resize(dst, src.Degree(), level, params.N())
 	*dst.MetaData = *src.MetaData

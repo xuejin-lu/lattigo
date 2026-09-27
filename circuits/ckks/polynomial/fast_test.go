@@ -77,7 +77,7 @@ func TestFastPolynomialEvaluatorSmokeAndReuse(t *testing.T) {
 	require.NotSame(t, first, second)
 }
 
-func TestFastPolynomialPowerBasisQ01Oracle(t *testing.T) {
+func TestFastPolynomialPowerBasisQPrefixRowsOracle(t *testing.T) {
 	params := fastPolynomialTestParameters(t)
 	eval := NewFastEvaluator(params, nil)
 	input := fastPolynomialTestCiphertext(params, 7)
@@ -384,6 +384,92 @@ func TestFastPolynomialPublicResultCopiesQPrefixOnly(t *testing.T) {
 			require.Empty(t, public.Value[d].Coeffs[limb])
 		}
 	}
+}
+
+func TestFastPolynomialQ3PoisonPropagatesAcrossBabyGiantAndFinalPS(t *testing.T) {
+	params := fastPolynomialTestParameters(t)
+	const rows = fastckks.MaxQPrefixWidth
+	poisonQ3 := func(ct *rlwe.Ciphertext) *rlwe.Ciphertext {
+		poisoned := ct.CopyNew()
+		q3 := params.Q()[3]
+		for i, residue := range poisoned.Value[0].Coeffs[3] {
+			poisoned.Value[0].Coeffs[3][i] = (residue + uint64(97+i)) % q3
+		}
+		return poisoned
+	}
+	assertQ012SameQ3Different := func(clean, poisoned *rlwe.Ciphertext, context string) {
+		t.Helper()
+		require.Equal(t, clean.Level(), poisoned.Level(), context)
+		q3Changed := false
+		for component := range clean.Value {
+			for row := 0; row < 3; row++ {
+				require.Equal(t, clean.Value[component].Coeffs[row], poisoned.Value[component].Coeffs[row], "%s q%d component=%d", context, row, component)
+			}
+			for i, residue := range clean.Value[component].Coeffs[3] {
+				if residue != poisoned.Value[component].Coeffs[3][i] {
+					q3Changed = true
+					break
+				}
+			}
+		}
+		require.True(t, q3Changed, "%s must consume and freshly produce q3", context)
+	}
+
+	// Baby-step accumulation has no Rescale, so q3-only input poison must
+	// remain rowwise: q012 are identical and q3 changes.
+	baby1 := fastPolynomialTestCiphertext(params, 101)
+	poisonedBaby1 := poisonQ3(baby1)
+	baby2 := fastPolynomialTestCiphertext(params, 151)
+	poly := commonpolynomial.NewPolynomial(fastPolynomialTestPoly(2))
+	poly.Level, poly.Scale = baby1.Level(), baby1.Scale
+	cleanBabyEval, poisonedBabyEval := NewFastEvaluator(params, nil), NewFastEvaluator(params, nil)
+	cleanBabyEval.workspace.reset(params, baby1, rows)
+	poisonedBabyEval.workspace.reset(params, poisonedBaby1, rows)
+	cleanBaby, err := cleanBabyEval.workspace.evaluateBabyStep(params, cleanBabyEval.Evaluator, poly, map[int]*rlwe.Ciphertext{1: baby1, 2: baby2}, 0, false)
+	require.NoError(t, err)
+	poisonedBaby, err := poisonedBabyEval.workspace.evaluateBabyStep(params, poisonedBabyEval.Evaluator, poly, map[int]*rlwe.Ciphertext{1: poisonedBaby1, 2: baby2}, 0, false)
+	require.NoError(t, err)
+	assertQ012SameQ3Different(cleanBaby.Value, poisonedBaby.Value, "baby-step")
+
+	// In a giant step the q3-only poison is placed in xpow, after the
+	// independently identical b Rescale. The following multiply/add must
+	// update q3 without cross-row contamination of q012.
+	newAtLevel := func(offset uint64, level int) *rlwe.Ciphertext {
+		ct := fastPolynomialTestCiphertext(params, offset)
+		fastckks.Resize(ct, ct.Degree(), level, params.N())
+		return ct
+	}
+	makeGiantOperands := func(poisoned bool) (a, b, xpow *rlwe.Ciphertext) {
+		b = newAtLevel(181, 4)
+		xpow = newAtLevel(211, 3)
+		a = newAtLevel(241, 3)
+		b.Scale = rlwe.NewScale(1 << 40)
+		xpow.Scale = rlwe.NewScale(1 << 30)
+		a.Scale = b.Scale.Div(rlwe.NewScale(params.Q()[4])).Mul(xpow.Scale)
+		if poisoned {
+			xpow = poisonQ3(xpow)
+		}
+		return
+	}
+	cleanA, cleanB, cleanXpow := makeGiantOperands(false)
+	poisonedA, poisonedB, poisonedXpow := makeGiantOperands(true)
+	cleanGiantEval, poisonedGiantEval := NewFastEvaluator(params, nil), NewFastEvaluator(params, nil)
+	cleanGiantEval.workspace.reset(params, cleanB, rows)
+	poisonedGiantEval.workspace.reset(params, poisonedB, rows)
+	require.NoError(t, cleanGiantEval.workspace.evaluateMonomial(params, cleanGiantEval.Evaluator, cleanA, cleanB, cleanXpow))
+	require.NoError(t, poisonedGiantEval.workspace.evaluateMonomial(params, poisonedGiantEval.Evaluator, poisonedA, poisonedB, poisonedXpow))
+	assertQ012SameQ3Different(cleanB, poisonedB, "giant-step")
+
+	// Public PS output must not inherit a stale q3 row when the input q3
+	// history differs.
+	finalInput := fastPolynomialTestCiphertext(params, 271)
+	cleanFinalEval := NewFastEvaluator(params, nil)
+	cleanFinal, err := cleanFinalEval.Evaluate(finalInput, fastPolynomialTestPoly(3), params.DefaultScale())
+	require.NoError(t, err)
+	poisonedFinal, err := cleanFinalEval.Evaluate(poisonQ3(finalInput), fastPolynomialTestPoly(3), params.DefaultScale())
+	require.NoError(t, err)
+	require.Equal(t, cleanFinal.Level(), poisonedFinal.Level())
+	require.NotEqual(t, cleanFinal.Value[0].Coeffs[3], poisonedFinal.Value[0].Coeffs[3], "final PS q3 must follow the input q3 history")
 }
 
 func TestFastPolynomialRepresentativeDegree30(t *testing.T) {
