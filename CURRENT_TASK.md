@@ -1,26 +1,20 @@
 # Current Task
 
-Task: QPREFIX-IMPL-007-REVIEW-FIX
+Task: QPREFIX-IMPL-007-REVIEW-FIX-2
 Status: READY_FOR_CODEX
 
 Accepted candidate:
-`980be10e7ad8d14df4541526c05b4bcb44f17996`
+`4c6d7f207ddbaa531eb6d1010ffa6cd8ab08eace`
 
-Only blocker:
-legacy exported polynomial/Mod1 wrappers must not infer q0123 authority from allocated backing.
+Final blocker:
+the real `bootstrapCore` bypasses the q0123-aware Bootstrap SlotsToCoeffs wrapper and still calls legacy `DFTEvaluator.SlotsToCoeffsNew`.
 
-Required bounded fix:
-- restore legacy row authority on existing exported polynomial Evaluate wrappers;
-- add explicit-row polynomial entry points and keep all current q0123 implementation behind them;
-- restore legacy authority on `mod1.FastEvaluator.EvaluateNew`;
-- add explicit-row Mod1 entry point;
-- production Bootstrap EvalMod explicitly passes `QPrefixWidth(input.Level())` to that new path;
-- keep current q0123 capacity/PS/guard/DoubleAngle/S2C behavior unchanged.
+Required fix only:
+- at the actual EvalMod->S2C production handoff, pass explicit `QPrefixWidth(EvalModOutput.Level())`;
+- use the q-prefix-capable S2C API from QPREFIX-IMPL-006;
+- keep the legacy DFT `SlotsToCoeffsNew` wrapper unchanged;
+- add a regression through the real Bootstrap/BootstrapMany call graph proving q3 is consumed by production S2C.
 
-Add q3 poison compatibility tests proving:
-- legacy wrappers ignore non-authoritative q3;
-- explicit rows=4 paths consume q3.
+Do not change polynomial/PS/DoubleAngle mathematics, capacity logic, DFT factorization, packing/N1-N2, parameters, or `fast-ckks`.
 
-Do not modify the polynomial schedule, parameters, capacity logic, S2C mathematics, packing/N1-N2, or `fast-ckks`.
-
-Run focused/full regressions and push normally, then report `READY_FOR_WEB_REVIEW`.
+Run focused/full regressions, push normally, then report `READY_FOR_WEB_REVIEW`.
