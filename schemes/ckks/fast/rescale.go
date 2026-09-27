@@ -130,6 +130,33 @@ func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
 	return eval.rescaleNQPrefix(op0, nbRescales, sourceRows, opOut)
 }
 
+// RescaleQPrefixRows applies Standard CKKS Rescale semantics using exactly
+// rows authoritative source limbs. The output contracts naturally to the
+// Q-prefix width of its new logical Level.
+func (eval *Evaluator) RescaleQPrefixRows(op0 *rlwe.Ciphertext, rows int, opOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	if op0 == nil || opOut == nil {
+		return errors.New("op0 and opOut cannot be nil")
+	}
+	if op0.MetaData == nil || opOut.MetaData == nil {
+		return errors.New("op0 and opOut metadata cannot be nil")
+	}
+	nbRescales := eval.Parameters.LevelsConsumedPerRescaling()
+	if op0.Level() < nbRescales {
+		return errors.New("cannot Rescale: input Ciphertext level is too low")
+	}
+	width, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
+	if rows < 1 || rows > width {
+		return fmt.Errorf("Fast Rescale row count %d must be in [1,%d] at level %d", rows, width, op0.Level())
+	}
+	return eval.rescaleNQPrefix(op0, nbRescales, rows, opOut)
+}
+
 // RescaleTo repeatedly rescales until the scale reaches minScale, or another
 // rescale would take it below minScale/2. It preserves the Standard stopping
 // rule while allowing the output to reach Level 0.

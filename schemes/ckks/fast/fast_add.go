@@ -20,13 +20,34 @@ func FastAdd(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext) error {
 	return fastAddSub(ringQ, op0, op1, opOut, false)
 }
 
+// FastAddQPrefixRows adds exactly rows explicit Q-prefix limbs. Rows above the
+// request are neither read nor written.
+func FastAddQPrefixRows(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, rows int) error {
+	return fastAddSubRows(ringQ, op0, op1, opOut, false, rows)
+}
+
 // FastSub subtracts op1 from op0 using only their authoritative q0 and q1
 // limbs. Limbs q2 and above are deliberately neither read nor written.
 func FastSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext) error {
 	return fastAddSub(ringQ, op0, op1, opOut, true)
 }
 
+// FastSubQPrefixRows subtracts exactly rows explicit Q-prefix limbs. Rows
+// above the request are neither read nor written.
+func FastSubQPrefixRows(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, rows int) error {
+	return fastAddSubRows(ringQ, op0, op1, opOut, true, rows)
+}
+
 func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) error {
+	if ringQ == nil || op0 == nil || op1 == nil || opOut == nil {
+		return fastAddSubRows(ringQ, op0, op1, opOut, sub, 0)
+	}
+	level := utils.Min(op0.Level(), op1.Level())
+	level = utils.Min(level, opOut.Level())
+	return fastAddSubRows(ringQ, op0, op1, opOut, sub, maintainedLimbCountForRingAtLevel(ringQ, level))
+}
+
+func fastAddSubRows(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool, rows int) error {
 	if ringQ == nil {
 		return errors.New("ringQ cannot be nil")
 	}
@@ -57,7 +78,6 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	maxDegree := utils.Max(op0.Degree(), op1.Degree())
 	minDegree := utils.Min(op0.Degree(), op1.Degree())
 
-	rows := maintainedLimbCountForRingAtLevel(ringQ, level)
 	validate := func(name string, ct *rlwe.Ciphertext, degree int) error {
 		if ct.N() != opOut.N() || ct.N() != ringQ.N() {
 			return fmt.Errorf("%s dimension does not match output", name)
@@ -118,6 +138,26 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 	}
 
 	return nil
+}
+
+// AddQPrefixRows adds two ciphertexts using exactly rows explicit Q-prefix
+// limbs. It is intended for circuits whose input producer has established a
+// wider authority than the legacy Add wrapper.
+func (eval *Evaluator) AddQPrefixRows(op0, op1, opOut *rlwe.Ciphertext, rows int) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	return FastAddQPrefixRows(eval.Parameters.RingQ(), op0, op1, opOut, rows)
+}
+
+// SubQPrefixRows subtracts two ciphertexts using exactly rows explicit
+// Q-prefix limbs. It is intended for circuits whose input producer has
+// established a wider authority than the legacy Sub wrapper.
+func (eval *Evaluator) SubQPrefixRows(op0, op1, opOut *rlwe.Ciphertext, rows int) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	return FastSubQPrefixRows(eval.Parameters.RingQ(), op0, op1, opOut, rows)
 }
 
 func copyQ01(src, dst ring.Poly) {

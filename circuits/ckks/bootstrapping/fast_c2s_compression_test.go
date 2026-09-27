@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
@@ -131,49 +133,82 @@ func TestFastLogN13C2SRescaleMatchesAcceptedQPrefixAudit002Checkpoints(t *testin
 	require.NoError(t, err)
 	require.Equal(t, []uint64{72057594037616641, 549755731969, 549756026881, 549755486209}, params.BootstrappingParameters.Q()[:4])
 
-	assertCheckpoint := func(name string, level int, scale rlwe.Scale, rowHash string) {
+	assertCheckpoint := func(name string, level int, scale rlwe.Scale, rowHash string) []*big.Int {
 		t.Helper()
 		require.Equal(t, level, state.Level(), "%s Level", name)
 		require.Equal(t, 1, state.Degree(), "%s Degree", name)
 		require.True(t, scale.Equal(state.Scale), "%s Scale: want %s, got %s", name, scale.Value.Text('e', 39), state.Scale.Value.Text('e', 39))
-		require.Equal(t, rowHash, acceptedC2SRowHash(state, 3), "%s q0/q1/q2 rows", name)
+		rows, err := fastckks.QPrefixWidth(state.Level())
+		require.NoError(t, err)
+		require.Equal(t, 4, rows, "%s authoritative width", name)
+		gotHash := acceptedC2SRowHash(state, rows)
+		if rowHash != "" {
+			require.Equal(t, rowHash, gotHash, "%s q0/q1/q2/q3 rows", name)
+		}
+		bounds := exactCenteredQPrefixBounds(t, params.BootstrappingParameters, state, rows)
+		product, err := fastckks.QPrefixProduct(params.BootstrappingParameters.Q(), state.Level())
+		require.NoError(t, err)
+		require.NoError(t, fastckks.CheckQPrefixCapacity(state.Level(), params.BootstrappingParameters.Q(), bounds), "%s strict capacity", name)
+		rhos := make([]string, len(bounds))
+		for component, bound := range bounds {
+			numerator := new(big.Int).Lsh(new(big.Int).Set(bound), 1)
+			rhos[component] = new(big.Rat).SetFrac(numerator, product).RatString()
+		}
+		t.Logf("%s Level=%d rows=%d Scale=%s Degree=%d q0123_product=%s max_abs=%v rho_2B_over_SQ=%v q0123_hash=%s", name, state.Level(), rows, state.Scale.Value.Text('e', 8), state.Degree(), product, bigIntStrings(bounds), rhos, gotHash)
+		return bounds
 	}
 
 	wantScale := rlwe.NewScale(1 << 50)
-	assertCheckpoint("group_0_input", 16, wantScale, "e4f6962ee08e26b1dc03a651c8a4975d4d68f6b364fc148b2a6f59d5129b46e4")
+	assertCheckpoint("group_0_input", 16, wantScale, "0919ab7a416e89ff4692192e1d23da5c4f05654d2b88d3ef8c5e42d6415be78e")
 	checkpointHashes := [4][3]string{
-		{"c7f05f9273347df4df086c850f619818d7402e6bbf7d8069069e20ad138a90e1", "c57cf3e340e158e701e6e56539e360d6eb860b4ca9d1450b78b286b3be54f22a", "2dc4d4242018adb06afd3cf779065b5db5597a721d2aa5ad3300b992efb46c4d"},
-		{"2111e0e6bf829272ebab368bbf4f3de65a72fae62aebe74cd15eede4b57f8422", "5d613d674f2be122f6ae0b7227bf743382a44a53d6e3e11a27c7e75abfb1adb8", "f1a463babb9ef8a5c08e9df77d786f122d66c456153d8f6516fa8af290d48e43"},
-		{"7f7e0ac133652266ca788467417f5e9d46b43b09e697e02b9e95620a7284f5ea", "8f49746a616a7b9fdbfb05fcdd0406b9f074123813992e4e43295e26356a3171", ""},
-		{"faa566f804664ed30cd748c8998bc3bde2409c8d646bc21d2b6c7bc5e9adc004", "694627c930f6fd8aca8c1f80eefebf421b96203d124a3114924f8769a1548e48", ""},
+		{"6de7db234649194726f6e4768eac94c4ba8ee575b2e3fda82d7cce19a6360b43", "9f9eed406067252265eee1859669276ed0b6fa5fc8d492ecc88692d06a6c34a7", "c2cb9363f5b1c3e8bcc19b1ff5bf3cbb98af8f6cf0e8d5313ad3f808f66563ae"},
+		{"1bee43f083333d5a16b273f32e1a50b7d072a818cb93034088d01fe0d0481a30", "fa3cfebe842115b58c73e6cf59fffbae31585c2064a5b3e18681801dfe969668", "f2da9fe917c7528c19387283619d35f7c2c57f52d4f201636594c3fd20f012a5"},
+		{"ada753851f80a75cf6f9a70512f2259e5ddd42ea7fb706127ab4a02a4582d89a", "192d1cc718a7c57cb66cf82033293a691797984bae1d410a3d28c8452c05f641", ""},
+		{"80050cea635d89188101c61c33e64b1ac62d515efe557b31a330021723eef867", "03b608453b90b2a5b893d3200ffff4ba8995a37d34f1fb527e51460a5e9702f1", ""},
 	}
 	matrixIndex := 0
 	for group, factors := range eval.C2SDFTMatrix.Levels {
+		rows, err := fastckks.QPrefixWidth(state.Level())
+		require.NoError(t, err)
 		for range factors {
 			matrix := eval.C2SDFTMatrix.Matrices[matrixIndex]
 			wantScale = wantScale.Mul(matrix.Scale)
-			require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransform(state, ltcommon.LinearTransformation(matrix), state))
+			require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(state, ltcommon.LinearTransformation(matrix), rows, state))
 			matrixIndex++
 		}
 		levelBeforeRescale := state.Level()
-		assertCheckpoint("group_raw", levelBeforeRescale, wantScale, checkpointHashes[group][0])
+		rawBounds := assertCheckpoint("group_raw", levelBeforeRescale, wantScale, checkpointHashes[group][0])
 
-		wantScale = wantScale.Div(rlwe.NewScale(params.BootstrappingParameters.Q()[levelBeforeRescale]))
-		require.NoError(t, eval.FastCKKS.Rescale(state, state))
-		assertCheckpoint("group_post_rescale", levelBeforeRescale-1, wantScale, checkpointHashes[group][1])
+		divisor := new(big.Int).SetUint64(params.BootstrappingParameters.Q()[levelBeforeRescale])
+		wantScale = wantScale.Div(rlwe.NewScale(divisor))
+		require.NoError(t, eval.FastCKKS.RescaleQPrefixRows(state, rows, state))
+		targetRows, err := fastckks.QPrefixWidth(state.Level())
+		require.NoError(t, err)
+		rows = min(rows, targetRows)
+		postBounds := assertCheckpoint("group_post_rescale", levelBeforeRescale-1, wantScale, checkpointHashes[group][1])
+		rounding := new(big.Int).Rsh(new(big.Int).Sub(new(big.Int).Set(divisor), big.NewInt(1)), 1)
+		for component, bound := range rawBounds {
+			predicted := new(big.Int).Add(new(big.Int).Set(bound), rounding)
+			predicted.Div(predicted, divisor)
+			require.LessOrEqual(t, postBounds[component].Cmp(predicted), 0, "group %d component %d Rescale recurrence", group, component)
+		}
 
 		if exponent := eval.C2SRestorePlan[group]; exponent > 0 {
 			factor := new(big.Int).Lsh(big.NewInt(1), uint(exponent))
-			require.NoError(t, eval.FastCKKS.MulIntegerMaintained(state, factor, state))
+			require.NoError(t, eval.FastCKKS.MulIntegerQPrefixRows(state, factor, rows, state))
 			state.Scale = state.Scale.Mul(rlwe.NewScale(factor))
 			wantScale = wantScale.Mul(rlwe.NewScale(factor))
-			assertCheckpoint("group_post_restore", levelBeforeRescale-1, wantScale, checkpointHashes[group][2])
+			restoreBounds := assertCheckpoint("group_post_restore", levelBeforeRescale-1, wantScale, checkpointHashes[group][2])
+			for component, bound := range postBounds {
+				predicted := new(big.Int).Mul(new(big.Int).Set(bound), factor)
+				require.LessOrEqual(t, restoreBounds[component].Cmp(predicted), 0, "group %d component %d restore recurrence", group, component)
+			}
 		}
 	}
 	require.Equal(t, len(eval.C2SDFTMatrix.Matrices), matrixIndex)
 }
 
-func TestFastModUpToLegacyC2SQ3AuthorityTransition(t *testing.T) {
+func TestFastModUpToProductionC2SPreservesQ3Authority(t *testing.T) {
 	params, residual := fastLogN13CompressionParameters(t)
 	eval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
@@ -190,45 +225,18 @@ func TestFastModUpToLegacyC2SQ3AuthorityTransition(t *testing.T) {
 	require.Len(t, state.Value[0].Coeffs[3], params.BootstrappingParameters.N(), "ModUp establishes q3 authority")
 
 	q3Before := make([][]uint64, len(state.Value))
-	q012Before := make([][][]uint64, len(state.Value))
 	for component := range state.Value {
 		q3Before[component] = append([]uint64(nil), state.Value[component].Coeffs[3]...)
-		q012Before[component] = make([][]uint64, 3)
-		for row := 0; row < 3; row++ {
-			q012Before[component][row] = append([]uint64(nil), state.Value[component].Coeffs[row]...)
-		}
 	}
 
-	// QPREFIX-IMPL-006 has not migrated LinearTransform: this first legacy
-	// C2S producer consumes q012 only. q3 remains physically populated but its
-	// ModUp authority must no longer be assumed after this operation.
+	// Production C2S must preserve ModUp's complete q0123 authority at the
+	// first LinearTransform boundary.
 	firstMatrix := eval.C2SDFTMatrix.Matrices[0]
-	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransform(state, ltcommon.LinearTransformation(firstMatrix), state))
-	q012Changed := false
-	for component := range state.Value {
-		require.Equal(t, q3Before[component], state.Value[component].Coeffs[3], "legacy C2S must not claim to preserve q3 authority")
-		for row := 0; row < 3; row++ {
-			if !equalUint64Slices(q012Before[component][row], state.Value[component].Coeffs[row]) {
-				q012Changed = true
-			}
-		}
-	}
-	require.True(t, q012Changed, "the C2S producer must exercise its legacy q012 path")
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(state, ltcommon.LinearTransformation(firstMatrix), 4, state))
+	require.NotEqual(t, q3Before[0], state.Value[0].Coeffs[3], "C2S must transform c0 q3")
 }
 
-func equalUint64Slices(a, b []uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func TestFastLogN13C2SProductionRescaleIgnoresPoisonedQ3(t *testing.T) {
+func TestFastLogN13C2SExplicitRowsConsumeQ3(t *testing.T) {
 	params, residual := fastLogN13CompressionParameters(t)
 	eval, err := NewFastEvaluator(params)
 	require.NoError(t, err)
@@ -244,31 +252,68 @@ func TestFastLogN13C2SProductionRescaleIgnoresPoisonedQ3(t *testing.T) {
 	state, err = eval.ModUp(state)
 	require.NoError(t, err)
 
-	matrixIndex := 0
-	for range eval.C2SDFTMatrix.Levels[0] {
-		matrix := eval.C2SDFTMatrix.Matrices[matrixIndex]
-		require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransform(state, ltcommon.LinearTransformation(matrix), state))
-		matrixIndex++
-	}
+	clean := state.CopyNew()
 	poisoned := state.CopyNew()
 	q3 := params.BootstrappingParameters.Q()[3]
 	for component := range poisoned.Value {
-		require.Len(t, poisoned.Value[component].Coeffs, state.Level()+1)
-		require.Len(t, poisoned.Value[component].Coeffs[3], params.BootstrappingParameters.N())
 		for i, residue := range poisoned.Value[component].Coeffs[3] {
 			poisoned.Value[component].Coeffs[3][i] = (residue + uint64(101+i+component)) % q3
 		}
 	}
-
-	cleanOut := ckks.NewCiphertext(params.BootstrappingParameters, 1, state.Level()-1)
-	poisonedOut := ckks.NewCiphertext(params.BootstrappingParameters, 1, state.Level()-1)
-	require.NoError(t, eval.FastCKKS.Rescale(state, cleanOut))
-	require.NoError(t, eval.FastCKKS.Rescale(poisoned, poisonedOut))
-	require.Equal(t, state.Level()-1, cleanOut.Level())
-	require.True(t, cleanOut.Scale.Equal(poisonedOut.Scale))
-	for component := range cleanOut.Value {
+	firstMatrix := ltcommon.LinearTransformation(eval.C2SDFTMatrix.Matrices[0])
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(clean, firstMatrix, 4, clean))
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(poisoned, firstMatrix, 4, poisoned))
+	for component := range clean.Value {
 		for row := 0; row < 3; row++ {
-			require.Equal(t, cleanOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "production C2S Rescale must ignore q3 component=%d q%d", component, row)
+			require.Equal(t, clean.Value[component].Coeffs[row], poisoned.Value[component].Coeffs[row], "q3 poison must not affect q%d component=%d", row, component)
+		}
+		require.NotEqual(t, clean.Value[component].Coeffs[3], poisoned.Value[component].Coeffs[3], "explicit production C2S must consume q3 component=%d", component)
+	}
+}
+
+func TestFastLogN13S2CLegacyEvalModBoundaryDoesNotPromoteQ3(t *testing.T) {
+	params, residual := fastLogN13CompressionParameters(t)
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	require.NoError(t, eval.ensureFastBootstrapCircuit())
+	values := make([]complex128, residual.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)/16, float64((i%5)-2)/32)
+	}
+	input := fastBootstrapEncodedCiphertextAtLevel(t, residual, 0, params.CoeffsToSlotsParameters.LogSlots, values)
+	input, _, err = eval.ScaleDown(input)
+	require.NoError(t, err)
+	input, err = eval.ModUp(input)
+	require.NoError(t, err)
+	ctReal, ctImag, err := eval.DFTEvaluator.CoeffsToSlotsNewWithRestorePlan(input, eval.C2SDFTMatrix, eval.C2SRestorePlan)
+	require.NoError(t, err)
+	ctReal, err = eval.EvalMod(ctReal)
+	require.NoError(t, err)
+	ctImag, err = eval.EvalMod(ctImag)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, ctReal.Level(), 3, "EvalMod fixture must have a physical q3 row")
+	legacyRows := fastckks.MaintainedLimbCount(&params.BootstrappingParameters, ctReal.Level())
+	require.Equal(t, 3, legacyRows, "the current LogN13 EvalMod producer guarantees q012, not q0123")
+
+	poison := func(ct *rlwe.Ciphertext) *rlwe.Ciphertext {
+		out := ct.CopyNew()
+		q3 := params.BootstrappingParameters.Q()[3]
+		for component := range out.Value {
+			for i, residue := range out.Value[component].Coeffs[3] {
+				out.Value[component].Coeffs[3][i] = (residue + uint64(101+i+component)) % q3
+			}
+		}
+		return out
+	}
+	cleanOut, err := eval.SlotsToCoeffs(ctReal, ctImag)
+	require.NoError(t, err)
+	poisonedOut, err := eval.SlotsToCoeffs(poison(ctReal), poison(ctImag))
+	require.NoError(t, err)
+	require.Equal(t, cleanOut.Level(), poisonedOut.Level())
+	require.Equal(t, cleanOut.Scale, poisonedOut.Scale)
+	for component := range cleanOut.Value {
+		for row := 0; row < min(legacyRows, cleanOut.Level()+1); row++ {
+			require.Equal(t, cleanOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "production S2C read poisoned q3 component=%d q%d", component, row)
 		}
 	}
 }
@@ -289,4 +334,127 @@ func acceptedC2SRowHash(ct *rlwe.Ciphertext, rows int) string {
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func exactCenteredQPrefixBounds(t testing.TB, params ckks.Parameters, ct *rlwe.Ciphertext, rows int) []*big.Int {
+	t.Helper()
+	require.GreaterOrEqual(t, rows, 1)
+	require.LessOrEqual(t, rows, ct.Level()+1)
+	require.LessOrEqual(t, rows, fastckks.MaxQPrefixWidth)
+	q := params.Q()
+	require.GreaterOrEqual(t, len(q), rows)
+	products := make([]*big.Int, rows)
+	inverses := make([]*big.Int, rows)
+	prefix := big.NewInt(1)
+	for row := 0; row < rows; row++ {
+		products[row] = new(big.Int).Set(prefix)
+		modulus := new(big.Int).SetUint64(q[row])
+		prefixMod := new(big.Int).Mod(new(big.Int).Set(prefix), modulus)
+		inverses[row] = new(big.Int).ModInverse(prefixMod, modulus)
+		require.NotNil(t, inverses[row], "Q-prefix CRT inverse q%d", row)
+		prefix.Mul(prefix, modulus)
+	}
+	half := new(big.Int).Rsh(new(big.Int).Set(prefix), 1)
+	maxima := make([]*big.Int, len(ct.Value))
+	ringQ := params.RingQ()
+	for component := range ct.Value {
+		coeffRows := make([][]uint64, rows)
+		for row := 0; row < rows; row++ {
+			coeffRows[row] = make([]uint64, params.N())
+			copy(coeffRows[row], ct.Value[component].Coeffs[row])
+			if ct.IsMontgomery {
+				ringQ.SubRings[row].IMForm(coeffRows[row], coeffRows[row])
+			}
+			if ct.IsNTT {
+				ringQ.SubRings[row].INTT(coeffRows[row], coeffRows[row])
+			}
+		}
+		maxima[component] = new(big.Int)
+		for coefficient := 0; coefficient < params.N(); coefficient++ {
+			value := new(big.Int).SetUint64(coeffRows[0][coefficient])
+			for row := 1; row < rows; row++ {
+				modulus := new(big.Int).SetUint64(q[row])
+				residue := new(big.Int).SetUint64(coeffRows[row][coefficient])
+				current := new(big.Int).Mod(new(big.Int).Set(value), modulus)
+				delta := new(big.Int).Sub(residue, current)
+				delta.Mod(delta, modulus)
+				factor := new(big.Int).Mul(delta, inverses[row])
+				factor.Mod(factor, modulus)
+				value.Add(value, new(big.Int).Mul(products[row], factor))
+			}
+			if value.Cmp(half) > 0 {
+				value.Sub(value, prefix)
+			}
+			value.Abs(value)
+			if value.Cmp(maxima[component]) > 0 {
+				maxima[component].Set(value)
+			}
+		}
+	}
+	return maxima
+}
+
+func bigIntStrings(values []*big.Int) []string {
+	strings := make([]string, len(values))
+	for i, value := range values {
+		strings[i] = value.String()
+	}
+	return strings
+}
+
+func BenchmarkFastLogN13P93C2SLinearTransformQPrefix(b *testing.B) {
+	params, residual := fastLogN13CompressionParameters(b)
+	eval, err := NewFastEvaluator(params)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err = eval.ensureFastBootstrapCircuit(); err != nil {
+		b.Fatal(err)
+	}
+	values := make([]complex128, residual.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)/16, float64((i%5)-2)/32)
+	}
+	input := fastBootstrapEncodedCiphertextAtLevel(b, residual, 0, params.CoeffsToSlotsParameters.LogSlots, values)
+	input, _, err = eval.ScaleDown(input)
+	if err != nil {
+		b.Fatal(err)
+	}
+	input, err = eval.ModUp(input)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	for matrixIndex, matrix := range eval.C2SDFTMatrix.Matrices {
+		path := "direct"
+		if matrix.N1 != 0 {
+			path = "bsgs"
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		lt := ltcommon.LinearTransformation(matrix)
+		b.Run(fmt.Sprintf("group-matrix-%d/%s/legacy-q012", matrixIndex, path), func(b *testing.B) {
+			out := input.CopyNew()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := eval.DFTEvaluator.FastEvaluator().LinearTransform(input, lt, out); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("group-matrix-%d/%s/explicit-q0123", matrixIndex, path), func(b *testing.B) {
+			out := input.CopyNew()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := eval.DFTEvaluator.FastEvaluator().LinearTransformQPrefixRows(input, lt, 4, out); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

@@ -59,23 +59,44 @@ func (scratch *fastLinearTransformScratch) prepareBabyRotations(N int, rotations
 }
 
 // LinearTransform evaluates a single-level diagonal linear transformation
-// using only authoritative q0 and q1 limbs. N1 == 0 uses the direct diagonal
-// path; BSGS transformations use the encoded-diagonal convention from
-// common/lintrans: baby rotations by i, multiplication by Vec[j+i], then a
-// giant rotation by j. No evaluation key or QP basis is involved.
+// using the legacy producer authority selected by MaintainedLimbCount. N1 == 0
+// uses the direct diagonal path; BSGS transformations use the encoded-diagonal
+// convention from common/lintrans: baby rotations by i, multiplication by
+// Vec[j+i], then a giant rotation by j. No evaluation key or QP basis is
+// involved.
 //
 // Matrix LevelQ may be higher than the current ciphertext level. The matrix's
-// q0/q1 encoding is reused at the current level and the matrix Scale is not
-// modified. The output may alias the input; dormant limbs are not read or
-// written.
+// requested Q-prefix encoding is reused at the current level and the matrix
+// Scale is not modified. The output may alias the input; rows outside the
+// requested prefix are not read or written.
 func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, ctOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	if ctIn != nil && ctOut != nil && (ctIn.Level() < 1 || ctOut.Level() < 1) {
+		return fmt.Errorf("Fast LinearTransform requires q0 and q1 (input level %d, output level %d)", ctIn.Level(), ctOut.Level())
+	}
+	level := 0
+	if ctIn != nil && ctOut != nil {
+		level = utils.Min(ctIn.Level(), ctOut.Level())
+	}
+	rows := maintainedLimbCount(&eval.Parameters, level)
+	return eval.LinearTransformQPrefixRows(ctIn, matrix, rows, ctOut)
+}
+
+// LinearTransformQPrefixRows evaluates a single-level diagonal linear
+// transformation using exactly rows authoritative Q-prefix limbs. It is the
+// explicit-width surface for producers such as ModUp that establish a wider
+// authority than the legacy arithmetic wrappers. Rows above the request are
+// neither read nor written.
+func (eval *Evaluator) LinearTransformQPrefixRows(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, rows int, ctOut *rlwe.Ciphertext) error {
 	if ctIn != nil && ctOut != nil && ctIn.MetaData != nil && ctOut.MetaData != nil {
 		// The receiver is an output buffer. Its domain flags may still be the
 		// constructor defaults; all maintained output limbs are overwritten.
 		ctOut.IsNTT = ctIn.IsNTT
 		ctOut.IsMontgomery = ctIn.IsMontgomery
 	}
-	if err := eval.validateLinearTransform(ctIn, matrix, ctOut); err != nil {
+	if err := eval.validateLinearTransform(ctIn, matrix, rows, ctOut); err != nil {
 		return err
 	}
 
@@ -83,9 +104,9 @@ func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.Li
 	var acc0, acc1 ring.Poly
 	var err error
 	if matrix.N1 == 0 {
-		acc0, acc1, err = eval.linearTransformDirect(ringQ, ctIn, matrix)
+		acc0, acc1, err = eval.linearTransformDirect(ringQ, ctIn, matrix, rows)
 	} else {
-		acc0, acc1, err = eval.linearTransformBSGS(ringQ, ctIn, matrix)
+		acc0, acc1, err = eval.linearTransformBSGS(ringQ, ctIn, matrix, rows)
 	}
 	if err != nil {
 		return err
@@ -95,12 +116,12 @@ func (eval *Evaluator) LinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.Li
 	Resize(ctOut, 1, level, eval.Parameters.N())
 	*ctOut.MetaData = *ctIn.MetaData
 	ctOut.Scale = ctIn.Scale.Mul(matrix.Scale)
-	copyMaintained(ringQ, acc0, ctOut.Value[0])
-	copyMaintained(ringQ, acc1, ctOut.Value[1])
+	copyPrefixRowsUnchecked(rows, acc0, ctOut.Value[0])
+	copyPrefixRowsUnchecked(rows, acc1, ctOut.Value[1])
 	return nil
 }
 
-func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, ctOut *rlwe.Ciphertext) error {
+func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, rows int, ctOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
@@ -119,9 +140,6 @@ func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lin
 	if ctIn.N() != eval.Parameters.N() || ctOut.N() != eval.Parameters.N() {
 		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
 	}
-	if ctIn.Level() < 1 || ctOut.Level() < 1 {
-		return fmt.Errorf("Fast LinearTransform requires q0 and q1 (input level %d, output level %d)", ctIn.Level(), ctOut.Level())
-	}
 	if matrix.LevelQ < ctIn.Level() {
 		return fmt.Errorf("Fast LinearTransform requires matrix.LevelQ >= ciphertext level: %d < %d", matrix.LevelQ, ctIn.Level())
 	}
@@ -131,9 +149,13 @@ func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lin
 	if ctIn.IsMontgomery != ctOut.IsMontgomery || ctIn.IsBatched != matrix.IsBatched {
 		return errors.New("Fast LinearTransform requires matching representation and batching metadata")
 	}
-	for d := 0; d < 2; d++ {
-		if len(ctIn.Value[d].Coeffs) < 2 || len(ctOut.Value[d].Coeffs) < 2 {
-			return errors.New("Fast LinearTransform requires q0/q1 ciphertext storage")
+	level := utils.Min(ctIn.Level(), ctOut.Level())
+	if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, ctIn.Value[0], ctIn.Value[1], ctOut.Value[0], ctOut.Value[1]); err != nil {
+		return fmt.Errorf("Fast LinearTransform ciphertext rows: %w", err)
+	}
+	for diagonal, plaintext := range matrix.Vec {
+		if err := validateFastDiagonal(eval.Parameters.RingQ().AtLevel(level), plaintext.Q, rows); err != nil {
+			return fmt.Errorf("diagonal %d: %w", diagonal, err)
 		}
 	}
 	if len(matrix.Vec) == 0 {
@@ -142,7 +164,7 @@ func (eval *Evaluator) validateLinearTransform(ctIn *rlwe.Ciphertext, matrix lin
 	return nil
 }
 
-func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
+func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, rows int) (acc0, acc1 ring.Poly, err error) {
 	scratch := &eval.linearTransformScratch
 	acc0, acc1 = scratch.acc0, scratch.acc1
 	rot0, rot1 := scratch.rot0, scratch.rot1
@@ -152,27 +174,27 @@ func (eval *Evaluator) linearTransformDirect(ringQ *ring.Ring, ctIn *rlwe.Cipher
 
 	for diagonal, plaintext := range matrix.Vec {
 		diagonal &= slots - 1
-		if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
+		if err = validateFastDiagonal(ringQ, plaintext.Q, rows); err != nil {
 			return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", diagonal, err)
 		}
-		if err = eval.rotateComponents(ringQ, ctIn, rot0, rot1, diagonal); err != nil {
+		if err = eval.rotateComponents(ringQ, ctIn, rot0, rot1, diagonal, rows); err != nil {
 			return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d automorphism: %w", diagonal, err)
 		}
-		fastPlaintextMul(ringQ, plaintext.Q, rot0, term0)
-		fastPlaintextMul(ringQ, plaintext.Q, rot1, term1)
+		fastPlaintextMul(ringQ, plaintext.Q, rot0, term0, rows)
+		fastPlaintextMul(ringQ, plaintext.Q, rot1, term1, rows)
 		if first {
-			copyMaintained(ringQ, term0, acc0)
-			copyMaintained(ringQ, term1, acc1)
+			copyPrefixRowsUnchecked(rows, term0, acc0)
+			copyPrefixRowsUnchecked(rows, term1, acc1)
 			first = false
 		} else {
-			addQ01(ringQ, term0, acc0)
-			addQ01(ringQ, term1, acc1)
+			addLinearTransformRows(ringQ, term0, acc0, rows)
+			addLinearTransformRows(ringQ, term1, acc1, rows)
 		}
 	}
 	return acc0, acc1, nil
 }
 
-func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation) (acc0, acc1 ring.Poly, err error) {
+func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, matrix lintrans.LinearTransformation, rows int) (acc0, acc1 ring.Poly, err error) {
 	scratch := &eval.linearTransformScratch
 	acc0, acc1 = scratch.acc0, scratch.acc1
 	inner0, inner1 := scratch.inner0, scratch.inner1
@@ -182,7 +204,7 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 	scratch.prepareBabyRotations(eval.Parameters.N(), rotN2)
 	eval.lastBSGSBabyRotations = 0
 	for _, baby := range scratch.baby[:len(rotN2)] {
-		if err = eval.rotateComponents(ringQ, ctIn, baby.c0, baby.c1, baby.rotation); err != nil {
+		if err = eval.rotateComponents(ringQ, ctIn, baby.c0, baby.c1, baby.rotation, rows); err != nil {
 			return ring.Poly{}, ring.Poly{}, fmt.Errorf("baby rotation %d: %w", baby.rotation, err)
 		}
 		if baby.rotation != 0 {
@@ -203,83 +225,82 @@ func (eval *Evaluator) linearTransformBSGS(ringQ *ring.Ring, ctIn *rlwe.Cipherte
 			if !ok {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("missing BSGS diagonal %d", key)
 			}
-			if err = validateFastDiagonal(ringQ, plaintext.Q); err != nil {
+			if err = validateFastDiagonal(ringQ, plaintext.Q, rows); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("diagonal %d: %w", key, err)
 			}
 			baby := scratch.baby[scratch.babyIndex[i]]
-			fastPlaintextMul(ringQ, plaintext.Q, baby.c0, term0)
-			fastPlaintextMul(ringQ, plaintext.Q, baby.c1, term1)
+			fastPlaintextMul(ringQ, plaintext.Q, baby.c0, term0, rows)
+			fastPlaintextMul(ringQ, plaintext.Q, baby.c1, term1, rows)
 			if firstInner {
-				copyMaintained(ringQ, term0, inner0)
-				copyMaintained(ringQ, term1, inner1)
+				copyPrefixRowsUnchecked(rows, term0, inner0)
+				copyPrefixRowsUnchecked(rows, term1, inner1)
 				firstInner = false
 			} else {
-				addQ01(ringQ, term0, inner0)
-				addQ01(ringQ, term1, inner1)
+				addLinearTransformRows(ringQ, term0, inner0, rows)
+				addLinearTransformRows(ringQ, term1, inner1, rows)
 			}
 		}
 
 		if j == 0 {
-			copyMaintained(ringQ, inner0, outer0)
-			copyMaintained(ringQ, inner1, outer1)
+			copyPrefixRowsUnchecked(rows, inner0, outer0)
+			copyPrefixRowsUnchecked(rows, inner1, outer1)
 		} else {
-			if err = eval.fastAutomorphism(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true); err != nil {
+			if err = eval.fastAutomorphismRows(ringQ, inner0, outer0, eval.Parameters.GaloisElement(j), true, rows); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
 			}
-			if err = eval.fastAutomorphism(ringQ, inner1, outer1, eval.Parameters.GaloisElement(j), true); err != nil {
+			if err = eval.fastAutomorphismRows(ringQ, inner1, outer1, eval.Parameters.GaloisElement(j), true, rows); err != nil {
 				return ring.Poly{}, ring.Poly{}, fmt.Errorf("giant rotation %d: %w", j, err)
 			}
 		}
 		if firstOuter {
-			copyMaintained(ringQ, outer0, acc0)
-			copyMaintained(ringQ, outer1, acc1)
+			copyPrefixRowsUnchecked(rows, outer0, acc0)
+			copyPrefixRowsUnchecked(rows, outer1, acc1)
 			firstOuter = false
 		} else {
-			addQ01(ringQ, outer0, acc0)
-			addQ01(ringQ, outer1, acc1)
+			addLinearTransformRows(ringQ, outer0, acc0, rows)
+			addLinearTransformRows(ringQ, outer1, acc1, rows)
 		}
 	}
 	return acc0, acc1, nil
 }
 
-func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, out0, out1 ring.Poly, rotation int) error {
+func (eval *Evaluator) rotateComponents(ringQ *ring.Ring, ctIn *rlwe.Ciphertext, out0, out1 ring.Poly, rotation, rows int) error {
 	if rotation == 0 {
-		copyMaintained(ringQ, ctIn.Value[0], out0)
-		copyMaintained(ringQ, ctIn.Value[1], out1)
+		copyPrefixRowsUnchecked(rows, ctIn.Value[0], out0)
+		copyPrefixRowsUnchecked(rows, ctIn.Value[1], out1)
 		return nil
 	}
 	galEl := eval.Parameters.GaloisElement(rotation)
-	if err := eval.fastAutomorphism(ringQ, ctIn.Value[0], out0, galEl, true); err != nil {
+	if err := eval.fastAutomorphismRows(ringQ, ctIn.Value[0], out0, galEl, true, rows); err != nil {
 		return err
 	}
-	return eval.fastAutomorphism(ringQ, ctIn.Value[1], out1, galEl, true)
+	return eval.fastAutomorphismRows(ringQ, ctIn.Value[1], out1, galEl, true, rows)
 }
 
-func addQ01(ringQ *ring.Ring, src, dst ring.Poly) {
-	for limb := 0; limb < maintainedLimbCountForRing(ringQ); limb++ {
-		ringQ.SubRings[limb].Add(src.Coeffs[limb], dst.Coeffs[limb], dst.Coeffs[limb])
+func addLinearTransformRows(ringQ *ring.Ring, src, dst ring.Poly, rows int) {
+	for row := 0; row < rows; row++ {
+		ringQ.SubRings[row].Add(src.Coeffs[row], dst.Coeffs[row], dst.Coeffs[row])
 	}
 }
 
 // fastPlaintextMul multiplies an NTT/Montgomery plaintext diagonal by an
-// NTT/Montgomery ciphertext polynomial using q0/q1 only.
-func fastPlaintextMul(ringQ *ring.Ring, plaintext, ciphertext, output ring.Poly) {
-	for limb := 0; limb < maintainedLimbCountForRingAtLevel(ringQ, minPolyLevel(plaintext, ciphertext)); limb++ {
-		ringQ.SubRings[limb].MulCoeffsMontgomery(plaintext.Coeffs[limb], ciphertext.Coeffs[limb], output.Coeffs[limb])
+// NTT/Montgomery ciphertext polynomial using exactly rows explicit limbs.
+func fastPlaintextMul(ringQ *ring.Ring, plaintext, ciphertext, output ring.Poly, rows int) {
+	for row := 0; row < rows; row++ {
+		ringQ.SubRings[row].MulCoeffsMontgomery(plaintext.Coeffs[row], ciphertext.Coeffs[row], output.Coeffs[row])
 	}
 }
 
-func validateFastDiagonal(ringQ *ring.Ring, plaintext ring.Poly) error {
-	if plaintext.N() != ringQ.N() || plaintext.Level() < 1 {
+func validateFastDiagonal(ringQ *ring.Ring, plaintext ring.Poly, rows int) error {
+	if plaintext.N() != ringQ.N() || plaintext.Level()+1 < rows {
 		return errors.New("diagonal dimensions or level are insufficient")
 	}
-	maintained := maintainedLimbCountForRingAtLevel(ringQ, plaintext.Level())
-	if len(plaintext.Coeffs) < maintained || len(plaintext.Coeffs[0]) != ringQ.N() || len(plaintext.Coeffs[1]) != ringQ.N() {
-		return errors.New("diagonal q0/q1 storage is invalid")
+	if rows < 1 || rows > MaxQPrefixWidth || rows > len(ringQ.SubRings) || len(plaintext.Coeffs) < rows {
+		return errors.New("diagonal Q-prefix storage is invalid")
 	}
-	for limb := 0; limb < maintained; limb++ {
-		if len(plaintext.Coeffs[limb]) != ringQ.N() {
-			return errors.New("diagonal maintained storage is invalid")
+	for row := 0; row < rows; row++ {
+		if len(plaintext.Coeffs[row]) != ringQ.N() {
+			return fmt.Errorf("diagonal q%d storage is invalid", row)
 		}
 	}
 	return nil

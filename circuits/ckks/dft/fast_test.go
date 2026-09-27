@@ -7,16 +7,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 	ckkslintrans "github.com/tuneinsight/lattigo/v6/circuits/ckks/lintrans"
+	ltcommon "github.com/tuneinsight/lattigo/v6/circuits/common/lintrans"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
 func fastDFTTestParameters(t testing.TB) ckks.Parameters {
 	t.Helper()
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            4,
-		LogQ:            []int{55, 39, 50, 50, 50},
+		LogQ:            []int{56, 39, 39, 39, 50},
 		LogP:            []int{50},
 		LogDefaultScale: 30,
 	})
@@ -26,12 +28,17 @@ func fastDFTTestParameters(t testing.TB) ckks.Parameters {
 
 func fastDFTMatrix(t testing.TB, params ckks.Parameters, typ Type, format Format) Matrix {
 	t.Helper()
+	return fastDFTMatrixAtLevel(t, params, typ, format, 4, []int{1, 1})
+}
+
+func fastDFTMatrixAtLevel(t testing.TB, params ckks.Parameters, typ Type, format Format, level int, groups []int) Matrix {
+	t.Helper()
 	literal := MatrixLiteral{
 		Type:         typ,
 		LogSlots:     2,
-		LevelQ:       3,
+		LevelQ:       level,
 		LevelP:       0,
-		Levels:       []int{1, 1},
+		Levels:       groups,
 		Format:       format,
 		LogBSGSRatio: 1,
 	}
@@ -80,14 +87,14 @@ func fastDFTNonMontgomeryCopy(params ckks.Parameters, src *rlwe.Ciphertext) *rlw
 	return ct
 }
 
-func requireFastDFTMatchesStandard(t *testing.T, params ckks.Parameters, fast *rlwe.Ciphertext, standard *rlwe.Ciphertext) {
+func requireFastDFTMatchesStandard(t *testing.T, params ckks.Parameters, fast *rlwe.Ciphertext, standard *rlwe.Ciphertext, rows int) {
 	t.Helper()
 	got := fastDFTNonMontgomeryCopy(params, fast)
 	require.Equal(t, standard.Level(), got.Level())
 	require.Equal(t, standard.Scale, got.Scale)
 	require.Equal(t, standard.LogDimensions, got.LogDimensions)
 	for d := range standard.Value {
-		require.Equal(t, standard.Value[d].Coeffs[:2], got.Value[d].Coeffs[:2], "component %d", d)
+		require.Equal(t, standard.Value[d].Coeffs[:rows], got.Value[d].Coeffs[:rows], "component %d", d)
 	}
 }
 
@@ -118,14 +125,15 @@ func TestFastDFTStandardCoeffsToSlotsAndSlotsToCoeffs(t *testing.T) {
 	standardReal, standardImag, err := standardEval.CoeffsToSlotsNew(standardInput, cts)
 	require.NoError(t, err)
 	require.Nil(t, standardImag)
-	requireFastDFTMatchesStandard(t, params, fastReal, standardReal)
+	requireFastDFTMatchesStandard(t, params, fastReal, standardReal, min(4, standardReal.Level()+1))
 	require.Equal(t, cts.LevelQ-len(cts.Levels)*params.LevelsConsumedPerRescaling(), fastReal.Level())
 
 	fastDecoded, err := fastEval.SlotsToCoeffsNew(fastInput, nil, stc)
 	require.NoError(t, err)
 	standardDecoded, err := standardEval.SlotsToCoeffsNew(standardInput, nil, stc)
 	require.NoError(t, err)
-	requireFastDFTMatchesStandard(t, params, fastDecoded, standardDecoded)
+	s2cRows := min(fastckks.MaintainedLimbCount(&params, fastInput.Level()), standardDecoded.Level()+1)
+	requireFastDFTMatchesStandard(t, params, fastDecoded, standardDecoded, s2cRows)
 }
 
 func TestFastDFTCoeffsToSlotsRestorePlan(t *testing.T) {
@@ -170,7 +178,94 @@ func TestFastDFTCoeffsToSlotsRestorePlan(t *testing.T) {
 	}
 	fast, _, err := NewFastEvaluator(params).CoeffsToSlotsNewWithRestorePlan(fastInput, compressed, []int{2, 0})
 	require.NoError(t, err)
-	requireFastDFTMatchesStandard(t, params, fast, standard)
+	requireFastDFTMatchesStandard(t, params, fast, standard, min(4, standard.Level()+1))
+}
+
+func TestFastDFTS2CQPrefixCapabilityMatchesStandard(t *testing.T) {
+	params := fastDFTTestParameters(t)
+	matrices := fastDFTMatrixAtLevel(t, params, HomomorphicDecode, Standard, 3, []int{1, 1})
+	fastEval := NewFastEvaluator(params)
+	standardEval := standardDFTEvaluator(t, params, matrices)
+	standardInput := fastDFTInput(params, 3)
+	fastInput := fastDFTMontgomeryCopy(params, standardInput)
+	standardImag := fastDFTInput(params, 3)
+	fastImag := fastDFTMontgomeryCopy(params, standardImag)
+
+	// Compare the first factor at all four rows while q3 is authoritative.
+	fastFirst := ckks.NewCiphertext(params, 1, 3)
+	fastFirst.IsNTT, fastFirst.IsMontgomery = true, true
+	require.NoError(t, fastEval.FastEvaluator().LinearTransformQPrefixRows(fastInput, ltcommon.LinearTransformation(matrices.Matrices[0]), 4, fastFirst))
+	standardFirst := ckks.NewCiphertext(params, 1, 3)
+	require.NoError(t, standardEval.LTEvaluator.Evaluate(standardInput, matrices.Matrices[0], standardFirst))
+	gotFirst := fastDFTNonMontgomeryCopy(params, fastFirst)
+	for d := range standardFirst.Value {
+		require.Equal(t, standardFirst.Value[d].Coeffs[:4], gotFirst.Value[d].Coeffs[:4], "first factor component=%d", d)
+	}
+
+	fastOut, err := fastEval.SlotsToCoeffsNewQPrefixRows(fastInput, fastImag, matrices, 4)
+	require.NoError(t, err)
+	rows, err := fastckks.QPrefixWidth(fastOut.Level())
+	require.NoError(t, err)
+	standardOut, err := standardEval.SlotsToCoeffsNew(standardInput, standardImag, matrices)
+	require.NoError(t, err)
+	require.Equal(t, 2, rows, "3->2->1 natural contraction")
+	requireFastDFTMatchesStandard(t, params, fastOut, standardOut, 2)
+}
+
+func TestFastDFTS2CProductionDoesNotPromoteEvalModQ3(t *testing.T) {
+	params := fastDFTTestParameters(t)
+	matrices := fastDFTMatrixAtLevel(t, params, HomomorphicDecode, Standard, 3, []int{1, 1})
+	fastEval := NewFastEvaluator(params)
+	cleanInput := fastDFTMontgomeryCopy(params, fastDFTInput(params, 3))
+	poisonedInput := cleanInput.CopyNew()
+	q3 := params.RingQ().SubRings[3].Modulus
+	for d := range poisonedInput.Value {
+		for i, value := range poisonedInput.Value[d].Coeffs[3] {
+			poisonedInput.Value[d].Coeffs[3][i] = (value + uint64(101+i+d)) % q3
+		}
+	}
+
+	clean, err := fastEval.SlotsToCoeffsNew(cleanInput, nil, matrices)
+	require.NoError(t, err)
+	poisoned, err := fastEval.SlotsToCoeffsNew(poisonedInput, nil, matrices)
+	require.NoError(t, err)
+	legacyRows := fastckks.MaintainedLimbCount(&params, cleanInput.Level())
+	require.Less(t, legacyRows, 4, "production S2C must not promote allocated q3")
+	require.Equal(t, clean.Level(), poisoned.Level())
+	require.Equal(t, clean.Scale, poisoned.Scale)
+	for d := range clean.Value {
+		for row := 0; row < min(legacyRows, clean.Level()+1); row++ {
+			require.Equal(t, clean.Value[d].Coeffs[row], poisoned.Value[d].Coeffs[row], "S2C consumed poisoned non-authoritative q3 component=%d q%d", d, row)
+		}
+	}
+}
+
+func TestFastDFTS2CQPrefixRescaleContractsThroughLevelZero(t *testing.T) {
+	params := fastDFTTestParameters(t)
+	levels := []int{1, 1, 1}
+	matrices, err := NewMatrixFromLiteral(params, MatrixLiteral{
+		Type:         HomomorphicDecode,
+		LogSlots:     2,
+		LevelQ:       3,
+		LevelP:       0,
+		Levels:       levels,
+		Format:       Standard,
+		LogBSGSRatio: 1,
+	}, ckks.NewEncoder(params))
+	require.NoError(t, err)
+	fastEval := NewFastEvaluator(params)
+	standardEval := standardDFTEvaluator(t, params, matrices)
+	standardInput := fastDFTInput(params, 3)
+	fastInput := fastDFTMontgomeryCopy(params, standardInput)
+	fastOut, err := fastEval.SlotsToCoeffsNewQPrefixRows(fastInput, nil, matrices, 4)
+	require.NoError(t, err)
+	rows, err := fastckks.QPrefixWidth(fastOut.Level())
+	require.NoError(t, err)
+	standardOut, err := standardEval.SlotsToCoeffsNew(standardInput, nil, matrices)
+	require.NoError(t, err)
+	require.Equal(t, 0, fastOut.Level(), "three groups contract 3->2->1->0")
+	require.Equal(t, 1, rows)
+	requireFastDFTMatchesStandard(t, params, fastOut, standardOut, 1)
 }
 
 func TestFastDFTSplitRepackAndPoison(t *testing.T) {
@@ -180,7 +275,7 @@ func TestFastDFTSplitRepackAndPoison(t *testing.T) {
 	in := fastDFTMontgomeryCopy(params, fastDFTInput(params, matrix.LevelQ))
 	poisoned := in.CopyNew()
 	for d := range poisoned.Value {
-		for limb := 2; limb <= poisoned.Level(); limb++ {
+		for limb := 4; limb <= poisoned.Level(); limb++ {
 			for i := range poisoned.Value[d].Coeffs[limb] {
 				poisoned.Value[d].Coeffs[limb][i] = ^uint64(0) - uint64(i+13*limb+d)
 			}
@@ -192,8 +287,8 @@ func TestFastDFTSplitRepackAndPoison(t *testing.T) {
 	poisonedReal, poisonedImag, err := fastEval.CoeffsToSlotsNew(poisoned, matrix)
 	require.NoError(t, err)
 	require.Nil(t, poisonedImag)
-	require.Equal(t, fastReal.Value[0].Coeffs[:2], poisonedReal.Value[0].Coeffs[:2])
-	require.Equal(t, fastReal.Value[1].Coeffs[:2], poisonedReal.Value[1].Coeffs[:2])
+	require.Equal(t, fastReal.Value[0].Coeffs[:3], poisonedReal.Value[0].Coeffs[:3])
+	require.Equal(t, fastReal.Value[1].Coeffs[:3], poisonedReal.Value[1].Coeffs[:3])
 	require.Equal(t, fastReal.Level(), poisonedReal.Level())
 	require.Equal(t, fastReal.Scale, poisonedReal.Scale)
 }
@@ -205,7 +300,7 @@ func BenchmarkFastDFTSequence(b *testing.B) {
 	fastEval := NewFastEvaluator(params)
 	standardInput := fastDFTInput(params, matrices.LevelQ)
 	fastInput := fastDFTMontgomeryCopy(params, standardInput)
-	b.Run("FastQ01", func(b *testing.B) {
+	b.Run("FastQPrefix", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			if _, _, err := fastEval.CoeffsToSlotsNew(fastInput, matrices); err != nil {

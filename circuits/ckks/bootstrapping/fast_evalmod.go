@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 )
 
 // CoeffsToSlots applies the Fast DFT through the ordinary bootstrap stage
@@ -19,10 +20,14 @@ func (eval *FastEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext) (ctReal, ctImag 
 // SlotsToCoeffs applies the Fast DFT through the ordinary bootstrap stage
 // boundary.
 func (eval *FastEvaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if eval == nil || ctReal == nil {
+		return nil, errors.New("Fast SlotsToCoeffs evaluator and real ciphertext cannot be nil")
+	}
 	if err := eval.ensureFastBootstrapCircuit(); err != nil {
 		return nil, err
 	}
-	return eval.DFTEvaluator.SlotsToCoeffsNew(ctReal, ctImag, eval.S2CDFTMatrix)
+	rows := fastckks.MaintainedLimbCount(&eval.Parameters.BootstrappingParameters, ctReal.Level())
+	return eval.DFTEvaluator.SlotsToCoeffsNewQPrefixRows(ctReal, ctImag, eval.S2CDFTMatrix, rows)
 }
 
 // EvalMod applies the bounded Fast Mod1 circuit and restores the Bootstrap

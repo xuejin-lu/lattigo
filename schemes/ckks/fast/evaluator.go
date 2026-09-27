@@ -93,6 +93,38 @@ func (eval *Evaluator) MulIntegerQPrefixRows(op0 *rlwe.Ciphertext, scalar *big.I
 	return eval.mulIntegerRowsPreservingHigherRows(op0, scalar, opOut, rows)
 }
 
+// MulQPrefixRows multiplies a ciphertext by a scalar over exactly rows
+// authoritative Q-prefix limbs. This surface is intentionally scalar-only;
+// ciphertext products remain on the separately specified multiplication
+// path.
+func (eval *Evaluator) MulQPrefixRows(op0 *rlwe.Ciphertext, scalar rlwe.Operand, rows int, opOut *rlwe.Ciphertext) error {
+	if err := eval.validateUnary(op0, opOut); err != nil {
+		return err
+	}
+	if op0.Level() != opOut.Level() {
+		return errors.New("Fast scalar Q-prefix multiplication requires matching input/output levels")
+	}
+	width, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
+	if rows < 1 || rows > width {
+		return fmt.Errorf("Fast scalar multiplication row count %d must be in [1,%d] at level %d", rows, width, op0.Level())
+	}
+	c, err := eval.scalar(scalar)
+	if err != nil {
+		return err
+	}
+	scale := rlwe.NewScale(1)
+	if !c.IsInt() {
+		scale, err = eval.coefficientScale(op0.Level())
+		if err != nil {
+			return err
+		}
+	}
+	return eval.mulScalarAtScaleRows(op0, c, scale, opOut, rows)
+}
+
 func (eval *Evaluator) mulIntegerRows(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int) error {
 	return eval.mulIntegerRowsWithPolicy(op0, scalar, opOut, rows, false)
 }
@@ -198,6 +230,60 @@ func (eval *Evaluator) Automorphism(ctIn, ctOut *rlwe.Ciphertext, galEl uint64) 
 	}
 	*ctOut.MetaData = *ctIn.MetaData
 	return nil
+}
+
+// AutomorphismQPrefixRows applies a Fast automorphism to exactly rows
+// authoritative Q-prefix limbs. It does not use evaluation keys or change
+// logical Level/Scale.
+func (eval *Evaluator) AutomorphismQPrefixRows(ctIn, ctOut *rlwe.Ciphertext, galEl uint64, rows int) error {
+	if eval == nil || ctIn == nil || ctOut == nil || ctIn.MetaData == nil || ctOut.MetaData == nil {
+		return errors.New("Fast Q-prefix automorphism evaluator and ciphertext metadata cannot be nil")
+	}
+	if ctIn.Degree() != 1 || ctOut.Degree() != 1 || ctIn.Level() != ctOut.Level() {
+		return errors.New("Fast Q-prefix automorphism requires degree-one ciphertexts at equal levels")
+	}
+	if eval.Parameters.RingType() != ring.Standard {
+		return fmt.Errorf("Fast Q-prefix automorphism requires the Standard ring, got %s", eval.Parameters.RingType())
+	}
+	if ctIn.N() != eval.Parameters.N() || ctOut.N() != eval.Parameters.N() {
+		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
+	}
+	if ctIn.IsNTT != ctOut.IsNTT || ctIn.IsMontgomery != ctOut.IsMontgomery {
+		return errors.New("Fast Q-prefix automorphism requires matching input/output domains")
+	}
+	ringQ := eval.Parameters.RingQ().AtLevel(ctIn.Level())
+	for name, ct := range map[string]*rlwe.Ciphertext{"ctIn": ctIn, "ctOut": ctOut} {
+		for d := 0; d <= 1; d++ {
+			if err := validatePrefixRows(ringQ, ctIn.Level(), rows, ct.Value[d]); err != nil {
+				return fmt.Errorf("%s component %d: %w", name, d, err)
+			}
+		}
+	}
+	for d := 0; d <= 1; d++ {
+		if err := eval.fastAutomorphismRows(ringQ, ctIn.Value[d], ctOut.Value[d], galEl, ctIn.IsNTT, rows); err != nil {
+			return fmt.Errorf("Fast Q-prefix automorphism component %d: %w", d, err)
+		}
+	}
+	*ctOut.MetaData = *ctIn.MetaData
+	return nil
+}
+
+// RotateQPrefixRows applies the slot rotation using exactly rows
+// authoritative Q-prefix limbs.
+func (eval *Evaluator) RotateQPrefixRows(ctIn, ctOut *rlwe.Ciphertext, k, rows int) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	return eval.AutomorphismQPrefixRows(ctIn, ctOut, eval.Parameters.GaloisElementForRotation(k), rows)
+}
+
+// ConjugateQPrefixRows applies complex conjugation using exactly rows
+// authoritative Q-prefix limbs.
+func (eval *Evaluator) ConjugateQPrefixRows(ctIn, ctOut *rlwe.Ciphertext, rows int) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	return eval.AutomorphismQPrefixRows(ctIn, ctOut, eval.Parameters.GaloisElementForComplexConjugation(), rows)
 }
 
 // Rotate applies the Fast automorphism corresponding to a CKKS slot rotation.
