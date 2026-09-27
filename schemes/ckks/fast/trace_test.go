@@ -89,6 +89,82 @@ func traceReference(params ckks.Parameters, ctIn *rlwe.Ciphertext, logN int) *rl
 	return got
 }
 
+func newQPrefixTraceCiphertext(params ckks.Parameters, level int, montgomery bool) *rlwe.Ciphertext {
+	ct := ckks.NewCiphertext(params, 1, level)
+	ct.IsNTT = true
+	ct.IsMontgomery = montgomery
+	ct.Scale = rlwe.NewScale(123.5)
+	for component := range ct.Value {
+		for row := 0; row < MaxQPrefixWidth; row++ {
+			subring := params.RingQ().SubRings[row]
+			for i := range ct.Value[component].Coeffs[row] {
+				ct.Value[component].Coeffs[row][i] = (uint64(17+component*31+row*43) + uint64(i*i+7*i)) % subring.Modulus
+			}
+			subring.NTT(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
+			if montgomery {
+				subring.MForm(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
+			}
+		}
+		for row := MaxQPrefixWidth; row <= level; row++ {
+			for i := range ct.Value[component].Coeffs[row] {
+				q := params.RingQ().SubRings[row].Modulus
+				ct.Value[component].Coeffs[row][i] = (uint64(0x600d0000 + component + row + i)) % q
+			}
+		}
+	}
+	return ct
+}
+
+// traceQPrefixReference independently applies normalization and each NTT
+// automorphism row-by-row, without using Fast evaluator kernels.
+func traceQPrefixReference(params ckks.Parameters, ctIn *rlwe.Ciphertext, logN, rows int) *rlwe.Ciphertext {
+	got := ctIn.CopyNew()
+	level := ctIn.Level()
+	ringQ := params.RingQ().AtLevel(level)
+	gap := 1 << (params.LogN() - logN - 1)
+	if logN == 0 {
+		gap <<= 1
+	}
+	if gap <= 1 {
+		return got
+	}
+	nInv := new(big.Int).SetUint64(uint64(gap))
+	requireTraceInverse(nInv, ringQ.ModulusAtLevel[level])
+	for component := range got.Value {
+		for row := 0; row < rows; row++ {
+			subring := ringQ.SubRings[row]
+			factor := new(big.Int).Mod(new(big.Int).Set(nInv), new(big.Int).SetUint64(subring.Modulus))
+			for i, value := range got.Value[component].Coeffs[row] {
+				product := new(big.Int).Mul(new(big.Int).SetUint64(value), factor)
+				got.Value[component].Coeffs[row][i] = product.Mod(product, new(big.Int).SetUint64(subring.Modulus)).Uint64()
+			}
+		}
+	}
+	apply := func(galEl uint64) {
+		index, err := ring.AutomorphismNTTIndex(ringQ.N(), ringQ.NthRoot(), galEl)
+		if err != nil {
+			panic(err)
+		}
+		for component := range got.Value {
+			for row := 0; row < rows; row++ {
+				subring := ringQ.SubRings[row]
+				permuted := make([]uint64, params.N())
+				for i, src := range index {
+					permuted[i] = got.Value[component].Coeffs[row][src]
+				}
+				subring.Add(got.Value[component].Coeffs[row], permuted, got.Value[component].Coeffs[row])
+			}
+		}
+	}
+	for i := logN; i < params.LogN()-1; i++ {
+		apply(params.GaloisElement(1 << i))
+	}
+	if logN == 0 {
+		apply(ringQ.NthRoot() - 1)
+	}
+	return got
+}
+
 func requireTraceInverse(x, modulus *big.Int) {
 	if x.ModInverse(x, modulus) == nil {
 		panic("trace test inverse does not exist")
@@ -155,6 +231,53 @@ func TestFastTraceMontgomeryAndPoisonedResidues(t *testing.T) {
 	}
 }
 
+func TestFastTraceQPrefixRowsFourRowOracleAndDormantPoison(t *testing.T) {
+	params := traceTestParameters(t)
+	eval := NewEvaluator(params)
+	level := 4
+	for _, montgomery := range []bool{false, true} {
+		in := newQPrefixTraceCiphertext(params, level, montgomery)
+		want := traceQPrefixReference(params, in, 1, MaxQPrefixWidth)
+		dormant := make([][][]uint64, len(in.Value))
+		for component := range in.Value {
+			dormant[component] = make([][]uint64, level+1-MaxQPrefixWidth)
+			for row := MaxQPrefixWidth; row <= level; row++ {
+				dormant[component][row-MaxQPrefixWidth] = append([]uint64(nil), in.Value[component].Coeffs[row]...)
+			}
+		}
+		out := ckks.NewCiphertext(params, 1, level)
+		out.IsNTT = true
+		out.IsMontgomery = montgomery
+		require.NoError(t, eval.TraceQPrefixRows(in, 1, MaxQPrefixWidth, out))
+		require.Equal(t, want.Scale, out.Scale)
+		for component := range out.Value {
+			for row := 0; row < MaxQPrefixWidth; row++ {
+				require.Equal(t, want.Value[component].Coeffs[row], out.Value[component].Coeffs[row], "out-of-place component=%d q%d", component, row)
+			}
+		}
+
+		inPlace := in.CopyNew()
+		require.NoError(t, eval.TraceQPrefixRows(inPlace, 1, MaxQPrefixWidth, inPlace))
+		for component := range inPlace.Value {
+			for row := 0; row < MaxQPrefixWidth; row++ {
+				require.Equal(t, want.Value[component].Coeffs[row], inPlace.Value[component].Coeffs[row], "in-place component=%d q%d", component, row)
+			}
+			for row := MaxQPrefixWidth; row <= level; row++ {
+				require.Equal(t, dormant[component][row-MaxQPrefixWidth], inPlace.Value[component].Coeffs[row], "dormant component=%d q%d", component, row)
+			}
+		}
+	}
+}
+
+func TestFastTraceLegacyWrapperDoesNotPromoteQ3(t *testing.T) {
+	params := traceTestParameters(t)
+	eval := NewEvaluator(params)
+	in := newTraceCiphertext(params, 4, false, true)
+	q3 := append([]uint64(nil), in.Value[0].Coeffs[3]...)
+	require.NoError(t, eval.Trace(in, 1, in))
+	require.Equal(t, q3, in.Value[0].Coeffs[3], "legacy Trace must not promote q3")
+}
+
 func TestFastTraceValidation(t *testing.T) {
 	params := traceTestParameters(t)
 	eval := NewEvaluator(params)
@@ -206,6 +329,14 @@ func BenchmarkFastTraceLogN16(b *testing.B) {
 	benchmarkFastTrace(b, 16)
 }
 
+func BenchmarkFastTraceRows3LogN13(b *testing.B) {
+	benchmarkFastTraceRows(b, 3)
+}
+
+func BenchmarkFastTraceRows4LogN13(b *testing.B) {
+	benchmarkFastTraceRows(b, 4)
+}
+
 func benchmarkFastTrace(b *testing.B, logN int) {
 	params := traceBenchmarkParameters(b, logN)
 	eval := NewEvaluator(params)
@@ -218,6 +349,21 @@ func benchmarkFastTrace(b *testing.B, logN int) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := eval.Trace(in, 1, out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkFastTraceRows(b *testing.B, rows int) {
+	params := traceBenchmarkParameters(b, 13)
+	eval := NewEvaluator(params)
+	in := newQPrefixTraceCiphertext(params, params.MaxLevel(), false)
+	out := ckks.NewCiphertext(params, 1, params.MaxLevel())
+	out.IsNTT = true
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := eval.TraceQPrefixRows(in, 1, rows, out); err != nil {
 			b.Fatal(err)
 		}
 	}

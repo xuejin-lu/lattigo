@@ -81,6 +81,9 @@ func (eval *FastEvaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *
 	params := &eval.Parameters.BootstrappingParameters
 	r := params.RingQ()
 
+	// This cheap logical DropLevel is part of the pre-ModUp legacy-authority
+	// path. It does not activate q0123 or read dormant rows; canonical prefix
+	// materialization belongs exclusively to the following ModUp boundary.
 	for ctIn.Level() != 0 && checkMessageRatio(ctIn, eval.Mod1Parameters.MessageRatio(), r) {
 		fastckks.Resize(ctIn, ctIn.Degree(), ctIn.Level()-1, params.N())
 	}

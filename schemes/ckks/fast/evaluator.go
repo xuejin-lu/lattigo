@@ -72,7 +72,36 @@ func (eval *Evaluator) MulIntegerMaintained(op0 *rlwe.Ciphertext, scalar *big.In
 	return eval.mulIntegerRows(op0, scalar, opOut, rows)
 }
 
+// MulIntegerQPrefixRows multiplies exactly rows explicit Q-prefix residues by
+// scalar without changing the ciphertext scale. Rows above the requested
+// prefix are neither read nor written. It is intended for boundaries, such as
+// Level-0 ModUp, whose row authority is wider than the legacy arithmetic path.
+func (eval *Evaluator) MulIntegerQPrefixRows(op0 *rlwe.Ciphertext, scalar *big.Int, rows int, opOut *rlwe.Ciphertext) error {
+	if eval == nil || op0 == nil || opOut == nil {
+		return errors.New("Fast integer multiplication evaluator and operands cannot be nil")
+	}
+	width, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
+	if rows < 1 || rows > width {
+		return fmt.Errorf("Fast integer multiplication row count %d must be in [1,%d] at level %d", rows, width, op0.Level())
+	}
+	if opOut.Level() != op0.Level() || opOut.Degree() != op0.Degree() {
+		return errors.New("Fast integer Q-prefix multiplication requires matching input/output level and degree")
+	}
+	return eval.mulIntegerRowsPreservingHigherRows(op0, scalar, opOut, rows)
+}
+
 func (eval *Evaluator) mulIntegerRows(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int) error {
+	return eval.mulIntegerRowsWithPolicy(op0, scalar, opOut, rows, false)
+}
+
+func (eval *Evaluator) mulIntegerRowsPreservingHigherRows(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int) error {
+	return eval.mulIntegerRowsWithPolicy(op0, scalar, opOut, rows, true)
+}
+
+func (eval *Evaluator) mulIntegerRowsWithPolicy(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int, preserveHigherRows bool) error {
 	if eval == nil || op0 == nil || opOut == nil || scalar == nil {
 		return errors.New("Fast integer multiplication evaluator, operands and scalar cannot be nil")
 	}
@@ -99,7 +128,9 @@ func (eval *Evaluator) mulIntegerRows(op0 *rlwe.Ciphertext, scalar *big.Int, opO
 			return fmt.Errorf("input component %d: %w", d, err)
 		}
 	}
-	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
+	if !preserveHigherRows {
+		Resize(opOut, op0.Degree(), level, eval.Parameters.N())
+	}
 	for d := range opOut.Value {
 		if err := validatePrefixRows(ringQ, level, rows, opOut.Value[d]); err != nil {
 			return fmt.Errorf("output component %d: %w", d, err)

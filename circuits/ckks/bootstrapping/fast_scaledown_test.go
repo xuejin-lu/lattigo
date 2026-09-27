@@ -155,6 +155,35 @@ func TestFastScaleDownCheapDropsToLevelZeroAndPoison(t *testing.T) {
 	require.Equal(t, 0, got.Level())
 }
 
+func TestFastScaleDownDropAcrossQPrefixCapRemainsPreModUpLegacyPath(t *testing.T) {
+	params, ckksParams := fastScaleDownParameters(t, 13)
+	fastEval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	level := 3
+	ringQ := ckksParams.RingQ()
+	q3 := ringQ.SubRings[level].Modulus
+	messageRatio := rlwe.NewScale(uint64(1) << uint(params.Mod1ParametersLiteral.LogMessageRatio))
+	scale := rlwe.NewScale(ringQ.ModulusAtLevel[level]).Div(rlwe.NewScale(q3).Mul(messageRatio))
+	source := newScaleDownCiphertext(ckksParams, level, scale, []int64{1 << 40, -(1 << 40) + 31, 777777})
+	probe := source.CopyNew()
+	msgRatio := float64(uint64(1) << uint(params.Mod1ParametersLiteral.LogMessageRatio))
+	require.True(t, checkMessageRatio(probe, msgRatio, ringQ), "Level-3 pre-ModUp logical drop should cross the prefix cap")
+	probe.Resize(probe.Degree(), level-1)
+	require.False(t, checkMessageRatio(probe, msgRatio, ringQ), "the legacy check should stop after the logical Level-3-to-2 drop")
+
+	want, wantErr, err := standardScaleDownReference(params, source.CopyNew())
+	require.NoError(t, err)
+	poisoned := source.CopyNew()
+	for component := range poisoned.Value {
+		for i := range poisoned.Value[component].Coeffs[3] {
+			poisoned.Value[component].Coeffs[3][i] = (uint64(0x700d0000 + i + component)) % q3
+		}
+	}
+	got, gotErr, err := fastEval.ScaleDown(poisoned)
+	require.NoError(t, err)
+	requireScaleDownMatches(t, want, got, wantErr, gotErr)
+}
+
 func TestFastScaleDownRescalesFromLevelOneAndMatchesStandard(t *testing.T) {
 	params, ckksParams := fastScaleDownParameters(t, 4)
 	fastEval, err := NewFastEvaluator(params)

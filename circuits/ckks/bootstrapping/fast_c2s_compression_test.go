@@ -173,6 +173,61 @@ func TestFastLogN13C2SRescaleMatchesAcceptedQPrefixAudit002Checkpoints(t *testin
 	require.Equal(t, len(eval.C2SDFTMatrix.Matrices), matrixIndex)
 }
 
+func TestFastModUpToLegacyC2SQ3AuthorityTransition(t *testing.T) {
+	params, residual := fastLogN13CompressionParameters(t)
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	require.NoError(t, eval.ensureFastBootstrapCircuit())
+	values := make([]complex128, residual.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)/16, float64((i%5)-2)/32)
+	}
+	state := fastBootstrapEncodedCiphertextAtLevel(t, residual, 0, params.CoeffsToSlotsParameters.LogSlots, values)
+	state, _, err = eval.ScaleDown(state)
+	require.NoError(t, err)
+	state, err = eval.ModUp(state)
+	require.NoError(t, err)
+	require.Len(t, state.Value[0].Coeffs[3], params.BootstrappingParameters.N(), "ModUp establishes q3 authority")
+
+	q3Before := make([][]uint64, len(state.Value))
+	q012Before := make([][][]uint64, len(state.Value))
+	for component := range state.Value {
+		q3Before[component] = append([]uint64(nil), state.Value[component].Coeffs[3]...)
+		q012Before[component] = make([][]uint64, 3)
+		for row := 0; row < 3; row++ {
+			q012Before[component][row] = append([]uint64(nil), state.Value[component].Coeffs[row]...)
+		}
+	}
+
+	// QPREFIX-IMPL-006 has not migrated LinearTransform: this first legacy
+	// C2S producer consumes q012 only. q3 remains physically populated but its
+	// ModUp authority must no longer be assumed after this operation.
+	firstMatrix := eval.C2SDFTMatrix.Matrices[0]
+	require.NoError(t, eval.DFTEvaluator.FastEvaluator().LinearTransform(state, ltcommon.LinearTransformation(firstMatrix), state))
+	q012Changed := false
+	for component := range state.Value {
+		require.Equal(t, q3Before[component], state.Value[component].Coeffs[3], "legacy C2S must not claim to preserve q3 authority")
+		for row := 0; row < 3; row++ {
+			if !equalUint64Slices(q012Before[component][row], state.Value[component].Coeffs[row]) {
+				q012Changed = true
+			}
+		}
+	}
+	require.True(t, q012Changed, "the C2S producer must exercise its legacy q012 path")
+}
+
+func equalUint64Slices(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestFastLogN13C2SProductionRescaleIgnoresPoisonedQ3(t *testing.T) {
 	params, residual := fastLogN13CompressionParameters(t)
 	eval, err := NewFastEvaluator(params)

@@ -9,10 +9,29 @@ import (
 	"github.com/tuneinsight/lattigo/v6/ring"
 )
 
-// Trace applies the ring-level Fast Trace to a degree-one ciphertext. It
-// preserves the ciphertext scale and representation, reads and writes only
-// q0/q1, and does not use evaluation keys or QP arithmetic.
+// Trace applies the ring-level Fast Trace using the legacy authoritative row
+// count. It preserves ciphertext metadata and does not use evaluation keys or
+// QP arithmetic. Boundaries that have explicitly materialized a wider
+// Q-prefix should call TraceQPrefixRows instead.
 func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Ciphertext) error {
+	if eval == nil {
+		return errors.New("Fast evaluator cannot be nil")
+	}
+	if ctIn == nil {
+		return errors.New("ctIn and opOut cannot be nil")
+	}
+	rows := maintainedLimbCount(&eval.Parameters, ctIn.Level())
+	return eval.traceQPrefixRows(ctIn, logN, rows, opOut, false)
+}
+
+// TraceQPrefixRows applies the ring-level Fast Trace to exactly rows explicit
+// Q-prefix residues. It preserves the ciphertext scale and representation,
+// supports in-place operation, and leaves all higher rows untouched.
+func (eval *Evaluator) TraceQPrefixRows(ctIn *rlwe.Ciphertext, logN, rows int, opOut *rlwe.Ciphertext) error {
+	return eval.traceQPrefixRows(ctIn, logN, rows, opOut, true)
+}
+
+func (eval *Evaluator) traceQPrefixRows(ctIn *rlwe.Ciphertext, logN, rows int, opOut *rlwe.Ciphertext, preserveHigherRows bool) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
@@ -47,12 +66,20 @@ func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Cipher
 		if len(ct.Value) != 2 {
 			return fmt.Errorf("%s must have degree-one storage", name)
 		}
-		for component := range ct.Value {
-			if len(ct.Value[component].Coeffs) < 2 ||
-				len(ct.Value[component].Coeffs[0]) != eval.Parameters.N() ||
-				len(ct.Value[component].Coeffs[1]) != eval.Parameters.N() {
-				return fmt.Errorf("%s has invalid q0/q1 storage", name)
-			}
+	}
+	if err := validatePrefixRows(eval.Parameters.RingQ(), ctIn.Level(), rows, ctIn.Value[0], ctIn.Value[1], opOut.Value[0], opOut.Value[1]); err != nil {
+		return fmt.Errorf("Fast Trace Q-prefix storage: %w", err)
+	}
+
+	gap := 1 << (eval.Parameters.LogN() - logN - 1)
+	if logN == 0 {
+		gap <<= 1
+	}
+	var nInv *big.Int
+	if gap > 1 {
+		nInv = new(big.Int).SetUint64(uint64(gap))
+		if nInv.ModInverse(nInv, eval.Parameters.RingQ().ModulusAtLevel[ctIn.Level()]) == nil {
+			return fmt.Errorf("Fast Trace cannot invert gap %d modulo Q", gap)
 		}
 	}
 
@@ -60,32 +87,29 @@ func (eval *Evaluator) Trace(ctIn *rlwe.Ciphertext, logN int, opOut *rlwe.Cipher
 	ringQ := eval.Parameters.RingQ().AtLevel(opOut.Level())
 	if ctIn != opOut {
 		for component := range ctIn.Value {
-			copyMaintained(ringQ, ctIn.Value[component], opOut.Value[component])
+			copyPrefixRowsUnchecked(rows, ctIn.Value[component], opOut.Value[component])
 		}
 	}
 
-	gap := 1 << (eval.Parameters.LogN() - logN - 1)
-	if logN == 0 {
-		gap <<= 1
-	}
 	if gap <= 1 {
 		return nil
 	}
-
-	nInv := new(big.Int).SetUint64(uint64(gap))
-	if nInv.ModInverse(nInv, ringQ.ModulusAtLevel[opOut.Level()]) == nil {
-		return fmt.Errorf("Fast Trace cannot invert gap %d modulo Q", gap)
+	var err error
+	if preserveHigherRows {
+		err = eval.MulIntegerQPrefixRows(opOut, nInv, rows, opOut)
+	} else {
+		err = eval.MulIntegerMaintained(opOut, nInv, opOut)
 	}
-	if err := eval.MulIntegerMaintained(opOut, nInv, opOut); err != nil {
+	if err != nil {
 		return fmt.Errorf("Fast Trace inverse normalization: %w", err)
 	}
 
 	apply := func(galEl uint64) error {
 		for component := range opOut.Value {
-			if err := eval.fastAutomorphism(ringQ, opOut.Value[component], eval.nttScratch[0], galEl, true); err != nil {
+			if err := eval.fastAutomorphismRows(ringQ, opOut.Value[component], eval.nttScratch[0], galEl, true, rows); err != nil {
 				return err
 			}
-			for limb := 0; limb < maintainedLimbCount(&eval.Parameters, opOut.Level()); limb++ {
+			for limb := 0; limb < rows; limb++ {
 				ringQ.SubRings[limb].Add(opOut.Value[component].Coeffs[limb], eval.nttScratch[0].Coeffs[limb], opOut.Value[component].Coeffs[limb])
 			}
 		}

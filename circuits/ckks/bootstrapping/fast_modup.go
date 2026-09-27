@@ -12,9 +12,19 @@ import (
 )
 
 // modUpBasis raises a Level-0 Fast ciphertext to the Bootstrap modulus basis
-// without performing Trace. Only the maintained q0/q1 residues are computed;
-// higher rows are restored structurally and remain dormant.
+// without performing Trace. The target Q-prefix is materialized from the
+// canonical centered q0 representative.
 func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if eval == nil {
+		return nil, errors.New("Fast Bootstrap evaluator cannot be nil")
+	}
+	if eval.FastCKKS == nil {
+		return nil, errors.New("Fast CKKS evaluator cannot be nil")
+	}
+	return eval.modUpBasisAtLevel(ct, eval.Parameters.BootstrappingParameters.MaxLevel())
+}
+
+func (eval *FastEvaluator) modUpBasisAtLevel(ct *rlwe.Ciphertext, targetLevel int) (*rlwe.Ciphertext, error) {
 	if eval == nil || eval.FastCKKS == nil {
 		return nil, errors.New("Fast Bootstrap evaluator cannot be nil")
 	}
@@ -46,64 +56,58 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 
 	ringQ := params.RingQ()
 	maxLevel := params.MaxLevel()
+	if targetLevel < 1 || targetLevel > maxLevel {
+		return nil, fmt.Errorf("Fast ModUp target level %d must be in [1,%d]", targetLevel, maxLevel)
+	}
 	if maxLevel < 1 {
 		return nil, errors.New("Fast ModUp basis requires at least q0 and q1")
 	}
-	ringQ0 := ringQ.AtLevel(0)
+	rows, err := fastckks.QPrefixWidth(targetLevel)
+	if err != nil {
+		return nil, err
+	}
+	Q := ringQ.ModuliChain()
+	BRCQ := ringQ.BRedConstants()
+	if rows > len(Q) || rows > len(BRCQ) || rows > len(ringQ.SubRings) {
+		return nil, fmt.Errorf("Fast ModUp target prefix width %d exceeds available q rows", rows)
+	}
 	for component := range ct.Value {
 		if len(ct.Value[component].Coeffs[0]) != params.N() {
 			return nil, fmt.Errorf("Fast ModUp basis component %d has invalid q0 storage", component)
 		}
-		ringQ0.SubRings[0].INTT(ct.Value[component].Coeffs[0], ct.Value[component].Coeffs[0])
 	}
 
+	// All structural and domain checks precede the first destructive transform.
+	fastckks.Resize(ct, ct.Degree(), targetLevel, params.N())
 	for component := range ct.Value {
-		if err := restoreFastModUpLevel(&ct.Value[component], maxLevel, params.N()); err != nil {
-			return nil, fmt.Errorf("Fast ModUp basis component %d: %w", component, err)
-		}
+		ringQ.SubRings[0].INTT(ct.Value[component].Coeffs[0], ct.Value[component].Coeffs[0])
 	}
 
-	Q := ringQ.ModuliChain()
 	q0 := Q[0]
-	BRCQ := ringQ.BRedConstants()
-	q1 := Q[1]
-	maintained := fastckks.MaintainedLimbCount(&params, maxLevel)
 	for component := range ct.Value {
 		coeffs := ct.Value[component].Coeffs
-		for j, coeff := range coeffs[0] {
-			pos, neg := uint64(1), uint64(0)
-			if coeff >= q0>>1 {
-				coeff = q0 - coeff
-				pos, neg = 0, 1
-			}
-			tmp := ring.BRedAdd(coeff, q1, BRCQ[1])
-			coeffs[1][j] = tmp*pos + (q1-tmp)*neg
-		}
-		if maintained >= 3 {
-			q2 := Q[2]
-			for j, coeff := range coeffs[0] {
-				pos, neg := uint64(1), uint64(0)
-				if coeff >= q0>>1 {
-					coeff = q0 - coeff
-					pos, neg = 0, 1
+		for j, residue := range coeffs[0] {
+			magnitude, negative := centeredModUpQ0Residue(residue, q0)
+			for row := 1; row < rows; row++ {
+				q := Q[row]
+				tmp := ring.BRedAdd(magnitude, q, BRCQ[row])
+				if negative && tmp != 0 {
+					tmp = q - tmp
 				}
-				tmp := ring.BRedAdd(coeff, q2, BRCQ[2])
-				coeffs[2][j] = tmp*pos + (q2-tmp)*neg
+				coeffs[row][j] = tmp
 			}
 		}
 	}
 
 	for component := range ct.Value {
-		ringQ.SubRings[0].NTT(ct.Value[component].Coeffs[0], ct.Value[component].Coeffs[0])
-		ringQ.SubRings[1].NTT(ct.Value[component].Coeffs[1], ct.Value[component].Coeffs[1])
-		if maintained >= 3 {
-			ringQ.SubRings[2].NTT(ct.Value[component].Coeffs[2], ct.Value[component].Coeffs[2])
+		for row := 0; row < rows; row++ {
+			ringQ.SubRings[row].NTT(ct.Value[component].Coeffs[row], ct.Value[component].Coeffs[row])
 		}
 	}
 
 	if scale := (eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()) / ct.Scale.Float64(); scale > 1 {
 		scalar := uint64(math.Round(scale))
-		if err := eval.FastCKKS.MulIntegerMaintained(ct, new(big.Int).SetUint64(scalar), ct); err != nil {
+		if err := eval.FastCKKS.MulIntegerQPrefixRows(ct, new(big.Int).SetUint64(scalar), rows, ct); err != nil {
 			return nil, err
 		}
 		ct.Scale = ct.Scale.Mul(rlwe.NewScale(scale))
@@ -112,49 +116,61 @@ func (eval *FastEvaluator) modUpBasis(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, er
 	return ct, nil
 }
 
-// ModUp completes the Stage-A Fast ModUp boundary: basis raise, Fast Trace,
-// and q0/q1-only Montgomery conversion. Dense/sparse switching and the rest
-// of Bootstrap orchestration are intentionally outside this boundary.
+// centeredModUpQ0Residue returns the magnitude and sign of the canonical
+// q0-centered representative. The midpoint q0>>1 is deliberately positive.
+func centeredModUpQ0Residue(residue, q0 uint64) (magnitude uint64, negative bool) {
+	if residue <= q0>>1 {
+		return residue, false
+	}
+	return q0 - residue, true
+}
+
+// ModUp completes the Fast ModUp boundary: basis raise, explicit-width Trace,
+// and consistent Montgomery conversion of every authoritative Q-prefix row.
+// Dense/sparse switching and the rest of Bootstrap orchestration are outside.
 func (eval *FastEvaluator) ModUp(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
 	if eval == nil {
 		return nil, errors.New("Fast Bootstrap evaluator cannot be nil")
+	}
+	if eval.FastCKKS == nil {
+		return nil, errors.New("Fast CKKS evaluator cannot be nil")
+	}
+	if ct == nil || ct.MetaData == nil {
+		return nil, errors.New("Fast ModUp ciphertext and metadata cannot be nil")
+	}
+	logSlots := eval.Parameters.CoeffsToSlotsParameters.LogSlots
+	logN := eval.Parameters.BootstrappingParameters.LogN()
+	if logSlots < 0 || logSlots >= logN {
+		return nil, fmt.Errorf("Fast ModUp Trace logSlots must be in [0,%d), got %d", logN, logSlots)
+	}
+	gap := 1 << (logN - logSlots - 1)
+	if logSlots == 0 {
+		gap <<= 1
+	}
+	if gap > 1 {
+		targetLevel := eval.Parameters.BootstrappingParameters.MaxLevel()
+		nInv := new(big.Int).SetUint64(uint64(gap))
+		if nInv.ModInverse(nInv, eval.Parameters.BootstrappingParameters.RingQ().ModulusAtLevel[targetLevel]) == nil {
+			return nil, fmt.Errorf("Fast ModUp Trace cannot invert gap %d modulo Q", gap)
+		}
 	}
 	ct, err := eval.modUpBasis(ct)
 	if err != nil {
 		return nil, err
 	}
-	if err = eval.FastCKKS.Trace(ct, eval.Parameters.CoeffsToSlotsParameters.LogSlots, ct); err != nil {
+	rows, err := fastckks.QPrefixWidth(ct.Level())
+	if err != nil {
+		return nil, err
+	}
+	if err = eval.FastCKKS.TraceQPrefixRows(ct, logSlots, rows, ct); err != nil {
 		return nil, err
 	}
 	ringQ := eval.Parameters.BootstrappingParameters.RingQ()
 	for component := range ct.Value {
-		for limb := 0; limb < fastckks.MaintainedLimbCount(&eval.Parameters.BootstrappingParameters, ct.Level()); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			ringQ.SubRings[limb].MForm(ct.Value[component].Coeffs[limb], ct.Value[component].Coeffs[limb])
 		}
 	}
 	ct.IsMontgomery = true
 	return ct, nil
-}
-
-// restoreFastModUpLevel restores structural rows without allocating rows that
-// were retained when ScaleDown shortened the coefficient-row slice.
-func restoreFastModUpLevel(poly *ring.Poly, level, N int) error {
-	if poly == nil || len(poly.Coeffs) == 0 || len(poly.Coeffs[0]) != N {
-		return errors.New("invalid polynomial storage")
-	}
-	if cap(poly.Coeffs) < level+1 {
-		coeffs := make([][]uint64, level+1)
-		copy(coeffs, poly.Coeffs)
-		poly.Coeffs = coeffs
-	} else {
-		poly.Coeffs = poly.Coeffs[:level+1]
-	}
-	// Fast ModUp only restores the active bounded rows. Higher logical rows
-	// remain nil so the basis raise does not materialize dormant full-RNS storage.
-	for i := 1; i <= level && i < 3; i++ {
-		if len(poly.Coeffs[i]) != N {
-			poly.Coeffs[i] = make([]uint64, N)
-		}
-	}
-	return nil
 }
