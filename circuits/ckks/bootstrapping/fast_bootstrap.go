@@ -137,8 +137,19 @@ func (eval *FastEvaluator) validateFastBootstrapPublicInputs(cts []rlwe.Cipherte
 		if ct.Scale.Cmp(rlwe.NewScale(0)) != 1 {
 			return fmt.Errorf("ciphertext %d scale must be positive", i)
 		}
-		if len(ct.Value[0].Coeffs) < fastckks.MaintainedLimbCount(&params, currentLevel) || len(ct.Value[1].Coeffs) < fastckks.MaintainedLimbCount(&params, currentLevel) {
-			return fmt.Errorf("ciphertext %d has invalid maintained storage", i)
+		rows, err := fastckks.QPrefixWidth(currentLevel)
+		if err != nil {
+			return fmt.Errorf("ciphertext %d: %w", i, err)
+		}
+		for d := 0; d <= 1; d++ {
+			if len(ct.Value[d].Coeffs) < rows {
+				return fmt.Errorf("ciphertext %d component %d has insufficient public Q-prefix rows", i, d)
+			}
+			for row := 0; row < rows; row++ {
+				if len(ct.Value[d].Coeffs[row]) != params.N() {
+					return fmt.Errorf("ciphertext %d component %d q%d row has invalid public backing", i, d, row)
+				}
+			}
 		}
 		if i > 0 {
 			if currentLevel != level {
@@ -147,8 +158,12 @@ func (eval *FastEvaluator) validateFastBootstrapPublicInputs(cts []rlwe.Cipherte
 			if currentLogSlots != logSlots {
 				return fmt.Errorf("ciphertext %d LogSlots %d does not match LogSlots %d", i, currentLogSlots, logSlots)
 			}
-			if ct.IsBatched != cts[0].IsBatched || ct.IsBitReversed != cts[0].IsBitReversed {
+			if ct.IsNTT != cts[0].IsNTT || ct.IsMontgomery != cts[0].IsMontgomery ||
+				ct.IsBatched != cts[0].IsBatched || ct.IsBitReversed != cts[0].IsBitReversed {
 				return fmt.Errorf("ciphertext %d plaintext representation does not match ciphertext 0", i)
+			}
+			if !ct.Scale.Equal(cts[0].Scale) || ct.LogDimensions != cts[0].LogDimensions {
+				return fmt.Errorf("ciphertext %d scale or dimensions do not match ciphertext 0", i)
 			}
 		}
 	}
@@ -204,7 +219,11 @@ func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Cipherte
 	if err := eval.ensureFastBootstrapCircuit(); err != nil {
 		return nil, err
 	}
-	packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2(cts)
+	inputRows, err := fastckks.QPrefixWidth(cts[0].Level())
+	if err != nil {
+		return nil, err
+	}
+	packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2QPrefixRows(cts, inputRows)
 	if err != nil {
 		return nil, fmt.Errorf("cannot Fast Bootstrap: %w", err)
 	}
@@ -221,7 +240,14 @@ func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Cipherte
 		}
 		packed[i] = *coreOut
 	}
-	if packed, err = eval.UnpackAndSwitchN2ToN1(packed, ctxtN1, ctxtN2); err != nil {
+	outputRows, err := fastckks.QPrefixWidth(packed[0].Level())
+	if err != nil {
+		return nil, err
+	}
+	if outputRows > eval.Parameters.ResidualParameters.MaxLevel()+1 {
+		return nil, fmt.Errorf("Fast Bootstrap core output Q-prefix width %d exceeds the public residual width", outputRows)
+	}
+	if packed, err = eval.UnpackAndSwitchN2ToN1QPrefixRows(packed, ctxtN1, ctxtN2, outputRows); err != nil {
 		return nil, fmt.Errorf("cannot Fast Bootstrap unpack: %w", err)
 	}
 	for i := range packed {
@@ -243,9 +269,26 @@ func (eval *FastEvaluator) finalizeFastPublicCiphertext(ct *rlwe.Ciphertext) err
 	if !ct.IsNTT || !ct.IsMontgomery {
 		return errors.New("Fast Bootstrap output must be NTT-domain Montgomery before finalization")
 	}
+	rows, err := fastckks.QPrefixWidth(ct.Level())
+	if err != nil {
+		return err
+	}
+	if rows > params.MaxLevel()+1 {
+		return errors.New("Fast Bootstrap output authority exceeds the public residual Level")
+	}
+	for d := 0; d <= 1; d++ {
+		if len(ct.Value[d].Coeffs) < rows {
+			return fmt.Errorf("Fast Bootstrap output component %d has insufficient public rows", d)
+		}
+		for row := 0; row < rows; row++ {
+			if len(ct.Value[d].Coeffs[row]) != params.N() {
+				return fmt.Errorf("Fast Bootstrap output component %d q%d row has invalid public backing", d, row)
+			}
+		}
+	}
 	ringQ := params.RingQ()
 	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < fastckks.MaintainedLimbCount(&eval.Parameters.ResidualParameters, ct.Level()); limb++ {
+		for limb := 0; limb < rows; limb++ {
 			ringQ.SubRings[limb].IMForm(ct.Value[d].Coeffs[limb], ct.Value[d].Coeffs[limb])
 		}
 	}

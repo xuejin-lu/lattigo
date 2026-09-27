@@ -1,6 +1,7 @@
 package bootstrapping
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/dft"
@@ -19,6 +20,57 @@ func BenchmarkFastPackingLogN13Count4(b *testing.B) {
 
 func BenchmarkFastPackingFactorTwoLogN13Count4(b *testing.B) {
 	benchmarkFastPackingFactorTwo(b, 4)
+}
+
+func BenchmarkFastPackingQPrefixRowsSmall(b *testing.B) {
+	generator := ring.NewNTTFriendlyPrimesGenerator(50, 64)
+	moduli, err := generator.NextAlternatingPrimes(5)
+	if err != nil {
+		b.Fatal(err)
+	}
+	n1, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{LogN: 4, Q: moduli, LogDefaultScale: 30})
+	if err != nil {
+		b.Fatal(err)
+	}
+	n2, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{LogN: 5, Q: moduli, LogDefaultScale: 30})
+	if err != nil {
+		b.Fatal(err)
+	}
+	params := Parameters{ResidualParameters: n1, BootstrappingParameters: n2, SlotsToCoeffsParameters: dft.MatrixLiteral{LogSlots: 4}}
+	eval, err := NewFastEvaluator(params)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inputs := make([]rlwe.Ciphertext, 3)
+	for i := range inputs {
+		inputs[i] = *newFastPackingQPrefixCiphertext(n1, 4, 1, uint64(1701+i*23), 4)
+	}
+	for _, rows := range []int{2, 4} {
+		rows := rows
+		packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2QPrefixRows(cloneFastPackingInputs(inputs), rows)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("PackRows%d", rows), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, _, _, err := eval.PackAndSwitchN1ToN2QPrefixRows(inputs, rows); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("UnpackRows%d", rows), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ctxN1Copy, ctxN2Copy := *ctxtN1, *ctxtN2
+				if _, err := eval.UnpackAndSwitchN2ToN1QPrefixRows(cloneFastPackingInputs(packed), &ctxN1Copy, &ctxN2Copy, rows); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 func benchmarkFastPacking(b *testing.B, logN, count int) {

@@ -67,6 +67,21 @@ func newFastPackingCiphertext(params ckks.Parameters, level, logSlots int, seed 
 	return ct
 }
 
+func newFastPackingQPrefixCiphertext(params ckks.Parameters, level, logSlots int, seed uint64, rows int) *rlwe.Ciphertext {
+	ct := newFastPackingCiphertext(params, level, logSlots, seed)
+	for d := 0; d <= 1; d++ {
+		for row := 0; row < rows; row++ {
+			subring := params.RingQ().SubRings[row]
+			for i := range ct.Value[d].Coeffs[row] {
+				value := (seed + uint64(101*d+37*row+i*i+3*i)) % subring.Modulus
+				ct.Value[d].Coeffs[row][i] = ring.MForm(value, subring.Modulus, subring.BRedConstant)
+			}
+			params.RingQ().SubRings[row].NTT(ct.Value[d].Coeffs[row], ct.Value[d].Coeffs[row])
+		}
+	}
+	return ct
+}
+
 func TestFastPackingLevelZero(t *testing.T) {
 	for _, factorTwo := range []bool{false, true} {
 		t.Run(fmt.Sprintf("factorTwo=%t", factorTwo), func(t *testing.T) {
@@ -107,6 +122,18 @@ func requireFastPackingQ01Equal(t *testing.T, want, got []rlwe.Ciphertext) {
 		require.Equal(t, *want[i].MetaData, *got[i].MetaData, "ciphertext %d metadata", i)
 		for d := 0; d <= 1; d++ {
 			require.Equal(t, want[i].Value[d].Coeffs[:2], got[i].Value[d].Coeffs[:2], "ciphertext %d component %d", i, d)
+		}
+	}
+}
+
+func requireFastPackingRowsEqual(t *testing.T, want, got []rlwe.Ciphertext, rows int) {
+	t.Helper()
+	require.Equal(t, len(want), len(got))
+	for i := range want {
+		require.Equal(t, want[i].Degree(), got[i].Degree(), "ciphertext %d degree", i)
+		require.Equal(t, *want[i].MetaData, *got[i].MetaData, "ciphertext %d metadata", i)
+		for d := 0; d <= 1; d++ {
+			require.Equal(t, want[i].Value[d].Coeffs[:rows], got[i].Value[d].Coeffs[:rows], "ciphertext %d component %d", i, d)
 		}
 	}
 }
@@ -237,6 +264,12 @@ func TestFastPackingFactorTwoRingBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ctxN1)
 	require.NotNil(t, ctxN2)
+	for d := 0; d <= 1; d++ {
+		require.NotSame(t, &inputs[0].Value[d].Coeffs[0][0], &got[0].Value[d].Coeffs[0][0], "packed rows must own storage")
+		if len(got) > 1 {
+			require.NotSame(t, &got[0].Value[d].Coeffs[0][0], &got[1].Value[d].Coeffs[0][0], "packed outputs must not alias")
+		}
+	}
 	require.Equal(t, n2.N(), got[0].N())
 
 	packN1 := &packingContext{Params: &n1, LogMaxDimensions: n1.LogMaxDimensions(), LogSlots: 1, NbPackedCTs: len(inputs)}
@@ -282,6 +315,79 @@ func TestFastPackingFactorTwoRingBoundary(t *testing.T) {
 		require.Equal(t, n1.N(), gotUnpacked[i].N())
 		require.Equal(t, inputs[i].LogSlots(), gotUnpacked[i].LogSlots())
 	}
+}
+
+func TestFastPackingExplicitQPrefixRowsWidthFour(t *testing.T) {
+	params, n1, n2 := fastPackingParameters(t, true)
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	inputs := make([]rlwe.Ciphertext, 5)
+	for i := range inputs {
+		inputs[i] = *newFastPackingQPrefixCiphertext(n1, 4, 1, uint64(1001+i*43), 4)
+	}
+	original := cloneFastPackingInputs(inputs)
+	poisoned := cloneFastPackingInputs(inputs)
+	for i := range poisoned {
+		for d := 0; d <= 1; d++ {
+			for j := range poisoned[i].Value[d].Coeffs[4] {
+				poisoned[i].Value[d].Coeffs[4][j] ^= uint64(0x9e3779b9 + i*19 + d + j)
+			}
+		}
+	}
+
+	got, ctxN1, ctxN2, err := eval.PackAndSwitchN1ToN2QPrefixRows(inputs, 4)
+	require.NoError(t, err)
+	require.NotNil(t, ctxN1)
+	require.NotNil(t, ctxN2)
+	for d := 0; d <= 1; d++ {
+		require.NotSame(t, &inputs[0].Value[d].Coeffs[0][0], &got[0].Value[d].Coeffs[0][0], "explicit packed rows must own storage")
+		if len(got) > 1 {
+			require.NotSame(t, &got[0].Value[d].Coeffs[0][0], &got[1].Value[d].Coeffs[0][0], "explicit packed outputs must not alias")
+		}
+	}
+	poisonedGot, _, _, err := eval.PackAndSwitchN1ToN2QPrefixRows(poisoned, 4)
+	require.NoError(t, err)
+	requireFastPackingRowsEqual(t, got, poisonedGot, 4)
+
+	wantN1 := standardPackReference(t, params, original, *ctxN1)
+	wantN2Inputs := make([]rlwe.Ciphertext, len(wantN1))
+	for i := range wantN1 {
+		converted := ckks.NewCiphertext(n2, 1, wantN1[i].Level())
+		converted.IsNTT, converted.IsMontgomery = wantN1[i].IsNTT, wantN1[i].IsMontgomery
+		rlwe.SwitchCiphertextRingDegreeNTT(wantN1[i].El(), nil, converted.El())
+		wantN2Inputs[i] = *converted
+	}
+	want, err := (Evaluator{Parameters: params}).pack(wantN2Inputs, *ctxN2,
+		rlwe.GenXPow2NTT(n2.RingQ().AtLevel(4), n2.LogN(), false))
+	require.NoError(t, err)
+	requireFastPackingRowsEqual(t, want, got, 4)
+
+	ctxN1Copy, ctxN2Copy := *ctxN1, *ctxN2
+	unpacked, err := eval.UnpackAndSwitchN2ToN1QPrefixRows(got, &ctxN1Copy, &ctxN2Copy, 4)
+	require.NoError(t, err)
+	refN2Ctx, refN1Ctx := *ctxN2, *ctxN1
+	var refN1 []rlwe.Ciphertext
+	for i := range want {
+		unpackedN2 := standardUnpackReference(t, params, &want[i], refN2Ctx, true)
+		refN2Ctx.NbPackedCTs -= len(unpackedN2)
+		converted := make([]rlwe.Ciphertext, len(unpackedN2))
+		for j := range unpackedN2 {
+			out := ckks.NewCiphertext(n1, 1, unpackedN2[j].Level())
+			out.IsNTT, out.IsMontgomery = unpackedN2[j].IsNTT, unpackedN2[j].IsMontgomery
+			rlwe.SwitchCiphertextRingDegreeNTT(unpackedN2[j].El(), n2.RingQ(), out.El())
+			converted[j] = *out
+		}
+		for j := range converted {
+			unpackedN1 := standardUnpackReference(t, params, &converted[j], refN1Ctx, true)
+			refN1 = append(refN1, unpackedN1...)
+			refN1Ctx.NbPackedCTs -= len(unpackedN1)
+		}
+	}
+	for i := range refN1 {
+		refN1[i].LogDimensions.Cols = inputs[0].LogSlots()
+	}
+	requireFastPackingRowsEqual(t, refN1, unpacked, 4)
+	requireFastPackingRowsEqual(t, original, inputs, 5)
 }
 
 func TestFastPackingValidation(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
@@ -329,6 +330,177 @@ func TestFastBootstrapManyOddCount(t *testing.T) {
 	other := outputs[1].Value[0].Coeffs[0][0]
 	outputs[0].Value[0].Coeffs[0][0]++
 	require.Equal(t, other, outputs[1].Value[0].Coeffs[0][0], "BootstrapMany outputs must not alias")
+}
+
+func TestFastBootstrapManyStructuralMatrix(t *testing.T) {
+	cases := []struct {
+		name      string
+		count     int
+		factorTwo bool
+		level     int
+		logSlots  int
+	}{
+		{name: "count1-level0-n1eqn2", count: 1, level: 0, logSlots: 2},
+		{name: "count2-level1-n1eqn2", count: 2, level: 1, logSlots: 2},
+		{name: "count3-sparse-n1eqn2", count: 3, level: 0, logSlots: 1},
+		{name: "count5-level1-n1eqn2", count: 5, level: 1, logSlots: 2},
+		{name: "count3-level0-factor-two", count: 3, factorTwo: true, level: 0, logSlots: 2},
+		{name: "count5-level1-factor-two", count: 5, factorTwo: true, level: 1, logSlots: 2},
+		{name: "count3-full-slots", count: 3, level: 0, logSlots: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var params Parameters
+			var residual ckks.Parameters
+			if tc.factorTwo {
+				params, residual = fastBootstrapParametersAt(t, 5, tc.logSlots, true)
+			} else {
+				params, residual = fastBootstrapParameters(t, tc.logSlots, false)
+			}
+			params.ResidualParameters = residual
+			eval, err := NewFastEvaluator(params)
+			require.NoError(t, err)
+			values := make([][]complex128, tc.count)
+			inputs := make([]rlwe.Ciphertext, tc.count)
+			original := make([]rlwe.Ciphertext, tc.count)
+			for i := range inputs {
+				values[i] = make([]complex128, 1<<tc.logSlots)
+				for j := range values[i] {
+					values[i][j] = complex(float64((i+j)%5-2)/32, float64((2*i+j)%7-3)/64)
+				}
+				input := fastBootstrapEncodedCiphertextAtLevel(t, residual, tc.level, tc.logSlots, values[i])
+				inputs[i] = *input
+				original[i] = *input.CopyNew()
+			}
+
+			outputs, err := eval.BootstrapMany(inputs)
+			require.NoError(t, err)
+			require.Len(t, outputs, tc.count)
+			rows, err := fastckks.QPrefixWidth(residual.MaxLevel())
+			require.NoError(t, err)
+			for i := range outputs {
+				out := &outputs[i]
+				require.Equal(t, residual.N(), out.N())
+				require.Equal(t, residual.MaxLevel(), out.Level())
+				require.Equal(t, 1, out.Degree())
+				require.True(t, out.IsNTT)
+				require.False(t, out.IsMontgomery)
+				require.True(t, out.Scale.Equal(residual.DefaultScale()))
+				require.Equal(t, tc.logSlots, out.LogSlots())
+				require.Len(t, out.Value, 2)
+				for d := 0; d <= 1; d++ {
+					require.Len(t, out.Value[d].Coeffs, rows)
+					for row := 0; row < rows; row++ {
+						require.Len(t, out.Value[d].Coeffs[row], residual.N())
+					}
+				}
+				fastBootstrapDecode(t, residual, out, values[i])
+				require.Equal(t, *original[i].MetaData, *inputs[i].MetaData, "input %d metadata mutated", i)
+				for d := 0; d <= 1; d++ {
+					require.Equal(t, original[i].Value[d].Coeffs, inputs[i].Value[d].Coeffs, "input %d component %d mutated", i, d)
+				}
+			}
+			if len(outputs) > 1 {
+				other := outputs[1].Value[0].Coeffs[0][0]
+				outputs[0].Value[0].Coeffs[0][0]++
+				require.Equal(t, other, outputs[1].Value[0].Coeffs[0][0], "BootstrapMany outputs must not alias")
+			}
+		})
+	}
+}
+
+func TestFastBootstrapPublicBoundaryRejectsRowsBeyondContract(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	values := []complex128{0.125 + 0.25i, -0.25 + 0.0625i, 0.375 - 0.125i, -0.0625 - 0.1875i}
+	base := fastBootstrapEncodedCiphertextAtLevel(t, residual, 1, 2, values)
+	poisoned := base.CopyNew()
+	for d := 0; d <= 1; d++ {
+		for row := 2; row <= 3; row++ {
+			poisoned.Value[d].Coeffs = append(poisoned.Value[d].Coeffs, make([]uint64, residual.N()))
+			for i := range poisoned.Value[d].Coeffs[row] {
+				poisoned.Value[d].Coeffs[row][i] = uint64(0x9e3779b9 + 31*d + 17*row + i)
+			}
+		}
+	}
+	baseBefore, poisonedBefore := base.CopyNew(), poisoned.CopyNew()
+	_, err = eval.Bootstrap(base)
+	require.NoError(t, err)
+	_, err = eval.Bootstrap(poisoned)
+	require.Error(t, err, "physical extra rows increase the RLWE logical Level and violate the public residual contract")
+	for d := 0; d <= 1; d++ {
+		require.Equal(t, baseBefore.Value[d].Coeffs, base.Value[d].Coeffs, "base input component %d mutated", d)
+		require.Equal(t, poisonedBefore.Value[d].Coeffs, poisoned.Value[d].Coeffs, "poisoned input component %d mutated", d)
+	}
+}
+
+func TestFastBootstrapFinalizationRejectsMalformedRowsTransactionally(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	ct := ckks.NewCiphertext(residual, 1, residual.MaxLevel())
+	ct.IsNTT, ct.IsMontgomery = true, true
+	ct.Value[0].Coeffs[1] = ct.Value[0].Coeffs[1][:residual.N()-1]
+	before := ct.CopyNew()
+	require.Error(t, eval.finalizeFastPublicCiphertext(ct))
+	require.Equal(t, before.Value[0].Coeffs, ct.Value[0].Coeffs)
+	require.Equal(t, before.Value[1].Coeffs, ct.Value[1].Coeffs)
+	require.Equal(t, before.IsNTT, ct.IsNTT)
+	require.Equal(t, before.IsMontgomery, ct.IsMontgomery)
+}
+
+func TestFastBootstrapManyMatchesExplicitQPrefixStageSequence(t *testing.T) {
+	params, residual := fastBootstrapParametersAt(t, 5, 2, true)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+	values := []complex128{0.125 + 0.25i, -0.25 + 0.0625i, 0.375 - 0.125i, -0.0625 - 0.1875i}
+	input := fastBootstrapEncodedCiphertextAtLevel(t, residual, 1, 2, values)
+	public, err := eval.Bootstrap(input.CopyNew())
+	require.NoError(t, err)
+
+	inputRows, err := fastckks.QPrefixWidth(input.Level())
+	require.NoError(t, err)
+	packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2QPrefixRows([]rlwe.Ciphertext{*input.CopyNew()}, inputRows)
+	require.NoError(t, err)
+	staged := &packed[0]
+	staged, _, err = eval.ScaleDown(staged)
+	require.NoError(t, err)
+	staged, err = eval.ModUp(staged)
+	require.NoError(t, err)
+	realPart, imagPart, err := eval.DFTEvaluator.CoeffsToSlotsNewWithRestorePlan(staged, eval.C2SDFTMatrix, eval.C2SRestorePlan)
+	require.NoError(t, err)
+	realPart, err = eval.EvalMod(realPart)
+	require.NoError(t, err)
+	if imagPart != nil {
+		imagPart, err = eval.EvalMod(imagPart)
+		require.NoError(t, err)
+	}
+	staged, err = eval.SlotsToCoeffs(realPart, imagPart)
+	require.NoError(t, err)
+	outputRows, err := fastckks.QPrefixWidth(staged.Level())
+	require.NoError(t, err)
+	unpacked, err := eval.UnpackAndSwitchN2ToN1QPrefixRows([]rlwe.Ciphertext{*staged}, ctxtN1, ctxtN2, outputRows)
+	require.NoError(t, err)
+	require.Len(t, unpacked, 1)
+	require.NoError(t, eval.finalizeFastPublicCiphertext(&unpacked[0]))
+	requireFastBootstrapPublicEqual(t, public, &unpacked[0], residual)
+	fastBootstrapDecode(t, residual, &unpacked[0], values)
+}
+
+func requireFastBootstrapPublicEqual(t *testing.T, want, got *rlwe.Ciphertext, params ckks.Parameters) {
+	t.Helper()
+	require.Equal(t, params.N(), got.N())
+	require.Equal(t, params.MaxLevel(), got.Level())
+	require.Equal(t, want.Degree(), got.Degree())
+	require.Equal(t, *want.MetaData, *got.MetaData)
+	require.Equal(t, want.IsNTT, got.IsNTT)
+	require.Equal(t, want.IsMontgomery, got.IsMontgomery)
+	require.Equal(t, want.Value[0].Coeffs, got.Value[0].Coeffs)
+	require.Equal(t, want.Value[1].Coeffs, got.Value[1].Coeffs)
 }
 
 func TestFastBootstrapOrdinaryDecryptorDecode(t *testing.T) {

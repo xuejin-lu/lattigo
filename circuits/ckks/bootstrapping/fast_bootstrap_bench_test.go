@@ -54,3 +54,39 @@ func BenchmarkFastBootstrapEndToEnd(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkFastBootstrapManyLogN13P93Count1(b *testing.B) {
+	benchmarkFastBootstrapManyLogN13P93(b, 1)
+}
+
+func BenchmarkFastBootstrapManyLogN13P93Count3(b *testing.B) {
+	benchmarkFastBootstrapManyLogN13P93(b, 3)
+}
+
+func benchmarkFastBootstrapManyLogN13P93(b *testing.B, count int) {
+	params, residual := fastLogN13CompressionParameters(b)
+	eval, err := NewFastEvaluator(params)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inputs := make([]rlwe.Ciphertext, count)
+	for i := range inputs {
+		values := make([]complex128, 1<<params.LogMaxSlots())
+		for j := range values {
+			values[j] = complex(float64((j+3*i)%17-8)/256, float64((3*j+i)%13-6)/512)
+		}
+		inputs[i] = *fastBootstrapEncodedCiphertext(b, residual, params.LogMaxSlots(), values)
+	}
+	if _, err = eval.BootstrapMany(cloneFastPackingInputs(inputs)); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err = eval.BootstrapMany(cloneFastPackingInputs(inputs)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.Logf("profile=LogN13/P93/LogSlots12 batch=%d", count)
+}

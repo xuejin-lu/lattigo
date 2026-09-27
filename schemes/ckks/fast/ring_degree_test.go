@@ -1,6 +1,7 @@
 package fast
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -199,6 +200,111 @@ func TestFastRingDegreeIgnoresDormantLimbs(t *testing.T) {
 	}
 }
 
+func TestFastRingDegreeQPrefixRowsWidthFour(t *testing.T) {
+	for _, rows := range []int{1, 2, 3, 4} {
+		for _, expand := range []bool{true, false} {
+			for _, isNTT := range []bool{false, true} {
+				for _, isMontgomery := range []bool{false, true} {
+					name := fmt.Sprintf("rows=%d/expand=%t/NTT=%t/Montgomery=%t", rows, expand, isNTT, isMontgomery)
+					t.Run(name, func(t *testing.T) {
+						n1, n2 := testFastRingPair(t, 4)
+						inRing, outRing := n1, n2
+						if !expand {
+							inRing, outRing = n2, n1
+						}
+						in := newFastTestCiphertext(t, inRing, 1, 4)
+						out := newFastTestCiphertext(t, outRing, 1, 4)
+						fillFastCiphertext(in, inRing, 37)
+						fillFastCiphertext(out, outRing, 811)
+						in.IsNTT, out.IsNTT = isNTT, isNTT
+						in.IsMontgomery, out.IsMontgomery = isMontgomery, isMontgomery
+						in.Scale = rlwe.NewScale(987.25)
+						in.LogDimensions = ring.Dimensions{Rows: 1, Cols: 3}
+						in.IsBatched, in.IsBitReversed = true, true
+						if isMontgomery {
+							for d := 0; d <= 1; d++ {
+								for row := 0; row < rows; row++ {
+									subring := inRing.SubRings[row]
+									for i, value := range in.Value[d].Coeffs[row] {
+										in.Value[d].Coeffs[row][i] = ring.MForm(value, subring.Modulus, subring.BRedConstant)
+									}
+								}
+							}
+						}
+						if isNTT {
+							for d := 0; d <= 1; d++ {
+								for row := 0; row < rows; row++ {
+									inRing.SubRings[row].NTT(in.Value[d].Coeffs[row], in.Value[d].Coeffs[row])
+								}
+							}
+						}
+
+						before := in.CopyNew()
+						untouched := cloneDormant(out, rows)
+						want := newFastTestCiphertext(t, outRing, 1, 4)
+						if isNTT {
+							largeRing := (*ring.Ring)(nil)
+							if !expand {
+								largeRing = n2
+							}
+							rlwe.SwitchCiphertextRingDegreeNTT(in.El(), largeRing, want.El())
+						} else {
+							rlwe.SwitchCiphertextRingDegree(in.El(), want.El())
+						}
+						var err error
+						if expand {
+							err = FastN1ToN2QPrefixRows(n1, n2, in, out, rows)
+						} else {
+							err = FastN2ToN1QPrefixRows(n2, n1, in, out, rows)
+						}
+						require.NoError(t, err)
+						require.Equal(t, *in.MetaData, *out.MetaData)
+						require.Equal(t, isNTT, out.IsNTT)
+						require.Equal(t, isMontgomery, out.IsMontgomery)
+						for d := 0; d <= 1; d++ {
+							require.Equal(t, want.Value[d].Coeffs[:rows], out.Value[d].Coeffs[:rows], "component %d", d)
+							if !isNTT {
+								for row := 0; row < rows; row++ {
+									if expand {
+										for i, value := range in.Value[d].Coeffs[row] {
+											require.Equal(t, value, out.Value[d].Coeffs[row][2*i], "component %d q%d coefficient %d", d, row, i)
+											require.Zero(t, out.Value[d].Coeffs[row][2*i+1], "component %d q%d coefficient %d", d, row, i)
+										}
+									} else {
+										for i, value := range out.Value[d].Coeffs[row] {
+											require.Equal(t, value, in.Value[d].Coeffs[row][2*i], "component %d q%d coefficient %d", d, row, i)
+										}
+									}
+								}
+							}
+						}
+						require.Equal(t, untouched, cloneDormant(out, rows), "rows outside explicit authority must be untouched")
+						for d := 0; d <= 1; d++ {
+							require.Equal(t, before.Value[d].Coeffs, in.Value[d].Coeffs, "input component %d must remain unchanged", d)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestFastRingDegreeQPrefixRowsRejectsInvalidAuthority(t *testing.T) {
+	n1, n2 := testFastRingPair(t, 4)
+	in := newFastTestCiphertext(t, n1, 1, 4)
+	out := newFastTestCiphertext(t, n2, 1, 4)
+	for _, rows := range []int{0, 5} {
+		require.Error(t, FastN1ToN2QPrefixRows(n1, n2, in, out, rows))
+	}
+	lowIn := newFastTestCiphertext(t, n1, 1, 2)
+	lowOut := newFastTestCiphertext(t, n2, 1, 2)
+	require.Error(t, FastN1ToN2QPrefixRows(n1.AtLevel(2), n2.AtLevel(2), lowIn, lowOut, 4))
+
+	badOut := newFastTestCiphertext(t, n2, 1, 4)
+	badOut.Value[0].Coeffs[3] = nil
+	require.Error(t, FastN1ToN2QPrefixRows(n1, n2, in, badOut, 4))
+}
+
 func TestFastRingDegreeRejectsAliasAndInvalidRings(t *testing.T) {
 	n1, n2 := testFastRingPair(t, 1)
 	ct1 := newFastTestCiphertext(t, n1, 1, 1)
@@ -261,7 +367,7 @@ func BenchmarkFastRingDegreeConversion(b *testing.B) {
 		{nttIn2, n2},
 	} {
 		for d := 0; d <= 1; d++ {
-			for limb := 0; limb < 2; limb++ {
+			for limb := 0; limb < 4; limb++ {
 				item.r.SubRings[limb].NTT(item.ct.Value[d].Coeffs[limb], item.ct.Value[d].Coeffs[limb])
 			}
 		}
@@ -292,6 +398,30 @@ func BenchmarkFastRingDegreeConversion(b *testing.B) {
 			rlwe.SwitchCiphertextRingDegreeNTT(nttIn2.El(), n2, nttOut1.El())
 		}
 	})
+
+	for _, rows := range []int{2, 4} {
+		rows := rows
+		b.Run(fmt.Sprintf("ExplicitRows%d", rows), func(b *testing.B) {
+			for _, operation := range []struct {
+				name string
+				run  func() error
+			}{
+				{"N1ToN2Coefficient", func() error { return FastN1ToN2QPrefixRows(n1, n2, in1, out2, rows) }},
+				{"N2ToN1Coefficient", func() error { return FastN2ToN1QPrefixRows(n2, n1, in2, out1, rows) }},
+				{"N1ToN2NTT", func() error { return FastN1ToN2QPrefixRows(n1, n2, nttIn1, nttOut2, rows) }},
+				{"N2ToN1NTT", func() error { return FastN2ToN1QPrefixRows(n2, n1, nttIn2, nttOut1, rows) }},
+			} {
+				b.Run(operation.name, func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						if err := operation.run(); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
+		})
+	}
 }
 
 func benchmarkFastRingPair(b *testing.B) (small, large *ring.Ring) {
