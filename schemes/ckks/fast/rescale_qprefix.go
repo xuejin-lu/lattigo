@@ -6,6 +6,7 @@ import (
 	"math/big"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/internal/fastdiag"
 	"github.com/tuneinsight/lattigo/v6/ring"
 )
 
@@ -13,6 +14,10 @@ import (
 // authoritative Q-prefix. It preflights every exact result before mutating the
 // destination so capacity failures are transactional, including in-place use.
 func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceRows int, opOut *rlwe.Ciphertext) error {
+	var wholeSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		wholeSpan = fastdiag.Begin(fastdiag.Rescale, "rescale", 0, fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(nbRescales)))
+	}
 	if eval == nil || op0 == nil || opOut == nil {
 		return errors.New("Fast Rescale evaluator and ciphertexts cannot be nil")
 	}
@@ -74,17 +79,33 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 
 	// Pass one computes only into evaluator-owned scratch and rejects any
 	// intermediate prefix overflow before opOut or an in-place op0 is touched.
+	var preflightSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		preflightSpan = fastdiag.Begin(fastdiag.Rescale, "preflight", wholeSpan.Sequence(), fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(len(op0.Value))))
+		scratch.diagParent = preflightSpan.Sequence()
+	}
 	for component := range op0.Value {
-		if err := eval.rescaleQPrefixComponent(op0.Value[component], nil, op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, scratch); err != nil {
+		if err := eval.rescaleQPrefixComponent(op0.Value[component], nil, op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, op0 == opOut, scratch); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+				preflightSpan.End(fastdiag.Fields{})
+			}
 			return err
 		}
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		preflightSpan.End(fastdiag.Output(op0, sourceRows))
+	}
+	var materializationSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		materializationSpan = fastdiag.Begin(fastdiag.Rescale, "materialization", wholeSpan.Sequence(), fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(len(op0.Value))))
+		scratch.diagParent = materializationSpan.Sequence()
 	}
 
 	if opOut != op0 {
 		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
 	}
 	for component := range op0.Value {
-		if err := eval.rescaleQPrefixComponent(op0.Value[component], &opOut.Value[component], op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, scratch); err != nil {
+		if err := eval.rescaleQPrefixComponent(op0.Value[component], &opOut.Value[component], op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, op0 == opOut, scratch); err != nil {
 			return err
 		}
 	}
@@ -96,16 +117,42 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 	if opOut == op0 {
 		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
 	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		rows, _ := QPrefixWidth(opOut.Level())
+		materializationSpan.End(fastdiag.Output(opOut, rows))
+		wholeSpan.End(fastdiag.Output(opOut, rows))
+	}
 	return nil
 }
 
-func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, sourceLevel, nbRescales, sourceRows, targetRows, component int, montgomery bool, scratch *fastRescaleScratch) error {
+func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, sourceLevel, nbRescales, sourceRows, targetRows, component int, montgomery, inPlace bool, scratch *fastRescaleScratch) error {
 	ringQ := eval.Parameters.RingQ()
+	var fields fastdiag.Fields
+	var phaseSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		componentName := fmt.Sprintf("c%d", component)
+		fields = fastDiagRescaleFields(sourceLevel, sourceLevel-nbRescales, sourceRows, targetRows, componentName, inPlace)
+		phaseSpan = fastdiag.Begin(fastdiag.Rescale, "prefix_to_coefficient", scratch.diagParent, fields)
+	}
 	if err := prefixToCoefficientRows(ringQ, src, sourceRows, true, montgomery, scratch.coeff); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			phaseSpan.End(fastdiag.Fields{})
+		}
 		return err
 	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		phaseSpan.End(fastdiag.Fields{})
+	}
 
+	var reconstructNS, residueMaterializationNS int64
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		phaseSpan = fastdiag.Begin(fastdiag.Rescale, "reconstruct_center_round_capacity", scratch.diagParent, fields)
+	}
 	for coefficient := 0; coefficient < ringQ.N(); coefficient++ {
+		var segment fastdiag.Timer
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			segment = fastdiag.StartTimer()
+		}
 		var residues [MaxQPrefixWidth]uint64
 		for row := 0; row < sourceRows; row++ {
 			residues[row] = scratch.coeff.Coeffs[row][coefficient]
@@ -117,6 +164,10 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 			targetWidth, _ := QPrefixWidth(sourceLevel - step - 1)
 			targetWidth = min(sourceRows, targetWidth)
 			if cmp192(magnitude, scratch.half[targetWidth-1]) > 0 {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+					reconstructNS += segment.ElapsedNS()
+					phaseSpan.End(fastdiag.Fields{})
+				}
 				return &QPrefixCapacityError{
 					Level:         sourceLevel - step - 1,
 					Component:     component,
@@ -125,22 +176,51 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 				}
 			}
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			reconstructNS += segment.ElapsedNS()
+		}
 		if dst != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+				segment = fastdiag.StartTimer()
+			}
 			for row := 0; row < targetRows; row++ {
 				scratch.result.Coeffs[row][coefficient] = signedResidue192(magnitude, negative, scratch.q[row])
 			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+				residueMaterializationNS += segment.ElapsedNS()
+			}
+		}
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		phaseSpan.End(fastdiag.Fields{})
+		fastdiag.Record(fastdiag.Rescale, "reconstruct_center_round_capacity", scratch.diagParent, fields, reconstructNS)
+		if dst != nil {
+			fastdiag.Record(fastdiag.Rescale, "residue_materialization", scratch.diagParent, fields, residueMaterializationNS)
 		}
 	}
 
 	if dst != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			phaseSpan = fastdiag.Begin(fastdiag.Rescale, "ntt_montgomery_restore", scratch.diagParent, fields)
+		}
 		for row := 0; row < targetRows; row++ {
 			ringQ.SubRings[row].NTT(scratch.result.Coeffs[row], dst.Coeffs[row])
 			if montgomery {
 				ringQ.SubRings[row].MForm(dst.Coeffs[row], dst.Coeffs[row])
 			}
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			phaseSpan.End(fastdiag.Fields{})
+		}
 	}
 	return nil
+}
+
+func fastDiagRescaleFields(levelIn, levelOut, rowsIn, rowsOut int, component string, inPlace bool) fastdiag.Fields {
+	return fastdiag.Fields{
+		LevelIn: &levelIn, LevelOut: &levelOut, RowsIn: &rowsIn, RowsOut: &rowsOut,
+		Component: component, InPlace: &inPlace,
+	}
 }
 
 func prefixToCoefficientRows(ringQ *ring.Ring, src ring.Poly, rows int, isNTT, isMontgomery bool, dst ring.Poly) error {

@@ -9,6 +9,7 @@ import (
 
 	commonpolynomial "github.com/tuneinsight/lattigo/v6/circuits/common/polynomial"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/internal/fastdiag"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
@@ -213,8 +214,20 @@ func (eval *FastEvaluator) evaluate(input *rlwe.Ciphertext, p bignum.Polynomial,
 		return cloneQPrefixResult(eval.Parameters, out, rows), nil
 	}
 
-	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly); err != nil {
+	var powerSpan fastdiag.Span
+	var powerParent uint64
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		powerSpan = fastdiag.Begin(fastdiag.Power, "generated_powers", 0, fastdiag.Input(input, rows))
+		powerParent = powerSpan.Sequence()
+	}
+	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly, powerParent); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			powerSpan.End(fastdiag.Fields{})
+		}
 		return nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		powerSpan.End(fastdiag.RepetitionCount(len(ws.powers)))
 	}
 	powerKeys := make([]int, 0, len(ws.powers))
 	for power := range ws.powers {
@@ -337,9 +350,9 @@ func (ws *fastPolynomialWorkspace) babyBuffer(params ckks.Parameters, index, deg
 	return ws.babyBuffers[index]
 }
 
-func (ws *fastPolynomialWorkspace) generatePowers(params ckks.Parameters, eval *fastckks.Evaluator, p bignum.Polynomial, commonPoly commonpolynomial.Polynomial) error {
+func (ws *fastPolynomialWorkspace) generatePowers(params ckks.Parameters, eval *fastckks.Evaluator, p bignum.Polynomial, commonPoly commonpolynomial.Polynomial, parent uint64) error {
 	logDegree := bits.Len64(uint64(commonPoly.Degree()))
-	pb := fastPowerBasis{basis: p.Basis, values: ws.powers, workspace: ws, params: params, eval: eval}
+	pb := fastPowerBasis{basis: p.Basis, values: ws.powers, workspace: ws, params: params, eval: eval, parentSequence: parent}
 	if err := pb.genPower(1<<(logDegree-1), false); err != nil {
 		return err
 	}
@@ -355,11 +368,20 @@ func (ws *fastPolynomialWorkspace) generatePowers(params ckks.Parameters, eval *
 }
 
 type fastPowerBasis struct {
-	basis     bignum.Basis
-	values    map[int]*rlwe.Ciphertext
-	workspace *fastPolynomialWorkspace
-	params    ckks.Parameters
-	eval      *fastckks.Evaluator
+	basis          bignum.Basis
+	values         map[int]*rlwe.Ciphertext
+	workspace      *fastPolynomialWorkspace
+	params         ckks.Parameters
+	eval           *fastckks.Evaluator
+	parentSequence uint64
+}
+
+func fastDiagPowerOutput(ct *rlwe.Ciphertext) fastdiag.Fields {
+	if ct == nil {
+		return fastdiag.Fields{}
+	}
+	rows, _ := fastckks.QPrefixWidth(ct.Level())
+	return fastdiag.Output(ct, rows)
 }
 
 const (
@@ -503,6 +525,16 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	}
 	a, b := commonpolynomial.SplitDegree(n)
 	isPow2 := n&(n-1) == 0
+	var powerSpan fastdiag.Span
+	var previousParent uint64
+	var out *rlwe.Ciphertext
+	var left, right *rlwe.Ciphertext
+	var inputRows = -1
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		previousParent = pb.parentSequence
+		powerSpan = fastdiag.Begin(fastdiag.Power, "power", pb.parentSequence, fastdiag.GeneratedPower(n).Merge(fastdiag.PowerSplit(a, b)))
+		pb.parentSequence = powerSpan.Sequence()
+	}
 
 	if err := pb.genPowerInternal(a, lazy && !isPow2); err != nil {
 		return fmt.Errorf("Fast power %d: power %d: %w", n, a, err)
@@ -511,7 +543,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		return fmt.Errorf("Fast power %d: power %d: %w", n, b, err)
 	}
 
-	left, right := pb.values[a], pb.values[b]
+	left, right = pb.values[a], pb.values[b]
 	degree := 1
 	var err error
 	if lazy {
@@ -530,59 +562,126 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 	if err != nil {
 		return fmt.Errorf("Fast power %d Q-prefix: %w", n, err)
 	}
+	inputRows = rows
 	schedule, err := pb.balancedScheduleFor(left, right, commonLevel)
 	if err != nil {
 		return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
 	}
-	var out *rlwe.Ciphertext
 	postProduct := pb.postProductLogN13Schedule(commonLevel)
 	balanced := schedule.balanced && !postProduct
+	var categorySpan fastdiag.Span
 	if balanced {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
+		}
 		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, rows, true)
 		if err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: copy balanced left: %w", n, err)
 		}
 		rightCopy, err := pb.workspace.balancedCopy(pb.params, right, commonLevel, rows, false)
 		if err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: copy balanced right: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(rightCopy))
 		}
 		if lazy {
 			if leftCopy.Degree() == 2 {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)))
+				}
 				if err := pb.eval.RelinearizeQPrefixRows(leftCopy, leftCopy, rows); err != nil {
+					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+						categorySpan.End(fastdiag.Fields{})
+					}
 					return fmt.Errorf("Fast power %d: relinearize balanced left: %w", n, err)
+				}
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastDiagPowerOutput(leftCopy).Merge(fastdiag.InPlace(true)))
 				}
 			}
 			if rightCopy.Degree() == 2 {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(rightCopy, rows).Merge(fastdiag.GeneratedPower(n)))
+				}
 				if err := pb.eval.RelinearizeQPrefixRows(rightCopy, rightCopy, rows); err != nil {
+					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+						categorySpan.End(fastdiag.Fields{})
+					}
 					return fmt.Errorf("Fast power %d: relinearize balanced right: %w", n, err)
+				}
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
 				}
 			}
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "integer_scaling", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
+		}
 		if err := pb.eval.MulIntegerQPrefixRows(leftCopy, new(big.Int).SetUint64(schedule.factors.left), rows, leftCopy); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: scale balanced left: %w", n, err)
 		}
 		if err := pb.eval.MulIntegerQPrefixRows(rightCopy, new(big.Int).SetUint64(schedule.factors.right), rows, rightCopy); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: scale balanced right: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
 		}
 		leftCopy.Scale = left.Scale.Mul(rlwe.NewScale(schedule.factors.left))
 		rightCopy.Scale = right.Scale.Mul(rlwe.NewScale(schedule.factors.right))
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "rescale", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
+		}
 		if err := pb.eval.RescaleQPrefixRows(leftCopy, rows, leftCopy); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: balanced left rescale: %w", n, err)
 		}
 		if err := pb.eval.RescaleQPrefixRows(rightCopy, rows, rightCopy); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: balanced right rescale: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
 		}
 		if leftCopy.Level() != commonLevel-1 || rightCopy.Level() != commonLevel-1 {
 			return fmt.Errorf("Fast power %d: balanced operands consumed unexpected levels", n)
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.GeneratedPower(n))
+		}
 		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel-1, pb.values[1])
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(out))
+		}
 		productRows, err := pb.workspace.rowsAt(commonLevel - 1)
 		if err != nil {
 			return fmt.Errorf("Fast power %d post-rescale Q-prefix: %w", n, err)
 		}
 		if lazy {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "mul", powerSpan.Sequence(), fastdiag.Input(leftCopy, productRows).Merge(fastdiag.GeneratedPower(n)))
+			}
 			err = pb.eval.MulElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		} else {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "mul_relin", powerSpan.Sequence(), fastdiag.Input(leftCopy, productRows).Merge(fastdiag.GeneratedPower(n)))
+			}
 			err = pb.eval.MulRelinElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		}
 	} else {
@@ -591,25 +690,61 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		// documented precision floor.
 		if lazy {
 			if left.Degree() == 2 {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
+				}
 				if err := pb.eval.RelinearizeQPrefixRows(left, left, rows); err != nil {
+					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+						categorySpan.End(fastdiag.Fields{})
+					}
 					return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
+				}
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastDiagPowerOutput(left).Merge(fastdiag.InPlace(true)))
 				}
 			}
 			if right.Degree() == 2 {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(right, rows).Merge(fastdiag.GeneratedPower(n)))
+				}
 				if err := pb.eval.RelinearizeQPrefixRows(right, right, rows); err != nil {
+					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+						categorySpan.End(fastdiag.Fields{})
+					}
 					return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
+				}
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastDiagPowerOutput(right).Merge(fastdiag.InPlace(true)))
 				}
 			}
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.GeneratedPower(n))
+		}
 		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(out))
+		}
 		if lazy {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "mul", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
+			}
 			err = pb.eval.MulElementQPrefixRows(left, right.El(), rows, out)
 		} else {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "mul_relin", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
+			}
 			err = pb.eval.MulRelinElementQPrefixRows(left, right.El(), rows, out)
 		}
 	}
 	if err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastdiag.Fields{})
+		}
 		return fmt.Errorf("Fast power %d: multiply: %w", n, err)
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		categorySpan.End(fastDiagPowerOutput(out))
 	}
 
 	if pb.basis == bignum.Chebyshev {
@@ -617,8 +752,17 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d doubling Q-prefix: %w", n, rowErr)
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "chebyshev_doubling", powerSpan.Sequence(), fastdiag.Input(out, outRows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
+		}
 		if err = pb.eval.AddQPrefixRows(out, out, out, outRows); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: double: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 		}
 	}
 	if balanced {
@@ -631,8 +775,17 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d rescale Q-prefix: %w", n, rowErr)
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "rescale", powerSpan.Sequence(), fastdiag.Input(out, outRows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
+		}
 		if err := pb.eval.RescaleQPrefixRows(out, outRows, out); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: rescale: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 		}
 	}
 
@@ -646,15 +799,33 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			if rowErr != nil {
 				return fmt.Errorf("Fast power %d subtract-one Q-prefix: %w", n, rowErr)
 			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "recurrence_correction", powerSpan.Sequence(), fastdiag.Input(out, outRows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
+			}
 			if err = pb.eval.AddScalarQPrefixRows(out, -1, outRows, out); err != nil {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastdiag.Fields{})
+				}
 				return fmt.Errorf("Fast power %d: subtract one: %w", n, err)
+			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 			}
 		} else {
 			if err = pb.genPower(c, lazy); err != nil {
 				return fmt.Errorf("Fast power %d: difference power %d: %w", n, c, err)
 			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "recurrence_correction", powerSpan.Sequence(), fastdiag.Input(out, -1).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
+			}
 			if err = pb.workspace.subAligned(pb.params, pb.eval, out, pb.values[c]); err != nil {
+				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+					categorySpan.End(fastdiag.Fields{})
+				}
 				return fmt.Errorf("Fast power %d: subtract difference power: %w", n, err)
+			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 			}
 		}
 	}
@@ -663,12 +834,25 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d post-product Q-prefix: %w", n, rowErr)
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan = fastdiag.Begin(fastdiag.Power, "rescale", powerSpan.Sequence(), fastdiag.Input(out, outRows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
+		}
 		if err := pb.eval.RescaleQPrefixRows(out, outRows, out); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastdiag.Fields{})
+			}
 			return fmt.Errorf("Fast power %d: post-product rescale: %w", n, err)
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+			categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 		}
 	}
 
 	pb.values[n] = out
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		powerSpan.End(fastDiagPowerOutput(out).Merge(fastdiag.Input(left, inputRows)))
+		pb.parentSequence = previousParent
+	}
 	return nil
 }
 

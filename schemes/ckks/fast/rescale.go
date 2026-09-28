@@ -26,6 +26,7 @@ const (
 
 type fastRescaleScratch struct {
 	coeff, result ring.Poly
+	diagParent    uint64
 	q             [MaxQPrefixWidth]uint64
 	inverse       [MaxQPrefixWidth]uint64
 	modulus       [MaxQPrefixWidth]uint192

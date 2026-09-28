@@ -61,7 +61,7 @@ func (eval *FastEvaluator) DiagnosticGeneratePowers(input *rlwe.Ciphertext, p bi
 	}
 	ws := &eval.workspace
 	ws.reset(eval.Parameters, input, rows)
-	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly); err != nil {
+	if err := ws.generatePowers(eval.Parameters, eval.Evaluator, p, commonPoly, 0); err != nil {
 		return nil, DiagnosticPlan{}, err
 	}
 

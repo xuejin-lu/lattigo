@@ -645,7 +645,7 @@ func TestFastPolynomialFormalScaleT2CapacitySafe(t *testing.T) {
 	rows, err := fastckks.QPrefixWidth(input.Level())
 	require.NoError(t, err)
 	eval.workspace.reset(params, input, rows)
-	require.NoError(t, eval.workspace.generatePowers(params, eval.Evaluator, poly, commonPoly))
+	require.NoError(t, eval.workspace.generatePowers(params, eval.Evaluator, poly, commonPoly, 0))
 	got := eval.workspace.powers[2]
 	require.Equal(t, inputLevel-1, got.Level())
 

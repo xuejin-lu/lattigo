@@ -656,9 +656,9 @@ func TestFastBootstrapCoreIgnoresDormantResidues(t *testing.T) {
 			}
 		}
 	}
-	firstOut, _, err := eval.bootstrapCore(first)
+	firstOut, _, err := eval.bootstrapCore(first, 0)
 	require.NoError(t, err)
-	secondOut, _, err := eval.bootstrapCore(second)
+	secondOut, _, err := eval.bootstrapCore(second, 0)
 	require.NoError(t, err)
 	for d := 0; d <= 1; d++ {
 		for limb := 0; limb <= secondOut.Level() && limb < 2; limb++ {
@@ -677,7 +677,7 @@ func TestFastBootstrapCoreS2CConsumesEvalModQ3(t *testing.T) {
 	require.Equal(t, eval.S2CDFTMatrix.LevelQ, eval.Mod1Parameters.LevelQ-eval.Parameters.Mod1ParametersLiteral.Depth())
 
 	input := fastBootstrapPlainCiphertext(t, residual, residual.MaxLevel(), 2)
-	baseline, _, err := eval.bootstrapCore(input.CopyNew())
+	baseline, _, err := eval.bootstrapCore(input.CopyNew(), 0)
 	require.NoError(t, err)
 	require.Equal(t, 1, baseline.Level(), "two S2C groups should contract Level 3 to Level 1")
 
@@ -699,7 +699,7 @@ func TestFastBootstrapCoreS2CConsumesEvalModQ3(t *testing.T) {
 	}
 	require.Greater(t, changedQ3, 0, "first S2C factor must contain encoded q3 data")
 
-	poisoned, _, err := eval.bootstrapCore(input.CopyNew())
+	poisoned, _, err := eval.bootstrapCore(input.CopyNew(), 0)
 	require.NoError(t, err)
 	require.Equal(t, baseline.Level(), poisoned.Level())
 	require.Equal(t, baseline.Scale, poisoned.Scale)

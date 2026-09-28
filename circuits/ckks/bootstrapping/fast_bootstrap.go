@@ -7,6 +7,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/dft"
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/mod1"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/internal/fastdiag"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	fastckks "github.com/tuneinsight/lattigo/v6/schemes/ckks/fast"
@@ -170,30 +171,93 @@ func (eval *FastEvaluator) validateFastBootstrapPublicInputs(cts []rlwe.Cipherte
 	return nil
 }
 
-func (eval *FastEvaluator) bootstrapCore(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, errScale *rlwe.Scale, err error) {
+func fastDiagOutput(ct *rlwe.Ciphertext) fastdiag.Fields {
+	if ct == nil {
+		return fastdiag.Fields{}
+	}
+	rows, _ := fastckks.QPrefixWidth(ct.Level())
+	return fastdiag.Output(ct, rows)
+}
+
+func (eval *FastEvaluator) bootstrapCore(ctIn *rlwe.Ciphertext, parent uint64) (ctOut *rlwe.Ciphertext, errScale *rlwe.Scale, err error) {
 	if err = eval.ensureFastBootstrapCircuit(); err != nil {
 		return nil, nil, err
 	}
+	var stageSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "scale_down", parent, fastdiag.Input(ctIn, -1))
+	}
 	if ctOut, errScale, err = eval.ScaleDown(ctIn); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan.End(fastDiagOutput(ctOut))
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "mod_up_trace", parent, fastdiag.Input(ctOut, -1))
 	}
 	if ctOut, err = eval.ModUp(ctOut); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan.End(fastDiagOutput(ctOut))
 	}
 	var ctReal, ctImag *rlwe.Ciphertext
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "coeffs_to_slots", parent, fastdiag.Input(ctOut, -1).Merge(fastdiag.RepetitionCount(1)))
+	}
 	if ctReal, ctImag, err = eval.DFTEvaluator.CoeffsToSlotsNewWithRestorePlan(ctOut, eval.C2SDFTMatrix, eval.C2SRestorePlan); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan.End(fastDiagOutput(ctReal).Merge(fastdiag.ComponentName("real+imag")))
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "evalmod_real", parent, fastdiag.Input(ctReal, -1).Merge(fastdiag.ComponentName("real")))
 	}
 	if ctReal, err = eval.EvalMod(ctReal); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan.End(fastDiagOutput(ctReal))
 	}
 	if ctImag != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan = fastdiag.Begin(fastdiag.Stage, "evalmod_imag", parent, fastdiag.Input(ctImag, -1).Merge(fastdiag.ComponentName("imag")))
+		}
 		if ctImag, err = eval.EvalMod(ctImag); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+				stageSpan.End(fastdiag.Fields{})
+			}
 			return nil, nil, err
 		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastDiagOutput(ctImag))
+		}
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "slots_to_coeffs", parent, fastdiag.Input(ctReal, -1).Merge(fastdiag.ComponentName("real+imag")))
 	}
 	if ctOut, err = eval.SlotsToCoeffs(ctReal, ctImag); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, nil, err
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan.End(fastDiagOutput(ctOut))
 	}
 	return ctOut, errScale, nil
 }
@@ -213,6 +277,18 @@ func (eval *FastEvaluator) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, err
 // BootstrapMany applies the public packing boundary, one Fast circuit per
 // packed ciphertext, and the public Montgomery/scale restoration boundary.
 func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {
+	var bootstrapSpan fastdiag.Span
+	var parent uint64
+	var traceOutput *rlwe.Ciphertext
+	var traceOutputRows = -1
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		var input *rlwe.Ciphertext
+		if len(cts) != 0 {
+			input = &cts[0]
+		}
+		bootstrapSpan = fastdiag.Begin(fastdiag.Stage, "bootstrap", 0, fastdiag.Input(input, -1))
+		parent = bootstrapSpan.Sequence()
+	}
 	if err := eval.validateFastBootstrapPublicInputs(cts); err != nil {
 		return nil, err
 	}
@@ -223,9 +299,27 @@ func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Cipherte
 	if err != nil {
 		return nil, err
 	}
+	var stageSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		var input *rlwe.Ciphertext
+		if len(cts) != 0 {
+			input = &cts[0]
+		}
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "pack_n1_to_n2", parent, fastdiag.Input(input, inputRows))
+	}
 	packed, ctxtN1, ctxtN2, err := eval.PackAndSwitchN1ToN2QPrefixRows(cts, inputRows)
 	if err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, fmt.Errorf("cannot Fast Bootstrap: %w", err)
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		var output *rlwe.Ciphertext
+		if len(packed) != 0 {
+			output = &packed[0]
+		}
+		stageSpan.End(fastDiagOutput(output).Merge(fastdiag.RepetitionCount(len(packed))))
 	}
 	for i := range packed {
 		if packed[i].IsMontgomery {
@@ -235,7 +329,7 @@ func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Cipherte
 			return nil, errors.New("Fast Bootstrap requires a positive ciphertext scale")
 		}
 		var coreOut *rlwe.Ciphertext
-		if coreOut, _, err = eval.bootstrapCore(&packed[i]); err != nil {
+		if coreOut, _, err = eval.bootstrapCore(&packed[i], parent); err != nil {
 			return nil, fmt.Errorf("cannot Fast Bootstrap circuit %d: %w", i, err)
 		}
 		packed[i] = *coreOut
@@ -247,13 +341,47 @@ func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Cipherte
 	if outputRows > eval.Parameters.ResidualParameters.MaxLevel()+1 {
 		return nil, fmt.Errorf("Fast Bootstrap core output Q-prefix width %d exceeds the public residual width", outputRows)
 	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "unpack_n2_to_n1", parent, fastdiag.Input(&packed[0], outputRows))
+	}
 	if packed, err = eval.UnpackAndSwitchN2ToN1QPrefixRows(packed, ctxtN1, ctxtN2, outputRows); err != nil {
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+			stageSpan.End(fastdiag.Fields{})
+		}
 		return nil, fmt.Errorf("cannot Fast Bootstrap unpack: %w", err)
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		var output *rlwe.Ciphertext
+		if len(packed) != 0 {
+			output = &packed[0]
+		}
+		rows, _ := fastckks.QPrefixWidth(output.Level())
+		stageSpan.End(fastDiagOutput(output).Merge(fastdiag.RepetitionCount(len(packed))).Merge(fastdiag.Fields{RowsOut: &rows}))
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		stageSpan = fastdiag.Begin(fastdiag.Stage, "public_finalization", parent, fastdiag.Input(&packed[0], outputRows))
 	}
 	for i := range packed {
 		if err = eval.finalizeFastPublicCiphertext(&packed[i]); err != nil {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+				stageSpan.End(fastdiag.Fields{})
+			}
 			return nil, fmt.Errorf("cannot Fast Bootstrap finalize ciphertext %d: %w", i, err)
 		}
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		var output *rlwe.Ciphertext
+		if len(packed) != 0 {
+			output = &packed[0]
+		}
+		traceOutput = output
+		if output != nil {
+			traceOutputRows, _ = fastckks.QPrefixWidth(output.Level())
+		}
+		stageSpan.End(fastDiagOutput(output).Merge(fastdiag.RepetitionCount(len(packed))))
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Stage) {
+		bootstrapSpan.End(fastdiag.Output(traceOutput, traceOutputRows))
 	}
 	return packed, nil
 }
