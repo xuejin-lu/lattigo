@@ -1,27 +1,34 @@
 # Current Task
 
-Task: QPREFIX-IMPL-008
+Task: QPREFIX-IMPL-009
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
-`specs/QPREFIX-IMPL-008-PUBLIC-BOOTSTRAP-BOUNDARY.md`
+`specs/QPREFIX-IMPL-009-PERFORMANCE-RELEASE-GATE.md`
 
-Accepted prerequisite:
-`74c058ad59655f2a47efcb4faf1cf38324bd6137`
+Production candidate:
+`f9c7f21e65915bd3eafcd5b12590b570c22a7d6f`
 
-Implement only the public/structural boundary:
-- explicit-row N1<->N2 conversion up to 4 rows;
-- explicit-row packing/unpacking;
-- production BootstrapMany public authority selection;
-- finalization/public output contract;
-- dormant-row isolation and public API equivalence.
+Pre-F comparison point:
+`40532b4dce5c7eeae2db5b0b6f21be64801ce923`
 
-Important:
-- current public Residual MaxLevel <=1, so production public rows are only 1 or 2;
-- q0123 remains an internal Bootstrap representation;
-- do not widen public ciphertexts just because internal circuit is q0123;
-- keep legacy ring-degree/packing wrappers legacy-authority.
+This is validation/release only.
 
-Do not alter C2S/EvalMod/S2C mathematics, polynomial/DFT schedules, parameters, F/full-RNS fallback, or `fast-ckks`.
+Do not change production source.
 
-Commit/push `fast-qprefix` after focused and full regressions pass, then report `READY_FOR_WEB_REVIEW`.
+Execute:
+- detached baseline worktree;
+- matched same-code benchmarks;
+- identical temporary q0=55 P93 benchmark on both commits;
+- current q0=56 P93 Fast + Standard comparison;
+- full correctness/capacity/structural/fallback/public-output audit;
+- final performance table and release verdict.
+
+Keep q0=55 matched-baseline results separate from q0=56 production results.
+
+Return exactly one release status:
+- `QPREFIX_V2_RELEASE_PASS`
+- `QPREFIX_V2_PERFORMANCE_REVIEW`
+- `QPREFIX_V2_RELEASE_FAIL`
+
+Then report `READY_FOR_WEB_REVIEW`.
