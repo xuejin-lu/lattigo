@@ -1,32 +1,33 @@
 # Current Task
 
-Task: QPREFIX-PERF-DIAG-003
+Task: DIAG-FRAMEWORK-001
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
-`specs/QPREFIX-PERF-DIAG-003-GENERATED-POWER-RESCALE-CAUSALITY.md`
+`specs/DIAG-FRAMEWORK-001-REUSABLE-TRACE.md`
 
-Historical q0=55 baseline:
-`40532b4dce5c7eeae2db5b0b6f21be64801ce923`
+Task class:
+`I — Diagnostic Infrastructure`
 
-Q-prefix-v2 production candidate:
-`f9c7f21e65915bd3eafcd5b12590b570c22a7d6f`
+Purpose:
+Add compile-time-gated reusable Fast diagnostic hooks for exactly these trace scopes:
 
-This is diagnosis only.
+- `stage`
+- `power`
+- `rescale`
 
-Use immutable detached comparison points for the matched q0=55 EvalMod-real generated-power phase.
+Normal builds must compile diagnostics away and must not add persistent hot-path timing/allocation overhead.
 
-Measure:
-- actual generated-power runtime DAG and operation counts;
-- per-power timing for {2,3,4,6,8,16};
-- matched baseline/candidate Rescale cost;
-- candidate Rescale preflight versus materialization;
-- non-overlapping generated-power delta accounting.
+The framework must preserve arithmetic and transactional semantics.
 
-Do not modify production code.
-Do not remove or bypass preflight.
-Do not alter transactional failure-before-mutation semantics.
-Do not alter parameters, schedules, generated powers, or `QPrefixWidth(Level)`.
-Do not introduce F/full-RNS fallback.
+Do not:
+- optimize or fuse Rescale;
+- remove preflight;
+- change Q-prefix arithmetic;
+- change `QPrefixWidth(Level)`;
+- change generated-power/P93 scheduling;
+- introduce F/full-RNS fallback.
 
-Return the required diagnostic classification and `READY_FOR_WEB_REVIEW`.
+Follow the Primary spec for exact event schema, build-tag behavior, tests, and completion criteria.
+
+Return the required framework classification and `READY_FOR_WEB_REVIEW`.
