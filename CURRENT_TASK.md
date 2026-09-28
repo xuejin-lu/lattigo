@@ -1,29 +1,33 @@
 # Current Task
 
-Task: QPREFIX-PERF-OPT-002
+Task: QPREFIX-PERF-DIAG-007
 Status: READY_FOR_CODEX
 
 Working branch: `fast-qprefix`
 Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
 
 Authoritative Primary specification:
-`specs/QPREFIX-PERF-OPT-002-FIXED-WIDTH-DIVISION-DEDUP.md`
+`specs/QPREFIX-PERF-DIAG-007-POST-OPT002-RESCALE-REPROFILE.md`
 
 Task class:
-`P — Performance Repair`
+`D — Performance Diagnosis`
 
 Purpose:
-Optimize the current Q-prefix Rescale fixed-width hot loop with exact division deduplication and prepared invariant reconstruction constants.
+Freshly profile the current rows4 Q-prefix Rescale after OPT-002.
 
-Hard boundaries:
-- no Q-prefix width/policy change;
-- no rounding/CRT/capacity semantic change;
-- no transactional weakening;
-- no reciprocal approximation;
-- no unsafe/assembly;
-- no P93/generated-power schedule change;
-- no F/full-RNS fallback.
+No Secondary production arithmetic changes.
 
-Run the required correctness, focused benchmark, E2E, and low-overhead power-trace gates.
+Measure:
+- diagnostics-off full rows4 Rescale;
+- fresh CPU profile;
+- refreshed fixed-width / residue / source-transform / restore-transform phase benchmarks;
+- remaining division helper costs.
 
-Return the required optimization classification and `READY_FOR_WEB_REVIEW`.
+Do not:
+- reuse DIAG-006 profile shares as current attribution;
+- add per-coefficient timers;
+- change Q-prefix policy/width;
+- change transactionality;
+- introduce reciprocal approximation, unsafe, assembly, or F/full-RNS fallback.
+
+Return the required reprofile classification/metrics and `READY_FOR_WEB_REVIEW`.
