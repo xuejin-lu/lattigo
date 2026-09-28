@@ -1,3 +1,5 @@
+> **Q-prefix branch note:** On the active `fast-qprefix` branch, `docs/FAST_QPREFIX_SPEC.md` is the authoritative architecture document. This file is retained as inherited Fast-CKKS background/history. Any branch-specific `fast-ckks` wording or old implementation-status statement below is historical and must not override `FAST_QPREFIX_SPEC.md`, `CURRENT_TASK.md`, or current source evidence.
+
 # Fast-CKKS specification
 
 This document is the single detailed source of truth for Fast-CKKS work on the `fast-ckks` branch. It records the current implementation, the permanent architectural boundaries, and the future experiments. Statements marked **Target design**, **Requires source audit**, or **Future experiment** are not claims that the current code already implements them.
