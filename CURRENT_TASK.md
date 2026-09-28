@@ -1,33 +1,30 @@
 # Current Task
 
-Task: DIAG-FRAMEWORK-001
+Task: DIAG-FRAMEWORK-001-R1
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
-`specs/DIAG-FRAMEWORK-001-REUSABLE-TRACE.md`
+`specs/DIAG-FRAMEWORK-001-R1-RESCALE-EVENT-CLOSURE.md`
 
 Task class:
-`I — Diagnostic Infrastructure`
+`I — Diagnostic Infrastructure Repair`
 
 Purpose:
-Add compile-time-gated reusable Fast diagnostic hooks for exactly these trace scopes:
+Repair Rescale trace event nesting so diagnostic closure does not double-count the same reconstruction interval.
 
-- `stage`
-- `power`
-- `rescale`
-
-Normal builds must compile diagnostics away and must not add persistent hot-path timing/allocation overhead.
-
-The framework must preserve arithmetic and transactional semantics.
+Required shape:
+- Rescale parent
+- preflight/materialization children
+- component-level prefix/coefficient-loop/restore children
+- reconstruction and residue events nested under coefficient-loop
 
 Do not:
-- optimize or fuse Rescale;
-- remove preflight;
-- change Q-prefix arithmetic;
-- change `QPrefixWidth(Level)`;
-- change generated-power/P93 scheduling;
+- change Rescale arithmetic;
+- remove/fuse preflight;
+- alter transactional semantics;
+- optimize production code;
+- change Q-prefix width/policy;
+- change generated-power schedule;
 - introduce F/full-RNS fallback.
 
-Follow the Primary spec for exact event schema, build-tag behavior, tests, and completion criteria.
-
-Return the required framework classification and `READY_FOR_WEB_REVIEW`.
+Return the required repair classification and `READY_FOR_WEB_REVIEW`.
