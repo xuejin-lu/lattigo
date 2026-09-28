@@ -3,6 +3,15 @@
 Task: QPREFIX-PERF-OPT-001
 Status: READY_FOR_CODEX
 
+Working branch: `fast-qprefix`
+Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
+
+Startup assertion:
+- after sync, verify HEAD is on `fast-qprefix`;
+- re-read `AGENTS.md`;
+- confirm it contains `FAST-QPREFIX-ACTIVE-001`;
+- if the running agent still believes `AGENTS.md` requires `fast-ckks`, treat the agent session as stale and stop with `STALE_AGENT_INSTRUCTIONS` rather than switching branches.
+
 Authoritative Primary specification:
 `specs/QPREFIX-PERF-OPT-001-TRANSACTIONAL-RESCALE-STAGING.md`
 
