@@ -185,24 +185,81 @@ func fastDiagValidateEvents(t testing.TB, scopes string, events []fastdiag.Event
 		}
 	}
 	if selected["rescale"] || all {
-		children := map[uint64]map[string]bool{}
+		children := map[uint64][]fastdiag.Event{}
 		for _, event := range events {
 			if event.Scope == fastdiag.Rescale && event.ParentSequence != 0 {
-				if children[event.ParentSequence] == nil {
-					children[event.ParentSequence] = map[string]bool{}
-				}
-				children[event.ParentSequence][event.Name] = true
+				children[event.ParentSequence] = append(children[event.ParentSequence], event)
 			}
 		}
 		parents := 0
 		for _, event := range events {
 			if event.Scope == fastdiag.Rescale && event.Name == "rescale" {
 				parents++
-				require.True(t, children[event.Sequence]["preflight"], "Rescale %d missing preflight child", event.Sequence)
-				require.True(t, children[event.Sequence]["materialization"], "Rescale %d missing materialization child", event.Sequence)
+				passes := children[event.Sequence]
+				require.Equal(t, 2, len(passes), "Rescale %d must have exactly preflight and materialization children", event.Sequence)
+				passByName := map[string]fastdiag.Event{}
+				for _, pass := range passes {
+					passByName[pass.Name] = pass
+				}
+				require.Len(t, passByName, 2, "Rescale %d has duplicate or unknown pass children", event.Sequence)
+				preflight, hasPreflight := passByName["preflight"]
+				materialization, hasMaterialization := passByName["materialization"]
+				require.True(t, hasPreflight, "Rescale %d missing preflight child", event.Sequence)
+				require.True(t, hasMaterialization, "Rescale %d missing materialization child", event.Sequence)
+				fastDiagValidateRescalePass(t, preflight, children, false)
+				fastDiagValidateRescalePass(t, materialization, children, true)
 			}
 		}
 		require.Greater(t, parents, 0)
+	}
+}
+
+func fastDiagValidateRescalePass(t testing.TB, pass fastdiag.Event, children map[uint64][]fastdiag.Event, materializing bool) {
+	t.Helper()
+	require.NotNil(t, pass.Count, "Rescale %s must record its component count", pass.Name)
+	expectedComponents := *pass.Count
+	passChildren := children[pass.Sequence]
+	prefixByComponent := map[string]int{}
+	restoreByComponent := map[string]int{}
+	loopsByComponent := map[string]fastdiag.Event{}
+	for _, child := range passChildren {
+		switch child.Name {
+		case "prefix_to_coefficient":
+			prefixByComponent[child.Component]++
+		case "coefficient_loop":
+			require.NotContains(t, loopsByComponent, child.Component, "duplicate coefficient loop for %s/%s", pass.Name, child.Component)
+			loopsByComponent[child.Component] = child
+		case "ntt_montgomery_restore":
+			require.True(t, materializing, "preflight must not contain an NTT restore event")
+			restoreByComponent[child.Component]++
+		default:
+			t.Fatalf("unexpected direct child %q under Rescale %s", child.Name, pass.Name)
+		}
+	}
+	require.Len(t, prefixByComponent, expectedComponents, "Rescale %s prefix conversion component count", pass.Name)
+	require.Len(t, loopsByComponent, expectedComponents, "Rescale %s coefficient-loop component count", pass.Name)
+	if materializing {
+		require.Len(t, restoreByComponent, expectedComponents, "Rescale %s NTT restore component count", pass.Name)
+	} else {
+		require.Empty(t, restoreByComponent)
+	}
+	for component, count := range prefixByComponent {
+		require.Equal(t, 1, count, "duplicate prefix conversion for %s/%s", pass.Name, component)
+		if materializing {
+			require.Equal(t, 1, restoreByComponent[component], "duplicate or missing NTT restore for %s/%s", pass.Name, component)
+		}
+		loop, ok := loopsByComponent[component]
+		require.True(t, ok, "Rescale %s component %s is missing its coefficient loop", pass.Name, component)
+		loopChildren := children[loop.Sequence]
+		wantNames := map[string]int{"reconstruct_center_round_capacity": 1}
+		if materializing {
+			wantNames["residue_materialization"] = 1
+		}
+		gotNames := map[string]int{}
+		for _, child := range loopChildren {
+			gotNames[child.Name]++
+		}
+		require.Equal(t, wantNames, gotNames, "Rescale %s component %s coefficient-loop children", pass.Name, component)
 	}
 }
 

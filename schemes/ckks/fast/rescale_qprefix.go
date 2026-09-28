@@ -145,8 +145,9 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 	}
 
 	var reconstructNS, residueMaterializationNS int64
+	var coefficientLoopSpan fastdiag.Span
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-		phaseSpan = fastdiag.Begin(fastdiag.Rescale, "reconstruct_center_round_capacity", scratch.diagParent, fields)
+		coefficientLoopSpan = fastdiag.Begin(fastdiag.Rescale, "coefficient_loop", scratch.diagParent, fields)
 	}
 	for coefficient := 0; coefficient < ringQ.N(); coefficient++ {
 		var segment fastdiag.Timer
@@ -166,7 +167,8 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 			if cmp192(magnitude, scratch.half[targetWidth-1]) > 0 {
 				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 					reconstructNS += segment.ElapsedNS()
-					phaseSpan.End(fastdiag.Fields{})
+					coefficientLoopSpan.End(fastdiag.Fields{})
+					fastdiag.Record(fastdiag.Rescale, "reconstruct_center_round_capacity", coefficientLoopSpan.Sequence(), fields, reconstructNS)
 				}
 				return &QPrefixCapacityError{
 					Level:         sourceLevel - step - 1,
@@ -192,10 +194,10 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 		}
 	}
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-		phaseSpan.End(fastdiag.Fields{})
-		fastdiag.Record(fastdiag.Rescale, "reconstruct_center_round_capacity", scratch.diagParent, fields, reconstructNS)
+		coefficientLoopSpan.End(fastdiag.Fields{})
+		fastdiag.Record(fastdiag.Rescale, "reconstruct_center_round_capacity", coefficientLoopSpan.Sequence(), fields, reconstructNS)
 		if dst != nil {
-			fastdiag.Record(fastdiag.Rescale, "residue_materialization", scratch.diagParent, fields, residueMaterializationNS)
+			fastdiag.Record(fastdiag.Rescale, "residue_materialization", coefficientLoopSpan.Sequence(), fields, residueMaterializationNS)
 		}
 	}
 
