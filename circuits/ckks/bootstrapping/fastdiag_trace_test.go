@@ -236,25 +236,24 @@ func fastDiagValidateRescalePass(t testing.TB, pass fastdiag.Event, children map
 			t.Fatalf("unexpected direct child %q under Rescale %s", child.Name, pass.Name)
 		}
 	}
-	require.Len(t, prefixByComponent, expectedComponents, "Rescale %s prefix conversion component count", pass.Name)
-	require.Len(t, loopsByComponent, expectedComponents, "Rescale %s coefficient-loop component count", pass.Name)
 	if materializing {
+		require.Empty(t, prefixByComponent, "commit must not repeat prefix conversion")
+		require.Empty(t, loopsByComponent, "commit must not repeat coefficient reconstruction")
 		require.Len(t, restoreByComponent, expectedComponents, "Rescale %s NTT restore component count", pass.Name)
+		for component, count := range restoreByComponent {
+			require.Equal(t, 1, count, "duplicate NTT restore for %s/%s", pass.Name, component)
+		}
 	} else {
+		require.Len(t, prefixByComponent, expectedComponents, "Rescale %s prefix conversion component count", pass.Name)
+		require.Len(t, loopsByComponent, expectedComponents, "Rescale %s coefficient-loop component count", pass.Name)
 		require.Empty(t, restoreByComponent)
 	}
 	for component, count := range prefixByComponent {
 		require.Equal(t, 1, count, "duplicate prefix conversion for %s/%s", pass.Name, component)
-		if materializing {
-			require.Equal(t, 1, restoreByComponent[component], "duplicate or missing NTT restore for %s/%s", pass.Name, component)
-		}
 		loop, ok := loopsByComponent[component]
 		require.True(t, ok, "Rescale %s component %s is missing its coefficient loop", pass.Name, component)
 		loopChildren := children[loop.Sequence]
-		wantNames := map[string]int{"reconstruct_center_round_capacity": 1}
-		if materializing {
-			wantNames["residue_materialization"] = 1
-		}
+		wantNames := map[string]int{"reconstruct_center_round_capacity": 1, "residue_materialization": 1}
 		gotNames := map[string]int{}
 		for _, child := range loopChildren {
 			gotNames[child.Name]++

@@ -56,10 +56,13 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 		eval.rescaleScratch = newFastRescaleScratch(ringQ)
 		scratch = &eval.rescaleScratch
 	}
+	if err := scratch.ensureStagedComponents(ringQ, len(op0.Value)); err != nil {
+		return err
+	}
 	if err := scratch.validateWidth(sourceRows); err != nil {
 		return err
 	}
-	if sourceRows > len(scratch.q) || sourceRows > len(scratch.coeff.Coeffs) || targetRows > len(scratch.result.Coeffs) {
+	if sourceRows > len(scratch.q) || sourceRows > len(scratch.coeff.Coeffs) || targetRows > len(scratch.staged[0].Coeffs) {
 		return fmt.Errorf("Fast Rescale scratch does not cover source/target widths %d/%d", sourceRows, targetRows)
 	}
 	if len(op0.Value) == 0 {
@@ -77,15 +80,16 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 		}
 	}
 
-	// Pass one computes only into evaluator-owned scratch and rejects any
-	// intermediate prefix overflow before opOut or an in-place op0 is touched.
+	// The transactional pass computes each exact result once into evaluator-
+	// owned per-component staging. No caller-visible object is touched until
+	// every component has passed all intermediate capacity checks.
 	var preflightSpan fastdiag.Span
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 		preflightSpan = fastdiag.Begin(fastdiag.Rescale, "preflight", wholeSpan.Sequence(), fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(len(op0.Value))))
 		scratch.diagParent = preflightSpan.Sequence()
 	}
 	for component := range op0.Value {
-		if err := eval.rescaleQPrefixComponent(op0.Value[component], nil, op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, op0 == opOut, scratch); err != nil {
+		if err := eval.rescaleQPrefixComponent(op0.Value[component], &scratch.staged[component], op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, op0 == opOut, scratch); err != nil {
 			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 				preflightSpan.End(fastdiag.Fields{})
 			}
@@ -98,15 +102,25 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 	var materializationSpan fastdiag.Span
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 		materializationSpan = fastdiag.Begin(fastdiag.Rescale, "materialization", wholeSpan.Sequence(), fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(len(op0.Value))))
-		scratch.diagParent = materializationSpan.Sequence()
 	}
 
 	if opOut != op0 {
 		Resize(opOut, op0.Degree(), targetLevel, eval.Parameters.N())
 	}
 	for component := range op0.Value {
-		if err := eval.rescaleQPrefixComponent(op0.Value[component], &opOut.Value[component], op0.Level(), nbRescales, sourceRows, targetRows, component, op0.IsMontgomery, op0 == opOut, scratch); err != nil {
-			return err
+		var phaseSpan fastdiag.Span
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			fields := fastDiagRescaleFields(op0.Level(), targetLevel, sourceRows, targetRows, fmt.Sprintf("c%d", component), op0 == opOut)
+			phaseSpan = fastdiag.Begin(fastdiag.Rescale, "ntt_montgomery_restore", materializationSpan.Sequence(), fields)
+		}
+		for row := 0; row < targetRows; row++ {
+			ringQ.SubRings[row].NTT(scratch.staged[component].Coeffs[row], opOut.Value[component].Coeffs[row])
+			if op0.IsMontgomery {
+				ringQ.SubRings[row].MForm(opOut.Value[component].Coeffs[row], opOut.Value[component].Coeffs[row])
+			}
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			phaseSpan.End(fastdiag.Fields{})
 		}
 	}
 	*opOut.MetaData = *op0.MetaData
@@ -125,8 +139,14 @@ func (eval *Evaluator) rescaleNQPrefix(op0 *rlwe.Ciphertext, nbRescales, sourceR
 	return nil
 }
 
-func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, sourceLevel, nbRescales, sourceRows, targetRows, component int, montgomery, inPlace bool, scratch *fastRescaleScratch) error {
+func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, staged *ring.Poly, sourceLevel, nbRescales, sourceRows, targetRows, component int, montgomery, inPlace bool, scratch *fastRescaleScratch) error {
 	ringQ := eval.Parameters.RingQ()
+	if staged == nil {
+		return errors.New("Fast Rescale staging polynomial cannot be nil")
+	}
+	if err := validatePrefixBacking(ringQ, targetRows, *staged); err != nil {
+		return fmt.Errorf("Fast Rescale component %d staging: %w", component, err)
+	}
 	var fields fastdiag.Fields
 	var phaseSpan fastdiag.Span
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
@@ -181,39 +201,20 @@ func (eval *Evaluator) rescaleQPrefixComponent(src ring.Poly, dst *ring.Poly, so
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 			reconstructNS += segment.ElapsedNS()
 		}
-		if dst != nil {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-				segment = fastdiag.StartTimer()
-			}
-			for row := 0; row < targetRows; row++ {
-				scratch.result.Coeffs[row][coefficient] = signedResidue192(magnitude, negative, scratch.q[row])
-			}
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-				residueMaterializationNS += segment.ElapsedNS()
-			}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			segment = fastdiag.StartTimer()
+		}
+		for row := 0; row < targetRows; row++ {
+			staged.Coeffs[row][coefficient] = signedResidue192(magnitude, negative, scratch.q[row])
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			residueMaterializationNS += segment.ElapsedNS()
 		}
 	}
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
 		coefficientLoopSpan.End(fastdiag.Fields{})
 		fastdiag.Record(fastdiag.Rescale, "reconstruct_center_round_capacity", coefficientLoopSpan.Sequence(), fields, reconstructNS)
-		if dst != nil {
-			fastdiag.Record(fastdiag.Rescale, "residue_materialization", coefficientLoopSpan.Sequence(), fields, residueMaterializationNS)
-		}
-	}
-
-	if dst != nil {
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-			phaseSpan = fastdiag.Begin(fastdiag.Rescale, "ntt_montgomery_restore", scratch.diagParent, fields)
-		}
-		for row := 0; row < targetRows; row++ {
-			ringQ.SubRings[row].NTT(scratch.result.Coeffs[row], dst.Coeffs[row])
-			if montgomery {
-				ringQ.SubRings[row].MForm(dst.Coeffs[row], dst.Coeffs[row])
-			}
-		}
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
-			phaseSpan.End(fastdiag.Fields{})
-		}
+		fastdiag.Record(fastdiag.Rescale, "residue_materialization", coefficientLoopSpan.Sequence(), fields, residueMaterializationNS)
 	}
 	return nil
 }

@@ -26,6 +26,7 @@ const (
 
 type fastRescaleScratch struct {
 	coeff, result ring.Poly
+	staged        []ring.Poly
 	diagParent    uint64
 	q             [MaxQPrefixWidth]uint64
 	inverse       [MaxQPrefixWidth]uint64
@@ -48,6 +49,13 @@ func newFastRescaleScratch(ringQ *ring.Ring) fastRescaleScratch {
 	prefixWidth := qPrefixWidthOrPanic(ringQ.Level())
 	scratch.coeff = ring.NewPoly(ringQ.N(), prefixWidth-1)
 	scratch.result = ring.NewPoly(ringQ.N(), prefixWidth-1)
+	// A degree-one ciphertext is the common Rescale case. Allocate its staged
+	// component buffers with the evaluator so steady-state Rescale does not
+	// allocate coefficient backing on every call. Higher degrees grow lazily.
+	scratch.staged = make([]ring.Poly, 2)
+	for i := range scratch.staged {
+		scratch.staged[i] = ring.NewPoly(ringQ.N(), prefixWidth-1)
+	}
 	if len(ringQ.SubRings) < prefixWidth {
 		scratch.initErr = fmt.Errorf("Fast Rescale requires %d configured q subrings", prefixWidth)
 		return scratch
@@ -106,6 +114,25 @@ func (scratch *fastRescaleScratch) validateWidth(rows int) error {
 		return fmt.Errorf("invalid Fast Rescale Q-prefix width %d", rows)
 	}
 	return scratch.widthErr[rows-1]
+}
+
+func (scratch *fastRescaleScratch) ensureStagedComponents(ringQ *ring.Ring, components int) error {
+	if scratch == nil || ringQ == nil {
+		return errors.New("Fast Rescale staging requires non-nil scratch and ring")
+	}
+	if components < 1 {
+		return errors.New("Fast Rescale staging requires at least one component")
+	}
+	width := len(scratch.coeff.Coeffs)
+	for len(scratch.staged) < components {
+		scratch.staged = append(scratch.staged, ring.NewPoly(ringQ.N(), width-1))
+	}
+	for component := range scratch.staged {
+		if len(scratch.staged[component].Coeffs) < width || scratch.staged[component].N() != ringQ.N() {
+			scratch.staged[component] = ring.NewPoly(ringQ.N(), width-1)
+		}
+	}
+	return nil
 }
 
 // Rescale applies Standard CKKS rescale semantics using the legacy producer

@@ -83,7 +83,7 @@ func TestFastRescaleToMatchesSequentialBigIntOracleAcrossContractions(t *testing
 	}
 }
 
-func rescaleOracleBoundaryValues(t *testing.T, params ckks.Parameters, level, sourceRows int) []*big.Int {
+func rescaleOracleBoundaryValues(t testing.TB, params ckks.Parameters, level, sourceRows int) []*big.Int {
 	t.Helper()
 	sourceProduct := big.NewInt(1)
 	for row := 0; row < sourceRows; row++ {
