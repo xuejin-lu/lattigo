@@ -5,30 +5,28 @@ Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
 `specs/QPREFIX-IMPL-009-PERFORMANCE-RELEASE-GATE.md`
+at Primary commit:
+`3ace6637ac793db1e246a1abfd9ccd2612abab1b`
 
 Production candidate:
 `f9c7f21e65915bd3eafcd5b12590b570c22a7d6f`
 
-Pre-F comparison point:
-`40532b4dce5c7eeae2db5b0b6f21be64801ce923`
+008 constitutional re-review:
+production authority is NOT "internal always q0123".
 
-This is validation/release only.
+The exact production invariant is:
+`rows = QPrefixWidth(Level) = min(Level+1,4)`.
 
-Do not change production source.
+Therefore:
+- L0 -> q0
+- L1 -> q01
+- L2 -> q012
+- L>=3 -> q0123
+- after every logical Level change, authority must be recomputed/contracted accordingly.
 
-Execute:
-- detached baseline worktree;
-- matched same-code benchmarks;
-- identical temporary q0=55 P93 benchmark on both commits;
-- current q0=56 P93 Fast + Standard comparison;
-- full correctness/capacity/structural/fallback/public-output audit;
-- final performance table and release verdict.
+Low-level explicit-row helpers may support narrower widths for legacy/transition compatibility, but production Q-prefix v2 must use the exact Level-defined width.
 
-Keep q0=55 matched-baseline results separate from q0=56 production results.
+The release gate must record the full production stage map and assert equality, not merely `rows <= 4`.
 
-Return exactly one release status:
-- `QPREFIX_V2_RELEASE_PASS`
-- `QPREFIX_V2_PERFORMANCE_REVIEW`
-- `QPREFIX_V2_RELEASE_FAIL`
-
-Then report `READY_FOR_WEB_REVIEW`.
+Continue QPREFIX-IMPL-009 validation only.
+Do not change production source unless a hard release bug is found and reported first.
