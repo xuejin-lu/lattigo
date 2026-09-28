@@ -1,27 +1,29 @@
 # Current Task
 
-Task: QPREFIX-PERF-DIAG-006
+Task: QPREFIX-PERF-OPT-002
 Status: READY_FOR_CODEX
 
 Working branch: `fast-qprefix`
 Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
 
 Authoritative Primary specification:
-`specs/QPREFIX-PERF-DIAG-006-RESCALE-KERNEL-ATTRIBUTION.md`
+`specs/QPREFIX-PERF-OPT-002-FIXED-WIDTH-DIVISION-DEDUP.md`
 
 Task class:
-`D — Performance Diagnosis`
+`P — Performance Repair`
 
 Purpose:
-Attribute current rows4 Q-prefix Rescale cost with diagnostics-off focused benchmarks and CPU profiling.
+Optimize the current Q-prefix Rescale fixed-width hot loop with exact division deduplication and prepared invariant reconstruction constants.
 
-Do not:
-- modify production arithmetic;
-- enable deep per-coefficient Rescale tracing for authoritative attribution;
-- change Q-prefix policy/width;
-- change P93/generated-power schedules;
-- introduce F/full-RNS fallback.
+Hard boundaries:
+- no Q-prefix width/policy change;
+- no rounding/CRT/capacity semantic change;
+- no transactional weakening;
+- no reciprocal approximation;
+- no unsafe/assembly;
+- no P93/generated-power schedule change;
+- no F/full-RNS fallback.
 
-Test/benchmark-only reusable diagnostics code is allowed if it does not affect production behavior.
+Run the required correctness, focused benchmark, E2E, and low-overhead power-trace gates.
 
-Return the required attribution result and `READY_FOR_WEB_REVIEW`.
+Return the required optimization classification and `READY_FOR_WEB_REVIEW`.
