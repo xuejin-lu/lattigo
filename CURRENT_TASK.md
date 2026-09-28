@@ -1,28 +1,27 @@
 # Current Task
 
-Task: QPREFIX-PERF-DIAG-005
+Task: QPREFIX-PERF-DIAG-006
 Status: READY_FOR_CODEX
 
 Working branch: `fast-qprefix`
 Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
 
 Authoritative Primary specification:
-`specs/QPREFIX-PERF-DIAG-005-LOW-OVERHEAD-POWER-ATTRIBUTION.md`
+`specs/QPREFIX-PERF-DIAG-006-RESCALE-KERNEL-ATTRIBUTION.md`
 
 Task class:
 `D — Performance Diagnosis`
 
 Purpose:
-Validate the post-opt generated-power bottleneck with low instrumentation perturbation.
+Attribute current rows4 Q-prefix Rescale cost with diagnostics-off focused benchmarks and CPU profiling.
 
-Use only:
-- `--trace power`
-- `--trace stage,power`
+Do not:
+- modify production arithmetic;
+- enable deep per-coefficient Rescale tracing for authoritative attribution;
+- change Q-prefix policy/width;
+- change P93/generated-power schedules;
+- introduce F/full-RNS fallback.
 
-Do NOT enable `rescale` scope for the authoritative category ranking.
+Test/benchmark-only reusable diagnostics code is allowed if it does not affect production behavior.
 
-No Secondary production changes.
-No ad-hoc overlays.
-Do not optimize any kernel.
-
-Return the required diagnostic classification/metrics and `READY_FOR_WEB_REVIEW`.
+Return the required attribution result and `READY_FOR_WEB_REVIEW`.
