@@ -1,5 +1,9 @@
 # Fast-CKKS Q-prefix repository guidance
 
+> Instruction revision: `FAST-QPREFIX-ACTIVE-001`
+>
+> If a running agent claims this file requires `fast-ckks`, that agent is using stale or different instructions. On this revision, the required working branch is `fast-qprefix`.
+
 ## Active development line
 
 The authoritative active development branch for the current Q-prefix work is:
