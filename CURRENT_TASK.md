@@ -1,30 +1,28 @@
 # Current Task
 
-Task: DIAG-FRAMEWORK-001-R1
+Task: QPREFIX-PERF-OPT-001
 Status: READY_FOR_CODEX
 
 Authoritative Primary specification:
-`specs/DIAG-FRAMEWORK-001-R1-RESCALE-EVENT-CLOSURE.md`
+`specs/QPREFIX-PERF-OPT-001-TRANSACTIONAL-RESCALE-STAGING.md`
 
 Task class:
-`I — Diagnostic Infrastructure Repair`
+`P — Performance Repair`
 
 Purpose:
-Repair Rescale trace event nesting so diagnostic closure does not double-count the same reconstruction interval.
+Optimize shared Q-prefix Rescale by replacing the current two-exact-computation transactional design with evaluator-owned staging:
 
-Required shape:
-- Rescale parent
-- preflight/materialization children
-- component-level prefix/coefficient-loop/restore children
-- reconstruction and residue events nested under coefficient-loop
+1. compute exact target residues once for all components;
+2. validate all capacity constraints before caller-visible mutation;
+3. only then commit staged residues through NTT/Montgomery restore.
 
 Do not:
-- change Rescale arithmetic;
-- remove/fuse preflight;
-- alter transactional semantics;
-- optimize production code;
+- weaken failure-before-mutation;
+- change CRT/rounding semantics;
 - change Q-prefix width/policy;
-- change generated-power schedule;
+- change P93 or polynomial schedule;
 - introduce F/full-RNS fallback.
 
-Return the required repair classification and `READY_FOR_WEB_REVIEW`.
+Use the reusable fastdiag hooks for post-change attribution and normal diagnostics-OFF benchmarks for authoritative speed.
+
+Return the required optimization classification and `READY_FOR_WEB_REVIEW`.
