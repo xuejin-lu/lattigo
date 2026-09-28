@@ -251,9 +251,9 @@ func reconstructQPrefix(rows int, residues [MaxQPrefixWidth]uint64, scratch *fas
 		lo, hi := crtQ01(residues[0], residues[1], scratch.q[0], scratch.q[1], scratch.inverse[1])
 		return uint192{lo: lo, mid: hi}
 	case 3:
-		return crtQ012(residues[0], residues[1], residues[2], scratch.q[0], scratch.q[1], scratch.q[2], scratch.inverse[1], scratch.inverse[2])
+		return crtQ012Prepared(residues[0], residues[1], residues[2], scratch.q[0], scratch.q[1], scratch.q[2], scratch.inverse[1], scratch.inverse[2], scratch.modulus[1])
 	case 4:
-		return crtQ0123(residues[0], residues[1], residues[2], residues[3], scratch.q[0], scratch.q[1], scratch.q[2], scratch.q[3], scratch.inverse[1], scratch.inverse[2], scratch.inverse[3])
+		return crtQ0123Prepared(residues[0], residues[1], residues[2], residues[3], scratch.q[0], scratch.q[1], scratch.q[2], scratch.q[3], scratch.inverse[1], scratch.inverse[2], scratch.inverse[3], scratch.modulus[1], scratch.modulus[2])
 	default:
 		return uint192{}
 	}

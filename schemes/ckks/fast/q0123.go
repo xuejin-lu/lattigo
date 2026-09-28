@@ -67,3 +67,37 @@ func crtQ0123(r0, r1, r2, r3, q0, q1, q2, q3, q0InvQ1, q01InvQ2, q012InvQ3 uint6
 	x, _ := add192(x012, term)
 	return x
 }
+
+// crtQ012Prepared is the Rescale coefficient-loop form of crtQ012. The
+// caller supplies the already-validated q0*q1 prefix product from its scratch.
+func crtQ012Prepared(r0, r1, r2, q0, q1, q2, q0InvQ1, q01InvQ2 uint64, q01 uint192) uint192 {
+	x01Lo, x01Hi := crtQ01(r0, r1, q0, q1, q0InvQ1)
+	x01ModQ2 := mod128By64(x01Lo, x01Hi, q2)
+	var delta uint64
+	if r2 >= x01ModQ2 {
+		delta = r2 - x01ModQ2
+	} else {
+		delta = q2 - (x01ModQ2 - r2)
+	}
+	prodHi, prodLo := bits.Mul64(delta, q01InvQ2)
+	_, t := bits.Div64(prodHi, prodLo, q2)
+	return add128To192(x01Lo, x01Hi, mul128By64(q01.lo, q01.mid, t))
+}
+
+// crtQ0123Prepared is the Rescale coefficient-loop form of crtQ0123. Both
+// prefix products were validated and prepared before the transactional pass.
+func crtQ0123Prepared(r0, r1, r2, r3, q0, q1, q2, q3, q0InvQ1, q01InvQ2, q012InvQ3 uint64, q01, q012 uint192) uint192 {
+	x012 := crtQ012Prepared(r0, r1, r2, q0, q1, q2, q0InvQ1, q01InvQ2, q01)
+	x012ModQ3 := mod192By64(x012, q3)
+	var delta uint64
+	if r3 >= x012ModQ3 {
+		delta = r3 - x012ModQ3
+	} else {
+		delta = q3 - (x012ModQ3 - r3)
+	}
+	prodHi, prodLo := bits.Mul64(delta, q012InvQ3)
+	_, t := bits.Div64(prodHi, prodLo, q3)
+	term, _ := mul192By64(q012, t)
+	x, _ := add192(x012, term)
+	return x
+}

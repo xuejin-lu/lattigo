@@ -127,13 +127,13 @@ func q012Words(q0, q1, q2 uint64) (qLo, qMid, qHi, halfLo, halfMid, halfHi uint6
 }
 
 func mod128By64(lo, hi, modulus uint64) uint64 {
-	_, remainder := bits.Div64(0, hi%modulus, modulus)
+	remainder := hi % modulus
 	_, remainder = bits.Div64(remainder, lo, modulus)
 	return remainder
 }
 
 func mod192By64(value uint192, modulus uint64) uint64 {
-	_, remainder := bits.Div64(0, value.hi%modulus, modulus)
+	remainder := value.hi % modulus
 	_, remainder = bits.Div64(remainder, value.mid, modulus)
 	_, remainder = bits.Div64(remainder, value.lo, modulus)
 	return remainder
