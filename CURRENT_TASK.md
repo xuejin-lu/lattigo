@@ -1,29 +1,33 @@
 # Current Task
 
-Task: FAST-STANDARD-NUMERICAL-001
+Task: FAST-STANDARD-NUMERICAL-DIAG-002
 Status: READY_FOR_CODEX
 
 Working branch: `fast-qprefix`
 Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
 
 Authoritative Primary specification:
-`specs/FAST-STANDARD-NUMERICAL-001-P93-REFERENCE.md`
+`specs/FAST-STANDARD-NUMERICAL-DIAG-002-CURRENT-QPREFIX-LOCKSTEP.md`
 
 Task class:
-`C — Numerical Correctness Validation`
+`D — Numerical Correctness Diagnosis`
 
 Purpose:
-Measure the actual P93 q0=55 numerical gap between current Fast Bootstrap and Standard Bootstrap on the canonical 4096-slot workload.
+On the current clean Q-prefix production source, identify where Fast first materially diverges numerically from genuine Standard for the canonical P93 q0=55 / 4096-slot workload.
 
-Use:
-- exact existing P93 fastdiag message fingerprint;
-- same encoded message/ciphertext construction;
-- current Fast evaluator;
-- Standard evaluator with >=3 independent key/evaluation-key trials;
-- decoded numerical metrics over all slots.
+Do:
+- stage-by-stage semantic lockstep;
+- genuine Standard decryption;
+- current Fast semantic decode;
+- exact scale/level/rows audit;
+- internal EvalMod bisect only if EvalMod is first material;
+- S2C amplification check.
 
-No performance optimization.
-No production arithmetic changes.
-Do not reduce this to a simple 1e-2 pass/fail; report RMSE, quantiles, max/worst slot, precision bits, and Standard trial variability.
+Do not:
+- modify production arithmetic;
+- change plan scale;
+- change q0/Q/P parameters;
+- tune thresholds after seeing data;
+- optimize performance.
 
-Return the required numerical-reference classification/metrics and `READY_FOR_WEB_REVIEW`.
+Return the required numerical-bisect classification/checkpoints and `READY_FOR_WEB_REVIEW`.
