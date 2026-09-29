@@ -1,33 +1,23 @@
 # Current Task
 
-Task: FAST-STANDARD-NUMERICAL-DIAG-002
-Status: READY_FOR_CODEX
+Task: QPREFIX-PERF-MEASURE-LOGN16-001
+Status: MEASUREMENT_ONLY
 
-Working branch: `fast-qprefix`
-Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
+Working branch remains: `fast-qprefix`
+Required marker: `FAST-QPREFIX-ACTIVE-001`
 
-Authoritative Primary specification:
-`specs/FAST-STANDARD-NUMERICAL-DIAG-002-CURRENT-QPREFIX-LOCKSTEP.md`
+The prior numerical diagnosis is temporarily suspended.
 
-Task class:
-`D — Numerical Correctness Diagnosis`
+Authoritative Primary spec:
+`specs/QPREFIX-PERF-MEASURE-LOGN16-001-STANDARD-VS-FAST.md`
 
 Purpose:
-On the current clean Q-prefix production source, identify where Fast first materially diverges numerically from genuine Standard for the canonical P93 q0=55 / 4096-slot workload.
-
-Do:
-- stage-by-stage semantic lockstep;
-- genuine Standard decryption;
-- current Fast semantic decode;
-- exact scale/level/rows audit;
-- internal EvalMod bisect only if EvalMod is first material;
-- S2C amplification check.
+Use temporary detached worktrees to measure genuine Standard `5dbffbde...` against current Q-prefix `82601ea...` at LogN16.
 
 Do not:
-- modify production arithmetic;
-- change plan scale;
-- change q0/Q/P parameters;
-- tune thresholds after seeing data;
-- optimize performance.
+- modify Secondary production code;
+- checkout Standard main in this authoritative worktree;
+- commit Secondary;
+- resume numerical diagnosis during this task.
 
-Return the required numerical-bisect classification/checkpoints and `READY_FOR_WEB_REVIEW`.
+Use the Primary LogN16 config, warmup 1, repetitions 7, staged timing.
