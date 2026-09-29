@@ -1,33 +1,28 @@
 # Current Task
 
-Task: QPREFIX-PERF-DIAG-007
+Task: QPREFIX-PERF-OPT-003
 Status: READY_FOR_CODEX
 
 Working branch: `fast-qprefix`
 Required AGENTS revision: `FAST-QPREFIX-ACTIVE-001`
 
 Authoritative Primary specification:
-`specs/QPREFIX-PERF-DIAG-007-POST-OPT002-RESCALE-REPROFILE.md`
+`specs/QPREFIX-PERF-OPT-003-SOURCE-INTT-BATCHING.md`
 
 Task class:
-`D — Performance Diagnosis`
+`P — Performance Repair`
 
 Purpose:
-Freshly profile the current rows4 Q-prefix Rescale after OPT-002.
+Improve source-domain INTT locality by transforming active rows in row-major order across ciphertext components, using existing evaluator-owned staging.
 
-No Secondary production arithmetic changes.
+Hard boundaries:
+- no Q-prefix width/policy changes;
+- no arithmetic/rounding/capacity changes;
+- no transactional weakening;
+- no goroutines, unsafe, assembly, or ring-kernel rewrite;
+- no P93/generated-power schedule changes;
+- no F/full-RNS fallback.
 
-Measure:
-- diagnostics-off full rows4 Rescale;
-- fresh CPU profile;
-- refreshed fixed-width / residue / source-transform / restore-transform phase benchmarks;
-- remaining division helper costs.
+Run feasibility first. If rows4 source conversion improves <3%, do not retain production churn; report no-win.
 
-Do not:
-- reuse DIAG-006 profile shares as current attribution;
-- add per-coefficient timers;
-- change Q-prefix policy/width;
-- change transactionality;
-- introduce reciprocal approximation, unsafe, assembly, or F/full-RNS fallback.
-
-Return the required reprofile classification/metrics and `READY_FOR_WEB_REVIEW`.
+Return the required optimization classification and `READY_FOR_WEB_REVIEW`.
