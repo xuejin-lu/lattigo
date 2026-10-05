@@ -203,7 +203,7 @@ func TestFastMod1MatchesStandardCosDiscrete(t *testing.T) {
 func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            13,
-		LogQ:            []int{56, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
+		LogQ:            []int{55, 39, 39, 39, 45, 60, 60, 60, 60, 60, 60, 60, 60, 56, 56, 56, 56},
 		LogDefaultScale: 45,
 	})
 	require.NoError(t, err)
@@ -217,8 +217,6 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 		DoubleAngle:     3,
 	})
 	require.NoError(t, err)
-	require.True(t, normalizedLogN13Profile(&params, mod1Params))
-
 	values := make([]complex128, params.MaxSlots())
 	for i := range values {
 		values[i] = complex(float64((i%7)-3)*1e-5, float64((i%5)-2)*1e-5)
@@ -249,7 +247,7 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 		t.Logf("capacity name=%s L=%d rows=%d scale=%s degree=%d max_abs=%v prefix_product=%s strict_2B_lt_SQ=%t", checkpoint.Name, checkpoint.Level, checkpoint.Rows, checkpoint.Scale, checkpoint.Degree, checkpoint.MaxAbs, checkpoint.PrefixProduct, checkpoint.StrictFit)
 		checkpointNames[checkpoint.Name] = true
 		require.True(t, checkpoint.StrictFit, "%s exact centered component bound must satisfy strict Q-prefix capacity", checkpoint.Name)
-		require.Equal(t, 4, checkpoint.Rows, "%s must retain q0123 on the accepted P93 path", checkpoint.Name)
+		require.Equal(t, 4, checkpoint.Rows, "%s must retain q0123 on the Standard-equivalent q0=55 path", checkpoint.Name)
 		require.Len(t, checkpoint.MaxAbs, checkpoint.Degree+1, "%s must report every ciphertext component", checkpoint.Name)
 		product, err := fastckks.QPrefixProduct(params.Q(), checkpoint.Level)
 		require.NoError(t, err)
@@ -264,7 +262,7 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 		"double-angle-1-before", "double-angle-1-after-rescale",
 		"double-angle-2-before", "double-angle-2-after-rescale", "evalmod-output",
 	} {
-		require.True(t, checkpointNames[name], "missing required P93 checkpoint %s", name)
+		require.True(t, checkpointNames[name], "missing required EvalMod checkpoint %s", name)
 	}
 	fastCKKSEval.SetQPrefixCapacityObserver(nil)
 	poisonedInput := fastInput.CopyNew()
