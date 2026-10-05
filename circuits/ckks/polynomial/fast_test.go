@@ -770,50 +770,79 @@ func TestPostProductQ012ScheduleSelection(t *testing.T) {
 	require.False(t, q012.postProductLogN13Schedule(1), "the validated schedule must not be selected before its level floor")
 	require.True(t, q012.postProductLogN13Schedule(2))
 
-	legacyParams, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+	q0123Q55Params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{55, 39, 40, 39},
+		LogDefaultScale: 30,
+	})
+	require.NoError(t, err)
+	q0123Q55 := fastPowerBasis{basis: bignum.Chebyshev, params: q0123Q55Params}
+	require.True(t, q0123Q55.postProductLogN13Schedule(2), "canonical q0=55 EvalMod powers require Q0123 post-product ordering")
+
+	q012Q55Params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            13,
 		LogQ:            []int{55, 39, 40},
 		LogDefaultScale: 30,
 	})
 	require.NoError(t, err)
-	legacy := fastPowerBasis{basis: bignum.Chebyshev, params: legacyParams}
-	require.False(t, legacy.postProductLogN13Schedule(2), "non-P93 profiles must retain the fallback schedule")
+	q012Q55 := fastPowerBasis{basis: bignum.Chebyshev, params: q012Q55Params}
+	require.False(t, q012Q55.postProductLogN13Schedule(2), "q0=55 requires the fourth Q-prefix row for this schedule")
 
 	monomial := fastPowerBasis{basis: bignum.Monomial, params: q012Params}
 	require.False(t, monomial.postProductLogN13Schedule(2), "the post-product recurrence is Chebyshev-specific")
 }
 
 func TestPostProductQ012PowerContract(t *testing.T) {
-	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
-		LogN:            13,
-		LogQ:            []int{56, 39, 40, 40},
-		LogDefaultScale: 30,
-	})
-	require.NoError(t, err)
-	eval := NewFastEvaluator(params, nil)
-	input := fastPolynomialTestCiphertext(params, 17)
-	rows, err := fastckks.QPrefixWidth(input.Level())
-	require.NoError(t, err)
-	eval.workspace.reset(params, input, rows)
-	pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
-	require.NoError(t, pb.genPower(2, false))
-	got := eval.workspace.powers[2]
+	for _, profile := range []struct {
+		name string
+		logQ []int
+	}{
+		{name: "q0-56-legacy-Q012", logQ: []int{56, 39, 40, 40}},
+		{name: "q0-55-canonical-Q0123", logQ: []int{55, 39, 40, 39, 40}},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+				LogN:            13,
+				LogQ:            profile.logQ,
+				LogDefaultScale: 30,
+			})
+			require.NoError(t, err)
+			eval := NewFastEvaluator(params, nil)
+			input := fastPolynomialTestCiphertext(params, 17)
+			rows, err := fastckks.QPrefixWidth(input.Level())
+			require.NoError(t, err)
+			eval.workspace.reset(params, input, rows)
+			pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+			require.NoError(t, pb.genPower(2, false))
+			got := eval.workspace.powers[2]
 
-	reference := fastPolynomialReferenceCiphertext(params, input)
-	require.NoError(t, eval.Evaluator.MulRelinElementQPrefixRows(input, input.El(), rows, reference))
-	require.NoError(t, eval.Evaluator.AddQPrefixRows(reference, reference, reference, rows))
-	require.NoError(t, eval.Evaluator.AddScalarQPrefixRows(reference, -1, rows, reference))
-	require.NoError(t, eval.Evaluator.RescaleQPrefixRows(reference, rows, reference))
+			reference := fastPolynomialReferenceCiphertext(params, input)
+			require.NoError(t, eval.Evaluator.MulRelinElementQPrefixRows(input, input.El(), rows, reference))
+			require.NoError(t, eval.Evaluator.AddQPrefixRows(reference, reference, reference, rows))
+			require.NoError(t, eval.Evaluator.AddScalarQPrefixRows(reference, -1, rows, reference))
+			require.NoError(t, eval.Evaluator.RescaleQPrefixRows(reference, rows, reference))
 
-	require.Equal(t, input.Level()-1, got.Level(), "the repaired recurrence consumes exactly one level")
-	require.Equal(t, 1, got.Degree())
-	require.True(t, got.Scale.Equal(reference.Scale), "post-product scale=%v reference=%v", got.Scale.Float64(), reference.Scale.Float64())
-	rows, err = fastckks.QPrefixWidth(got.Level())
-	require.NoError(t, err)
-	for d := 0; d <= 1; d++ {
-		for limb := 0; limb < rows; limb++ {
-			require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb], "component=%d limb=%d", d, limb)
-		}
+			require.Equal(t, input.Level()-1, got.Level(), "the repaired recurrence consumes exactly one level")
+			require.Equal(t, 1, got.Degree())
+			require.True(t, got.Scale.Equal(reference.Scale), "post-product scale=%v reference=%v", got.Scale.Float64(), reference.Scale.Float64())
+			rows, err = fastckks.QPrefixWidth(got.Level())
+			require.NoError(t, err)
+			var snapshot fastckks.QPrefixCapacitySnapshot
+			eval.Evaluator.SetQPrefixCapacityObserver(func(current fastckks.QPrefixCapacitySnapshot) error {
+				snapshot = current
+				return nil
+			})
+			require.NoError(t, eval.Evaluator.ObserveQPrefixCapacity("test-generated-power-2", got, rows))
+			require.True(t, snapshot.StrictFit)
+			if profile.name == "q0-55-canonical-Q0123" {
+				require.Equal(t, 4, snapshot.Rows, "canonical generated power must retain Q0123 authority")
+			}
+			for d := 0; d <= 1; d++ {
+				for limb := 0; limb < rows; limb++ {
+					require.Equal(t, reference.Value[d].Coeffs[limb], got.Value[d].Coeffs[limb], "component=%d limb=%d", d, limb)
+				}
+			}
+		})
 	}
 }
 

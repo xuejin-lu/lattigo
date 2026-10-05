@@ -496,20 +496,21 @@ func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, comm
 	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
 }
 
-// postProductLogN13Schedule selects the proven LogN13 Chebyshev power
-// schedule. In this bounded profile the generated power must keep the full
-// product scale through the Chebyshev recurrence and consume exactly one
-// level only after the recurrence is complete. Other profiles retain the
-// established balanced/low-scale schedule.
+// postProductLogN13Schedule selects Standard-equivalent generated-power
+// ordering for the supported LogN13 Chebyshev profiles. The canonical q0=55
+// profile requires Q0123 authority; the previously validated q0=56 profile
+// remains supported with its existing Q-prefix.
 func (pb *fastPowerBasis) postProductLogN13Schedule(commonLevel int) bool {
 	q := pb.params.Q()
 	isP93Schedule := len(q) >= 3 && bits.Len64(q[0]) == 56 && bits.Len64(q[1]) <= 40 && bits.Len64(q[2]) <= 40
+	isQ0123Q55Schedule := len(q) >= 4 && bits.Len64(q[0]) == 55 &&
+		bits.Len64(q[1]) <= 40 && bits.Len64(q[2]) <= 40 && bits.Len64(q[3]) <= 40
 	return pb.basis == bignum.Chebyshev &&
 		pb.params.LogN() == 13 &&
 		pb.params.RingType() == ring.Standard &&
 		pb.params.LevelsConsumedPerRescaling() == 1 &&
 		commonLevel >= 2 &&
-		isP93Schedule
+		(isP93Schedule || isQ0123Q55Schedule)
 }
 
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
@@ -563,12 +564,16 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		return fmt.Errorf("Fast power %d Q-prefix: %w", n, err)
 	}
 	inputRows = rows
-	schedule, err := pb.balancedScheduleFor(left, right, commonLevel)
-	if err != nil {
-		return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
-	}
 	postProduct := pb.postProductLogN13Schedule(commonLevel)
-	balanced := schedule.balanced && !postProduct
+	var schedule balancedSchedule
+	balanced := false
+	if !postProduct {
+		schedule, err = pb.balancedScheduleFor(left, right, commonLevel)
+		if err != nil {
+			return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
+		}
+		balanced = schedule.balanced
+	}
 	var categorySpan fastdiag.Span
 	if balanced {
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
@@ -685,9 +690,10 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			err = pb.eval.MulRelinElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		}
 	} else {
-		// Low-scale inputs retain the established post-product schedule because
-		// balanced pre-Rescale would otherwise take an operand below the
-		// documented precision floor.
+		// Use the unbalanced product path for selected Standard-equivalent
+		// schedules and when balanced operand scales would fall below the
+		// documented precision floor. The former applies recurrence correction
+		// before Rescale; the latter retains its existing low-scale ordering.
 		if lazy {
 			if left.Degree() == 2 {
 				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
