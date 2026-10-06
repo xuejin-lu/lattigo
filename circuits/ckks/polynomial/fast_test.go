@@ -726,41 +726,6 @@ func TestFastPolynomialChebyshevLazyMetadata(t *testing.T) {
 	require.True(t, got.Scale.Equal(wantScale), "unexpected lazy T3 scale: got=%v want=%v", got.Scale.Float64(), wantScale.Float64())
 }
 
-func TestBalancedFactorPairDeterministic(t *testing.T) {
-	formalQ := uint64(1152921504607191041)
-	factors, err := balancedFactorPair(formalQ)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1073741824), factors.left)
-	require.Equal(t, uint64(1073741824), factors.right)
-
-	for _, q := range []uint64{(uint64(1) << 60) - 33, (uint64(1) << 60) + 344065, (uint64(1) << 61) - 12345} {
-		factors, err := balancedFactorPair(q)
-		require.NoError(t, err)
-		product := new(big.Int).Mul(new(big.Int).SetUint64(factors.left), new(big.Int).SetUint64(factors.right))
-		require.True(t, rlwe.NewScale(product).InDelta(rlwe.NewScale(q), balancedScaleToleranceBits))
-	}
-}
-
-func TestBalancedScheduleBranchSelection(t *testing.T) {
-	params := fastPolynomialTestParameters(t)
-	eval := NewFastEvaluator(params, nil)
-	left := fastPolynomialTestCiphertext(params, 7)
-	right := fastPolynomialTestCiphertext(params, 11)
-	left.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
-	right.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 60))
-	pb := fastPowerBasis{params: params, eval: eval.Evaluator}
-	high, err := pb.balancedScheduleFor(left, right, left.Level())
-	require.NoError(t, err)
-	require.True(t, high.balanced)
-	require.GreaterOrEqual(t, high.leftScale.Cmp(rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), balancedMinScaleBits))), 0)
-
-	left.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 30))
-	right.Scale = rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 30))
-	low, err := pb.balancedScheduleFor(left, right, left.Level())
-	require.NoError(t, err)
-	require.False(t, low.balanced)
-}
-
 func TestChebyshevGeneratedPowerOrderIndependentOfLogNAndQPrefix(t *testing.T) {
 	for _, profile := range []struct {
 		name        string
@@ -827,7 +792,7 @@ func TestChebyshevGeneratedPowerOrderIndependentOfLogNAndQPrefix(t *testing.T) {
 	}
 }
 
-func TestBalancedPowerSourceImmutabilityAndScratchOwnership(t *testing.T) {
+func TestFastMonomialGeneratedPowerPostProductRescaleAndSourceImmutability(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            6,
 		LogQ:            []int{55, 39, 39, 39, 39, 39},
@@ -851,15 +816,14 @@ func TestBalancedPowerSourceImmutabilityAndScratchOwnership(t *testing.T) {
 			require.Equal(t, rightBefore.Value[d].Coeffs[limb], eval.workspace.powers[2].Value[d].Coeffs[limb])
 		}
 	}
-	require.NotSame(t, eval.workspace.balancedLeft, eval.workspace.balancedRight)
-	require.NotSame(t, eval.workspace.balancedLeft, eval.workspace.powers[1])
-	require.NotSame(t, eval.workspace.balancedRight, eval.workspace.powers[2])
+	require.NotSame(t, eval.workspace.powers[3], eval.workspace.powers[1])
+	require.NotSame(t, eval.workspace.powers[3], eval.workspace.powers[2])
 	require.Equal(t, 1, eval.workspace.powers[3].Degree())
 	require.Equal(t, input.Level()-2, eval.workspace.powers[3].Level())
 	require.True(t, eval.workspace.powers[3].Scale.Equal(input.Scale.Mul(input.Scale).Mul(input.Scale).Div(rlwe.NewScale(params.Q()[input.Level()])).Div(rlwe.NewScale(params.Q()[input.Level()-1]))))
 }
 
-func TestBalancedPowerIgnoresDormantResidues(t *testing.T) {
+func TestFastGeneratedPowerIgnoresDormantResidues(t *testing.T) {
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            6,
 		LogQ:            []int{55, 39, 39, 39, 39, 39},

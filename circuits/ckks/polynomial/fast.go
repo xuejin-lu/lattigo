@@ -3,7 +3,6 @@ package polynomial
 import (
 	"errors"
 	"fmt"
-	"math/big"
 	"math/bits"
 	"sort"
 
@@ -275,8 +274,6 @@ type fastPolynomialWorkspace struct {
 	rows                int
 	powers              map[int]*rlwe.Ciphertext
 	powerBuffers        map[int]*rlwe.Ciphertext
-	balancedLeft        *rlwe.Ciphertext
-	balancedRight       *rlwe.Ciphertext
 	babyBuffers         []*rlwe.Ciphertext
 	babySteps           []*fastBabyStep
 	giantSteps          []int
@@ -384,118 +381,6 @@ func fastDiagPowerOutput(ct *rlwe.Ciphertext) fastdiag.Fields {
 	return fastdiag.Output(ct, rows)
 }
 
-const (
-	balancedMinScaleBits     = 20
-	balancedScaleMarginBits  = 112
-	balancedFactorCandidates = 2
-)
-
-type balancedFactors struct {
-	left  uint64
-	right uint64
-}
-
-// balancedScaleToleranceBits intentionally leaves a fixed precision margin
-// for the integer near-square factorization. It is checked with Scale.InDelta,
-// not a float64 comparison, and retains at least 16 relative bits under the
-// 128-bit CKKS scale representation.
-const balancedScaleToleranceBits = float64(rlwe.ScalePrecision - balancedScaleMarginBits)
-
-func integerSqrt(value uint64) uint64 {
-	if value < 2 {
-		return value
-	}
-	root := uint64(1) << ((bits.Len64(value) + 1) / 2)
-	for {
-		next := (root + value/root) >> 1
-		if next >= root {
-			break
-		}
-		root = next
-	}
-	for (root + 1) <= value/(root+1) {
-		root++
-	}
-	for root > value/root {
-		root--
-	}
-	return root
-}
-
-func balancedFactorPair(q uint64) (balancedFactors, error) {
-	if q < 2 {
-		return balancedFactors{}, errors.New("balanced factor divisor must be at least two")
-	}
-	root := integerSqrt(q)
-	var best balancedFactors
-	var bestAbs *big.Int
-	var bestMax uint64
-	for delta := -balancedFactorCandidates; delta <= balancedFactorCandidates; delta++ {
-		candidate := int64(root) + int64(delta)
-		if candidate <= 0 {
-			continue
-		}
-		m1 := uint64(candidate)
-		quotient, remainder := q/m1, q%m1
-		candidates := []uint64{quotient}
-		if remainder != 0 {
-			candidates = append(candidates, quotient+1)
-		}
-		for _, m2 := range candidates {
-			for _, pair := range [][2]uint64{{m1, m2}, {m2, m1}} {
-				product := new(big.Int).Mul(new(big.Int).SetUint64(pair[0]), new(big.Int).SetUint64(pair[1]))
-				difference := new(big.Int).Sub(new(big.Int).Set(product), new(big.Int).SetUint64(q))
-				absDifference := new(big.Int).Abs(difference)
-				pairMax := pair[0]
-				if pair[1] > pairMax {
-					pairMax = pair[1]
-				}
-				better := bestAbs == nil || absDifference.Cmp(bestAbs) < 0
-				if !better && bestAbs != nil && absDifference.Cmp(bestAbs) == 0 {
-					better = pairMax < bestMax || (pairMax == bestMax && (pair[0] < best.left || (pair[0] == best.left && pair[1] < best.right)))
-				}
-				if better {
-					best = balancedFactors{left: pair[0], right: pair[1]}
-					bestAbs = absDifference
-					bestMax = pairMax
-				}
-			}
-		}
-	}
-	if bestAbs == nil || best.left == 0 || best.right == 0 {
-		return balancedFactors{}, fmt.Errorf("cannot select balanced factors for divisor %d", q)
-	}
-	return best, nil
-}
-
-type balancedSchedule struct {
-	factors     balancedFactors
-	leftScale   rlwe.Scale
-	rightScale  rlwe.Scale
-	targetScale rlwe.Scale
-	balanced    bool
-}
-
-func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, commonLevel int) (balancedSchedule, error) {
-	levelsConsumed := pb.params.LevelsConsumedPerRescaling()
-	if commonLevel < levelsConsumed {
-		return balancedSchedule{}, fmt.Errorf("common level %d is too low for %d rescale levels", commonLevel, levelsConsumed)
-	}
-	if levelsConsumed != 1 {
-		return balancedSchedule{}, nil
-	}
-	factors, err := balancedFactorPair(pb.params.Q()[commonLevel])
-	if err != nil {
-		return balancedSchedule{}, err
-	}
-	qScale := rlwe.NewScale(pb.params.Q()[commonLevel])
-	leftScale := left.Scale.Mul(rlwe.NewScale(factors.left)).Div(qScale)
-	rightScale := right.Scale.Mul(rlwe.NewScale(factors.right)).Div(qScale)
-	targetScale := left.Scale.Mul(right.Scale).Div(qScale)
-	minimumScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), balancedMinScaleBits))
-	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
-}
-
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
 	if pb.values[n] != nil {
 		return nil
@@ -547,183 +432,54 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		return fmt.Errorf("Fast power %d Q-prefix: %w", n, err)
 	}
 	inputRows = rows
-	standardChebyshevOrder := pb.basis == bignum.Chebyshev
-	var schedule balancedSchedule
-	balanced := false
-	if !standardChebyshevOrder {
-		schedule, err = pb.balancedScheduleFor(left, right, commonLevel)
-		if err != nil {
-			return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
-		}
-		balanced = schedule.balanced
-	}
 	var categorySpan fastdiag.Span
-	if balanced {
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
-		}
-		leftCopy, err := pb.workspace.balancedCopy(pb.params, left, commonLevel, rows, true)
-		if err != nil {
+	if lazy {
+		if left.Degree() == 2 {
 			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
+				categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
 			}
-			return fmt.Errorf("Fast power %d: copy balanced left: %w", n, err)
-		}
-		rightCopy, err := pb.workspace.balancedCopy(pb.params, right, commonLevel, rows, false)
-		if err != nil {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
-			}
-			return fmt.Errorf("Fast power %d: copy balanced right: %w", n, err)
-		}
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan.End(fastDiagPowerOutput(rightCopy))
-		}
-		if lazy {
-			if leftCopy.Degree() == 2 {
+			if err := pb.eval.RelinearizeQPrefixRows(left, left, rows); err != nil {
 				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)))
+					categorySpan.End(fastdiag.Fields{})
 				}
-				if err := pb.eval.RelinearizeQPrefixRows(leftCopy, leftCopy, rows); err != nil {
-					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-						categorySpan.End(fastdiag.Fields{})
-					}
-					return fmt.Errorf("Fast power %d: relinearize balanced left: %w", n, err)
-				}
+				return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
+			}
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan.End(fastDiagPowerOutput(left).Merge(fastdiag.InPlace(true)))
+			}
+		}
+		if right.Degree() == 2 {
+			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+				categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(right, rows).Merge(fastdiag.GeneratedPower(n)))
+			}
+			if err := pb.eval.RelinearizeQPrefixRows(right, right, rows); err != nil {
 				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan.End(fastDiagPowerOutput(leftCopy).Merge(fastdiag.InPlace(true)))
+					categorySpan.End(fastdiag.Fields{})
 				}
+				return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
 			}
-			if rightCopy.Degree() == 2 {
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(rightCopy, rows).Merge(fastdiag.GeneratedPower(n)))
-				}
-				if err := pb.eval.RelinearizeQPrefixRows(rightCopy, rightCopy, rows); err != nil {
-					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-						categorySpan.End(fastdiag.Fields{})
-					}
-					return fmt.Errorf("Fast power %d: relinearize balanced right: %w", n, err)
-				}
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
-				}
-			}
-		}
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan = fastdiag.Begin(fastdiag.Power, "integer_scaling", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
-		}
-		if err := pb.eval.MulIntegerQPrefixRows(leftCopy, new(big.Int).SetUint64(schedule.factors.left), rows, leftCopy); err != nil {
 			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
+				categorySpan.End(fastDiagPowerOutput(right).Merge(fastdiag.InPlace(true)))
 			}
-			return fmt.Errorf("Fast power %d: scale balanced left: %w", n, err)
 		}
-		if err := pb.eval.MulIntegerQPrefixRows(rightCopy, new(big.Int).SetUint64(schedule.factors.right), rows, rightCopy); err != nil {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
-			}
-			return fmt.Errorf("Fast power %d: scale balanced right: %w", n, err)
-		}
+	}
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.GeneratedPower(n))
+	}
+	out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
+		categorySpan.End(fastDiagPowerOutput(out))
+	}
+	if lazy {
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
+			categorySpan = fastdiag.Begin(fastdiag.Power, "mul", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
 		}
-		leftCopy.Scale = left.Scale.Mul(rlwe.NewScale(schedule.factors.left))
-		rightCopy.Scale = right.Scale.Mul(rlwe.NewScale(schedule.factors.right))
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan = fastdiag.Begin(fastdiag.Power, "rescale", powerSpan.Sequence(), fastdiag.Input(leftCopy, rows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.RepetitionCount(2)))
-		}
-		if err := pb.eval.RescaleQPrefixRows(leftCopy, rows, leftCopy); err != nil {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
-			}
-			return fmt.Errorf("Fast power %d: balanced left rescale: %w", n, err)
-		}
-		if err := pb.eval.RescaleQPrefixRows(rightCopy, rows, rightCopy); err != nil {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan.End(fastdiag.Fields{})
-			}
-			return fmt.Errorf("Fast power %d: balanced right rescale: %w", n, err)
-		}
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan.End(fastDiagPowerOutput(rightCopy).Merge(fastdiag.InPlace(true)))
-		}
-		if leftCopy.Level() != commonLevel-1 || rightCopy.Level() != commonLevel-1 {
-			return fmt.Errorf("Fast power %d: balanced operands consumed unexpected levels", n)
-		}
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.GeneratedPower(n))
-		}
-		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel-1, pb.values[1])
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan.End(fastDiagPowerOutput(out))
-		}
-		productRows, err := pb.workspace.rowsAt(commonLevel - 1)
-		if err != nil {
-			return fmt.Errorf("Fast power %d post-rescale Q-prefix: %w", n, err)
-		}
-		if lazy {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan = fastdiag.Begin(fastdiag.Power, "mul", powerSpan.Sequence(), fastdiag.Input(leftCopy, productRows).Merge(fastdiag.GeneratedPower(n)))
-			}
-			err = pb.eval.MulElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
-		} else {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan = fastdiag.Begin(fastdiag.Power, "mul_relin", powerSpan.Sequence(), fastdiag.Input(leftCopy, productRows).Merge(fastdiag.GeneratedPower(n)))
-			}
-			err = pb.eval.MulRelinElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
-		}
+		err = pb.eval.MulElementQPrefixRows(left, right.El(), rows, out)
 	} else {
-		// Chebyshev powers retain source-level operands through multiplication
-		// and recurrence correction. Non-Chebyshev powers retain the existing
-		// unbalanced path when operand-side balancing is unavailable.
-		if lazy {
-			if left.Degree() == 2 {
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
-				}
-				if err := pb.eval.RelinearizeQPrefixRows(left, left, rows); err != nil {
-					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-						categorySpan.End(fastdiag.Fields{})
-					}
-					return fmt.Errorf("Fast power %d: relinearize left: %w", n, err)
-				}
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan.End(fastDiagPowerOutput(left).Merge(fastdiag.InPlace(true)))
-				}
-			}
-			if right.Degree() == 2 {
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan = fastdiag.Begin(fastdiag.Power, "relinearize", powerSpan.Sequence(), fastdiag.Input(right, rows).Merge(fastdiag.GeneratedPower(n)))
-				}
-				if err := pb.eval.RelinearizeQPrefixRows(right, right, rows); err != nil {
-					if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-						categorySpan.End(fastdiag.Fields{})
-					}
-					return fmt.Errorf("Fast power %d: relinearize right: %w", n, err)
-				}
-				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-					categorySpan.End(fastDiagPowerOutput(right).Merge(fastdiag.InPlace(true)))
-				}
-			}
-		}
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan = fastdiag.Begin(fastdiag.Power, "copy_workspace", powerSpan.Sequence(), fastdiag.GeneratedPower(n))
+			categorySpan = fastdiag.Begin(fastdiag.Power, "mul_relin", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
 		}
-		out = pb.workspace.powerBuffer(pb.params, n, degree, commonLevel, pb.values[1])
-		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-			categorySpan.End(fastDiagPowerOutput(out))
-		}
-		if lazy {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan = fastdiag.Begin(fastdiag.Power, "mul", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
-			}
-			err = pb.eval.MulElementQPrefixRows(left, right.El(), rows, out)
-		} else {
-			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
-				categorySpan = fastdiag.Begin(fastdiag.Power, "mul_relin", powerSpan.Sequence(), fastdiag.Input(left, rows).Merge(fastdiag.GeneratedPower(n)))
-			}
-			err = pb.eval.MulRelinElementQPrefixRows(left, right.El(), rows, out)
-		}
+		err = pb.eval.MulRelinElementQPrefixRows(left, right.El(), rows, out)
 	}
 	if err != nil {
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
@@ -753,12 +509,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
 		}
 	}
-	if balanced {
-		if !out.Scale.InDelta(schedule.targetScale, balancedScaleToleranceBits) {
-			return fmt.Errorf("Fast power %d: balanced scale discrepancy: actual=%v target=%v", n, &out.Scale.Value, &schedule.targetScale.Value)
-		}
-		out.Scale = schedule.targetScale
-	} else if !standardChebyshevOrder {
+	if pb.basis != bignum.Chebyshev {
 		outRows, rowErr := pb.workspace.rowsAt(out.Level())
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d rescale Q-prefix: %w", n, rowErr)
@@ -817,7 +568,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			}
 		}
 	}
-	if standardChebyshevOrder {
+	if pb.basis == bignum.Chebyshev {
 		outRows, rowErr := pb.workspace.rowsAt(out.Level())
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d post-product Q-prefix: %w", n, rowErr)
@@ -1102,21 +853,6 @@ func copyQPrefixAtLevel(params ckks.Parameters, src, dst *rlwe.Ciphertext, level
 		}
 	}
 	return nil
-}
-
-func (ws *fastPolynomialWorkspace) balancedCopy(params ckks.Parameters, src *rlwe.Ciphertext, level, rows int, left bool) (*rlwe.Ciphertext, error) {
-	if left {
-		ws.balancedLeft = ws.ensureCiphertext(params, ws.balancedLeft, src.Degree(), level)
-		if err := copyQPrefixAtLevel(params, src, ws.balancedLeft, level, rows); err != nil {
-			return nil, err
-		}
-		return ws.balancedLeft, nil
-	}
-	ws.balancedRight = ws.ensureCiphertext(params, ws.balancedRight, src.Degree(), level)
-	if err := copyQPrefixAtLevel(params, src, ws.balancedRight, level, rows); err != nil {
-		return nil, err
-	}
-	return ws.balancedRight, nil
 }
 
 func (ws *fastPolynomialWorkspace) subAligned(params ckks.Parameters, eval *fastckks.Evaluator, out, sub *rlwe.Ciphertext) error {
