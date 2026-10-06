@@ -496,23 +496,6 @@ func (pb *fastPowerBasis) balancedScheduleFor(left, right *rlwe.Ciphertext, comm
 	return balancedSchedule{factors: factors, leftScale: leftScale, rightScale: rightScale, targetScale: targetScale, balanced: leftScale.Cmp(minimumScale) >= 0 && rightScale.Cmp(minimumScale) >= 0}, nil
 }
 
-// postProductLogN13Schedule selects Standard-equivalent generated-power
-// ordering for the supported LogN13 Chebyshev profiles. The canonical q0=55
-// profile requires Q0123 authority; the previously validated q0=56 profile
-// remains supported with its existing Q-prefix.
-func (pb *fastPowerBasis) postProductLogN13Schedule(commonLevel int) bool {
-	q := pb.params.Q()
-	isP93Schedule := len(q) >= 3 && bits.Len64(q[0]) == 56 && bits.Len64(q[1]) <= 40 && bits.Len64(q[2]) <= 40
-	isQ0123Q55Schedule := len(q) >= 4 && bits.Len64(q[0]) == 55 &&
-		bits.Len64(q[1]) <= 40 && bits.Len64(q[2]) <= 40 && bits.Len64(q[3]) <= 40
-	return pb.basis == bignum.Chebyshev &&
-		pb.params.LogN() == 13 &&
-		pb.params.RingType() == ring.Standard &&
-		pb.params.LevelsConsumedPerRescaling() == 1 &&
-		commonLevel >= 2 &&
-		(isP93Schedule || isQ0123Q55Schedule)
-}
-
 func (pb *fastPowerBasis) genPower(n int, lazy bool) error {
 	if pb.values[n] != nil {
 		return nil
@@ -564,10 +547,10 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 		return fmt.Errorf("Fast power %d Q-prefix: %w", n, err)
 	}
 	inputRows = rows
-	postProduct := pb.postProductLogN13Schedule(commonLevel)
+	standardChebyshevOrder := pb.basis == bignum.Chebyshev
 	var schedule balancedSchedule
 	balanced := false
-	if !postProduct {
+	if !standardChebyshevOrder {
 		schedule, err = pb.balancedScheduleFor(left, right, commonLevel)
 		if err != nil {
 			return fmt.Errorf("Fast power %d: balanced schedule: %w", n, err)
@@ -690,10 +673,9 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			err = pb.eval.MulRelinElementQPrefixRows(leftCopy, rightCopy.El(), productRows, out)
 		}
 	} else {
-		// Use the unbalanced product path for selected Standard-equivalent
-		// schedules and when balanced operand scales would fall below the
-		// documented precision floor. The former applies recurrence correction
-		// before Rescale; the latter retains its existing low-scale ordering.
+		// Chebyshev powers retain source-level operands through multiplication
+		// and recurrence correction. Non-Chebyshev powers retain the existing
+		// unbalanced path when operand-side balancing is unavailable.
 		if lazy {
 			if left.Degree() == 2 {
 				if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
@@ -776,7 +758,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			return fmt.Errorf("Fast power %d: balanced scale discrepancy: actual=%v target=%v", n, &out.Scale.Value, &schedule.targetScale.Value)
 		}
 		out.Scale = schedule.targetScale
-	} else if !postProduct {
+	} else if !standardChebyshevOrder {
 		outRows, rowErr := pb.workspace.rowsAt(out.Level())
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d rescale Q-prefix: %w", n, rowErr)
@@ -835,10 +817,13 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			}
 		}
 	}
-	if postProduct {
+	if standardChebyshevOrder {
 		outRows, rowErr := pb.workspace.rowsAt(out.Level())
 		if rowErr != nil {
 			return fmt.Errorf("Fast power %d post-product Q-prefix: %w", n, rowErr)
+		}
+		if err := pb.eval.ObserveQPrefixCapacity(fmt.Sprintf("generated-power-%d-before-rescale", n), out, outRows); err != nil {
+			return fmt.Errorf("Fast power %d pre-rescale Q-prefix capacity: %w", n, err)
 		}
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
 			categorySpan = fastdiag.Begin(fastdiag.Power, "rescale", powerSpan.Sequence(), fastdiag.Input(out, outRows).Merge(fastdiag.GeneratedPower(n)).Merge(fastdiag.InPlace(true)))
@@ -847,7 +832,7 @@ func (pb *fastPowerBasis) genPowerInternal(n int, lazy bool) error {
 			if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
 				categorySpan.End(fastdiag.Fields{})
 			}
-			return fmt.Errorf("Fast power %d: post-product rescale: %w", n, err)
+			return fmt.Errorf("Fast power %d: recurrence-corrected rescale: %w", n, err)
 		}
 		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Power) {
 			categorySpan.End(fastDiagPowerOutput(out).Merge(fastdiag.InPlace(true)))
