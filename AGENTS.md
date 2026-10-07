@@ -14,7 +14,7 @@ The historical `fast-ckks` branch is a separate predecessor/comparison line and 
 
 For architecture:
 - `docs/FAST_QPREFIX_SPEC.md` is authoritative for Q-prefix branch architecture and policy.
-- `docs/FAST_CKKS_SPEC.md` is inherited historical Fast-CKKS background. Its branch-specific `fast-ckks` wording and old implementation-status sections are not authoritative for `fast-qprefix` when they conflict with `FAST_QPREFIX_SPEC.md`, `CURRENT_TASK.md`, or current source.
+- `docs/FAST_CKKS_SPEC.md` is historical Fast-CKKS background, not part of the normal startup reading chain and not an authority for current Q-prefix behavior. Consult it only when the active Primary task explicitly requires historical context.
 
 ## Start here
 
@@ -25,11 +25,10 @@ Before starting any task on this branch:
    - If the worktree is clean, run `git fetch origin` and update with `git pull --ff-only origin fast-qprefix`.
    - If the worktree has uncommitted changes, the branch is not `fast-qprefix`, or the fast-forward update fails, do not reset, stash, overwrite, or discard anything automatically. Stop and report the condition instead.
    - After synchronization, re-read this `AGENTS.md` because the repository instructions themselves may have changed.
-2. Read `CURRENT_TASK.md`.
-3. Read the task specification referenced there.
-4. Read `docs/FAST_QPREFIX_SPEC.md` for the authoritative Q-prefix architecture and invariants.
-5. Read `docs/FAST_CKKS_SPEC.md` only for inherited Fast-CKKS background/invariants that do not conflict with the Q-prefix architecture.
-6. Inspect the relevant current source before editing; repository evidence takes precedence over assumptions from names or prior knowledge.
+2. Safely synchronize the Primary `xuejin-lu/heart-lattigo-bootstrap` `main` branch according to its `AGENTS.md`; read its freshly synchronized `CURRENT_TASK.md` and the active specification referenced there. A blocked, completed, or missing Primary task does not authorize Secondary execution.
+3. Read `docs/FAST_QPREFIX_SPEC.md` for authoritative Q-prefix architecture and invariants.
+4. Inspect the relevant current source before editing; repository evidence takes precedence over assumptions from names or prior knowledge.
+5. Consult historical `docs/FAST_CKKS_SPEC.md` only if the active Primary task explicitly needs historical design context. Do not infer active instructions from this repository's `CURRENT_TASK.md`, which is only a pointer to the Primary task authority.
 7. Implement only the requested scope. Do not begin the next task implicitly.
 8. Run the relevant targeted tests and benchmarks.
 9. Review the diff and remove unrelated changes.
