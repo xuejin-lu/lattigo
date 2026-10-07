@@ -57,14 +57,27 @@ The separate `fast-ckks` branch remains a historical/private-F comparison branch
 
 ## Conflict resolution
 
-If instructions appear inconsistent, use this precedence for the current Q-prefix line:
+Normative rules and factual evidence are different and must not share one precedence list.
 
-1. explicit current task specification;
-2. `docs/FAST_QPREFIX_SPEC.md`;
-3. current source and accepted test evidence;
-4. inherited non-conflicting invariants from `docs/FAST_CKKS_SPEC.md`.
+For the current Q-prefix line, use this **normative precedence**:
 
-Do not silently invent a reconciliation. If a genuine semantic/architectural conflict remains after applying this precedence, stop and report it.
+1. durable repository invariants and prohibitions in this `AGENTS.md`, together with the authoritative Q-prefix mathematical/architectural contract in `docs/FAST_QPREFIX_SPEC.md`;
+2. any explicit current experiment/architecture contract that has already been accepted without changing the durable rules above;
+3. the current task specification;
+4. `CURRENT_TASK.md`, which is only a pointer to the active task and must not introduce new architecture or semantics;
+5. inherited historical material from `docs/FAST_CKKS_SPEC.md` only where it is explicitly non-conflicting.
+
+A task specification must not silently override a durable invariant or the authoritative Q-prefix mathematics. If a task requires behavior that conflicts with a higher-level rule, stop and report `NEEDS_WEB_REVIEW`; do not choose the newer task merely because it is more recent.
+
+Current source code, tests, benchmark outputs, result artifacts, and Git history are **evidence about what the implementation currently does**, not normative authority about what it is allowed to do. If source or accepted tests conflict with a durable rule or task contract, report the mismatch as an implementation/specification defect; do not use implementation reality to redefine the rule.
+
+If new research genuinely requires changing a durable invariant or Q-prefix architectural rule, treat that as an explicit constitution/architecture amendment:
+1. state the rule being changed and the evidence/rationale;
+2. obtain Web scientific/architectural review;
+3. update the authoritative durable document first;
+4. only then create an implementation task under the amended rule.
+
+Do not create ad-hoc per-task exceptions to bypass this amendment process.
 
 A stale mention of `fast-ckks` in historical documentation is not, by itself, a reason to leave `fast-qprefix`.
 
