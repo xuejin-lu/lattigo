@@ -75,8 +75,10 @@ func validateFastBootstrapParameters(params Parameters) error {
 	if params.IterationsParameters != nil {
 		return errors.New("Fast Bootstrap does not support iterative bootstrap parameters")
 	}
-	if params.EphemeralSecretWeight != 0 {
-		return errors.New("Fast Bootstrap does not support ephemeral secret switching")
+	// Preserve the Standard frontend's E=32 value. Fast Bootstrap simulates a
+	// zero secret and does not execute the dense/sparse secret KeySwitch path.
+	if params.EphemeralSecretWeight != 0 && params.EphemeralSecretWeight != 32 {
+		return fmt.Errorf("Fast Bootstrap supports EphemeralSecretWeight 0 or 32, got %d", params.EphemeralSecretWeight)
 	}
 	if params.Mod1ParametersLiteral.Mod1Type != mod1.CosDiscrete {
 		return errors.New("Fast Bootstrap supports Mod1Type CosDiscrete only")

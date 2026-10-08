@@ -178,6 +178,48 @@ func TestFastBootstrapCircuitInitializationAndInterface(t *testing.T) {
 	require.Nil(t, eval.Mod1Parameters.Mod1InvPoly)
 }
 
+func TestFastBootstrapEphemeralWeightPassthrough(t *testing.T) {
+	for _, weight := range []int{0, 32} {
+		params, residual := fastBootstrapParameters(t, 2, false)
+		params.ResidualParameters = residual
+		params.EphemeralSecretWeight = weight
+
+		eval, err := NewFastEvaluator(params)
+		require.NoError(t, err)
+		require.Equal(t, weight, eval.Parameters.EphemeralSecretWeight)
+		require.NoError(t, eval.ensureFastBootstrapCircuit())
+		require.Equal(t, weight, eval.Parameters.EphemeralSecretWeight)
+	}
+
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	params.EphemeralSecretWeight = 1
+	require.ErrorContains(t, validateFastBootstrapParameters(params), "EphemeralSecretWeight 0 or 32")
+
+	params.EphemeralSecretWeight = 32
+	params.CircuitOrder = Custom
+	require.ErrorContains(t, validateFastBootstrapParameters(params), "CircuitOrder ModUpThenEncode")
+}
+
+func TestNewEvaluatorFastDispatchDoesNotRequireDenseSparseKeys(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	params.EphemeralSecretWeight = 32
+	keys := &EvaluationKeys{fastCompatible: true}
+
+	eval, err := NewEvaluator(params, keys)
+	require.NoError(t, err)
+	require.NotNil(t, eval.fast)
+	require.Nil(t, eval.Evaluator, "Fast dispatch must not construct a Standard CKKS evaluator")
+	require.Same(t, keys, eval.EvaluationKeys)
+	require.Nil(t, keys.EvkDenseToSparse)
+	require.Nil(t, keys.EvkSparseToDense)
+	require.Equal(t, 32, eval.Parameters.EphemeralSecretWeight)
+	require.Equal(t, 32, eval.fast.Parameters.EphemeralSecretWeight)
+	require.NoError(t, eval.fast.ensureFastBootstrapCircuit())
+	require.Nil(t, eval.Evaluator, "Fast circuit initialization must not fall through to Standard KeySwitch setup")
+}
+
 func TestFastBootstrapPublicValidation(t *testing.T) {
 	params, residual := fastBootstrapParameters(t, 2, false)
 	params.ResidualParameters = residual
