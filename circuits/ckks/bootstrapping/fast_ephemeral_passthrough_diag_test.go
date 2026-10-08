@@ -34,11 +34,12 @@ type fastEPassComplexPair struct {
 }
 
 type fastEPassMetrics struct {
-	ComplexRMSE     float64 `json:"complex_rmse"`
-	MaxComplexError float64 `json:"max_complex_error"`
-	MaxRealError    float64 `json:"max_real_error"`
-	MaxImagError    float64 `json:"max_imag_error"`
-	SNRdB           float64 `json:"snr_db"`
+	ComplexRMSE     float64  `json:"complex_rmse"`
+	MaxComplexError float64  `json:"max_complex_error"`
+	MaxRealError    float64  `json:"max_real_error"`
+	MaxImagError    float64  `json:"max_imag_error"`
+	SNRdB           *float64 `json:"snr_db,omitempty"`
+	SNRStatus       string   `json:"snr_status"`
 }
 
 type fastEPassMetadata struct {
@@ -114,6 +115,15 @@ type fastEPassEvidence struct {
 	E32VsE0                   fastEPassMetrics `json:"e32_vs_e0"`
 	FastE32VsStandardE32      fastEPassMetrics `json:"fast_e32_vs_standard_e32"`
 	StandardVsOriginal        fastEPassMetrics `json:"standard_e32_vs_original"`
+}
+
+func TestFastEPassZeroErrorSNRIsSerializable(t *testing.T) {
+	values := []complex128{0.25 - 0.125i, -0.5 + 0.0625i}
+	metrics := fastEPassCompare(values, values)
+	require.Equal(t, "infinite_zero_error", metrics.SNRStatus)
+	require.Nil(t, metrics.SNRdB)
+	_, err := json.Marshal(metrics)
+	require.NoError(t, err)
 }
 
 // TestFastEphemeralPassthroughP93 runs exactly one public Fast Bootstrap at
@@ -308,12 +318,18 @@ func fastEPassCompare(reference, actual []complex128) fastEPassMetrics {
 		maxImag = math.Max(maxImag, imagError)
 	}
 	count := float64(len(reference))
-	rmse := math.Sqrt(squaredError / count)
-	snr := math.Inf(1)
-	if squaredError > 0 {
-		snr = 10 * math.Log10(signalEnergy/squaredError)
+	metrics := fastEPassMetrics{
+		ComplexRMSE: math.Sqrt(squaredError / count), MaxComplexError: maxComplex,
+		MaxRealError: maxReal, MaxImagError: maxImag,
 	}
-	return fastEPassMetrics{ComplexRMSE: rmse, MaxComplexError: maxComplex, MaxRealError: maxReal, MaxImagError: maxImag, SNRdB: snr}
+	if squaredError == 0 {
+		metrics.SNRStatus = "infinite_zero_error"
+	} else {
+		snr := 10 * math.Log10(signalEnergy/squaredError)
+		metrics.SNRdB = &snr
+		metrics.SNRStatus = "finite"
+	}
+	return metrics
 }
 
 func fastEPassFiniteValues(values []complex128) bool {
