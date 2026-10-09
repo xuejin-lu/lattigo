@@ -2,6 +2,7 @@ package rlwe
 
 import (
 	"fmt"
+	"math/big"
 	"reflect"
 
 	"github.com/tuneinsight/lattigo/v6/ring"
@@ -9,6 +10,13 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils"
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
+
+// fastCKKSZeroSecretSimulationProvider is an explicit CKKS-parameter
+// capability implemented only by the Fast fork. It keeps the intentional
+// zero-secret simulation out of generic RLWE and other schemes.
+type fastCKKSZeroSecretSimulationProvider interface {
+	FastCKKSZeroSecretSimulation()
+}
 
 // EncryptionKey is an interface for encryption keys. Valid encryption
 // keys are the [SecretKey] and [PublicKey] types.
@@ -22,6 +30,7 @@ func NewEncryptor(params ParameterProvider, key EncryptionKey) *Encryptor {
 	p := *params.GetRLWEParameters()
 
 	enc := newEncryptor(p)
+	_, enc.fastCKKSZeroSecretSimulation = params.(fastCKKSZeroSecretSimulationProvider)
 	var err error
 	switch key := key.(type) {
 	case *PublicKey:
@@ -47,13 +56,14 @@ func NewEncryptor(params ParameterProvider, key EncryptionKey) *Encryptor {
 type Encryptor struct {
 	params Parameters
 
-	encKey         EncryptionKey
-	prng           sampling.PRNG
-	xeSampler      ring.Sampler
-	xsSampler      ring.Sampler
-	basisextender  *ring.BasisExtender
-	uniformSampler ringqp.UniformSampler
-	pool           *BufferPool
+	encKey                       EncryptionKey
+	prng                         sampling.PRNG
+	xeSampler                    ring.Sampler
+	xsSampler                    ring.Sampler
+	basisextender                *ring.BasisExtender
+	uniformSampler               ringqp.UniformSampler
+	pool                         *BufferPool
+	fastCKKSZeroSecretSimulation bool
 }
 
 // GetRLWEParameters returns the underlying [Parameters].
@@ -137,6 +147,11 @@ func (enc Encryptor) Encrypt(pt *Plaintext, ct interface{}) (err error) {
 	} else {
 		switch ct := ct.(type) {
 		case *Ciphertext:
+			if enc.fastCKKSZeroSecretSimulation {
+				if _, isSecretKey := enc.encKey.(*SecretKey); isSecretKey {
+					return enc.encryptFastCKKSZeroSecret(pt, ct)
+				}
+			}
 			*ct.MetaData = *pt.MetaData
 			level := utils.Min(pt.Level(), ct.Level())
 			ct.Resize(ct.Degree(), level)
@@ -149,6 +164,46 @@ func (enc Encryptor) Encrypt(pt *Plaintext, ct interface{}) (err error) {
 			return fmt.Errorf("cannot Encrypt: input ciphertext type %s is not supported", reflect.TypeOf(ct))
 		}
 	}
+}
+
+// encryptFastCKKSZeroSecret stores the encoded plaintext directly in c0 and
+// clears c1. This is an intentionally insecure numerical-simulation path; it
+// is selected only by the Fast CKKS parameter-provider capability.
+func (enc Encryptor) encryptFastCKKSZeroSecret(pt *Plaintext, ct *Ciphertext) error {
+	if ct == nil {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: ciphertext cannot be nil")
+	}
+	if pt == nil || pt.MetaData == nil {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: plaintext and metadata must be non-nil")
+	}
+	if len(ct.Value) != 2 {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: output must have degree-one storage, got %d components", len(ct.Value))
+	}
+	if ct.MetaData == nil {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: ciphertext metadata must be non-nil")
+	}
+	if pt.Value.N() != enc.params.N() || ct.Value[0].N() != enc.params.N() || ct.Value[1].N() != enc.params.N() {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: plaintext and ciphertext ring degree must match parameters")
+	}
+	level := utils.Min(pt.Level(), ct.Level())
+	if level < 0 || pt.Value.Level() < level {
+		return fmt.Errorf("cannot Fast CKKS Encrypt: plaintext does not contain the required active Q rows")
+	}
+
+	ct.Resize(1, level)
+	ct.MetaData = cloneFastCKKSMetadata(pt.MetaData)
+	ct.Value[0].CopyLvl(level, pt.Value)
+	ct.Value[1].Zero()
+	return nil
+}
+
+func cloneFastCKKSMetadata(metadata *MetaData) *MetaData {
+	cloned := *metadata
+	cloned.Scale.Value = *new(big.Float).Set(&metadata.Scale.Value)
+	if metadata.Scale.Mod != nil {
+		cloned.Scale.Mod = new(big.Int).Set(metadata.Scale.Mod)
+	}
+	return &cloned
 }
 
 // EncryptNew encrypts the input plaintext using the stored encryption key and returns a newly

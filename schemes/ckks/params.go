@@ -131,6 +131,12 @@ func (p Parameters) GetRLWEParameters() *rlwe.Parameters {
 	return &p.Parameters
 }
 
+// FastCKKSZeroSecretSimulation opts these parameters into the Fast fork's
+// intentionally insecure CKKS numerical-simulation EncryptNew path. The
+// generic RLWE package consumes this provider capability without importing
+// schemes/ckks; the Standard fork does not implement it.
+func (Parameters) FastCKKSZeroSecretSimulation() {}
+
 // MaxLevel returns the maximum ciphertext level
 func (p Parameters) MaxLevel() int {
 	return p.QCount() - 1

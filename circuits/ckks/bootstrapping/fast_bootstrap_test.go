@@ -201,6 +201,39 @@ func TestFastBootstrapEphemeralWeightPassthrough(t *testing.T) {
 	require.ErrorContains(t, validateFastBootstrapParameters(params), "CircuitOrder ModUpThenEncode")
 }
 
+func TestFastBootstrapRejectsNonzeroC1Input(t *testing.T) {
+	params, residual := fastBootstrapParameters(t, 2, false)
+	params.ResidualParameters = residual
+	eval, err := NewFastEvaluator(params)
+	require.NoError(t, err)
+
+	for _, level := range []int{0, 1} {
+		ct := fastBootstrapPlainCiphertext(t, residual, level, 2)
+		require.NoError(t, eval.validateFastBootstrapPublicInputs([]rlwe.Ciphertext{*ct}))
+		ct.Value[1].Coeffs[level][0] = 1
+		_, err = eval.Bootstrap(ct)
+		require.ErrorContains(t, err, "Fast Bootstrap requires a zero-secret simulation input")
+	}
+}
+
+func TestFastE32GenEvaluationKeysAndPublicEvaluatorDispatch(t *testing.T) {
+	params, residual := fastBootstrapParametersAt(t, 8, 2, false)
+	params.ResidualParameters = residual
+	params.EphemeralSecretWeight = 32
+	sk := rlwe.NewKeyGenerator(residual).GenSecretKeyNew()
+
+	keys, _, err := params.GenEvaluationKeys(sk)
+	require.NoError(t, err)
+	require.True(t, keys.fastCompatible)
+	require.NotNil(t, keys.EvkDenseToSparse)
+	require.NotNil(t, keys.EvkSparseToDense)
+
+	eval, err := NewEvaluator(params, keys)
+	require.NoError(t, err)
+	require.NotNil(t, eval.fast)
+	require.Nil(t, eval.Evaluator)
+}
+
 func TestNewEvaluatorFastDispatchDoesNotRequireDenseSparseKeys(t *testing.T) {
 	params, residual := fastBootstrapParameters(t, 2, false)
 	params.ResidualParameters = residual

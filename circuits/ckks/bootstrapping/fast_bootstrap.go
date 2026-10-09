@@ -154,6 +154,13 @@ func (eval *FastEvaluator) validateFastBootstrapPublicInputs(cts []rlwe.Cipherte
 				}
 			}
 		}
+		for row := 0; row < rows; row++ {
+			for coefficient, value := range ct.Value[1].Coeffs[row] {
+				if value != 0 {
+					return fmt.Errorf("ciphertext %d c1 q%d coefficient %d is non-zero; Fast Bootstrap requires a zero-secret simulation input", i, row, coefficient)
+				}
+			}
+		}
 		if i > 0 {
 			if currentLevel != level {
 				return fmt.Errorf("ciphertext %d level %d does not match level %d", i, currentLevel, level)
