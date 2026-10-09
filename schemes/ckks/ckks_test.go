@@ -604,64 +604,39 @@ func testEvaluatorMul(tc *TestContext, t *testing.T) {
 	t.Run(name("Evaluator/Mul/Ct/Ct/Degree0", tc), func(t *testing.T) {
 		t.Parallel()
 
-		values1, plaintext1, _ := tc.NewTestVector(-1-1i, 1+1i)
-		values2, _, ciphertext2 := tc.NewTestVector(-1-1i, 1+1i)
-
-		mul := bignum.NewComplexMultiplier()
-
-		for i := range values1 {
-			mul.Mul(values2[i], values1[i], values2[i])
-		}
+		_, plaintext1, _ := tc.NewTestVector(-1-1i, 1+1i)
+		_, _, ciphertext2 := tc.NewTestVector(-1-1i, 1+1i)
 
 		ciphertext1 := &rlwe.Ciphertext{}
 		ciphertext1.Value = []ring.Poly{plaintext1.Value}
 		ciphertext1.MetaData = plaintext1.MetaData.CopyNew()
+		ciphertext1Before, ciphertext2Before := ciphertext1.CopyNew(), ciphertext2.CopyNew()
 
-		require.NoError(t, tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext1))
-
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values2, ciphertext1, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		err := tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext1)
+		require.ErrorContains(t, err, "ciphertext inputs must both have degree 1")
+		require.True(t, ciphertext1.Equal(ciphertext1Before), "rejected degree-0 ciphertext pair modified aliased output")
+		require.True(t, ciphertext2.Equal(ciphertext2Before), "rejected degree-0 ciphertext pair modified op1")
 	})
 
 	t.Run(name("Evaluator/MulRelin/Ct/Ct", tc), func(t *testing.T) {
 		t.Parallel()
 
-		// op0 <- op0 * op1
-		values1, _, ciphertext1 := tc.NewTestVector(-1-1i, 1+1i)
-		values2, _, ciphertext2 := tc.NewTestVector(-1-1i, 1+1i)
+		_, _, ciphertext1 := tc.NewTestVector(-1-1i, 1+1i)
+		_, _, ciphertext2 := tc.NewTestVector(-1-1i, 1+1i)
+		ciphertext1Before, ciphertext2Before := ciphertext1.CopyNew(), ciphertext2.CopyNew()
 
-		mul := bignum.NewComplexMultiplier()
+		err := tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext1)
+		require.ErrorContains(t, err, "nonzero c1")
+		require.True(t, ciphertext1.Equal(ciphertext1Before), "rejected nonzero-c1 pair modified aliased op0")
+		require.True(t, ciphertext2.Equal(ciphertext2Before), "rejected nonzero-c1 pair modified op1")
 
-		for i := range values1 {
-			mul.Mul(values1[i], values2[i], values1[i])
-		}
-
-		require.NoError(t, tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext1))
-		require.Equal(t, ciphertext1.Degree(), 1)
-
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values1, ciphertext1, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
-
-		// op1 <- op0 * op1
-		values1, _, ciphertext1 = tc.NewTestVector(-1-1i, 1+1i)
-		values2, _, ciphertext2 = tc.NewTestVector(-1-1i, 1+1i)
-
-		for i := range values1 {
-			mul.Mul(values2[i], values1[i], values2[i])
-		}
-
-		require.NoError(t, tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext2))
-		require.Equal(t, ciphertext2.Degree(), 1)
-
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values2, ciphertext2, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
-
-		// op0 <- op0 * op0
-		for i := range values1 {
-			mul.Mul(values1[i], values1[i], values1[i])
-		}
-
-		require.NoError(t, tc.Evl.MulRelin(ciphertext1, ciphertext1, ciphertext1))
-		require.Equal(t, ciphertext1.Degree(), 1)
-
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values1, ciphertext1, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		err = tc.Evl.MulRelin(ciphertext1, ciphertext2, ciphertext2)
+		require.ErrorContains(t, err, "nonzero c1")
+		require.True(t, ciphertext1.Equal(ciphertext1Before), "rejected nonzero-c1 pair modified op0")
+		require.True(t, ciphertext2.Equal(ciphertext2Before), "rejected nonzero-c1 pair modified aliased op1")
+		err = tc.Evl.MulRelin(ciphertext1, ciphertext1, ciphertext1)
+		require.ErrorContains(t, err, "nonzero c1")
+		require.True(t, ciphertext1.Equal(ciphertext1Before), "rejected nonzero-c1 square modified aliased input")
 	})
 }
 

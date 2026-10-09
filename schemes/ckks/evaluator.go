@@ -718,6 +718,12 @@ func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 // The procedure will return an error if the evaluator was not created with a relinearization key,
 // except for Fast CKKS zero-secret simulation inputs with fully materialized active Q rows and c1=0.
 func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlwe.Ciphertext, err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok && (op0 == nil || op1Ciphertext == nil) {
+			return nil, fmt.Errorf("cannot Fast CKKS zero-secret MulRelin: ciphertexts cannot be nil")
+		}
+	}
+
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
 		opOut = NewCiphertext(*eval.GetParameters(), 1, utils.Min(op0.Level(), op1.Level()))
@@ -744,20 +750,12 @@ func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut
 func (eval Evaluator) MulRelin(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
-		// Fast CKKS zero-secret simulation has a narrowly valid keyless path for
-		// fresh degree-one ciphertexts. Keep the ordinary Standard path unchanged
-		// and do not route other operand types through this capability.
+		// Fast CKKS zero-secret simulation accepts only the explicitly supported
+		// ciphertext/ciphertext case. Reject unsupported ciphertext pairs here so
+		// they cannot fall through to native full-Q KeySwitch/GadgetProduct.
 		if eval.usesFastCKKSZeroSecretSimulation() {
-			if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok && (op0 == nil || op1Ciphertext == nil || (op0.Degree() == 1 && op1Ciphertext.Degree() == 1)) {
-				handled, err := eval.mulRelinFastCKKSZeroSecret(op0, op1Ciphertext, opOut)
-				if handled {
-					return err
-				}
-				// Nonzero-c1 Fast ciphertexts retain the existing native path. Check
-				// key availability before it writes any part of the destination.
-				if _, err := eval.CheckAndGetRelinearizationKey(); err != nil {
-					return fmt.Errorf("cannot Fast CKKS MulRelin with nonzero c1: %w", err)
-				}
+			if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+				return eval.mulRelinFastCKKSZeroSecret(op0, op1Ciphertext, opOut)
 			}
 		}
 
