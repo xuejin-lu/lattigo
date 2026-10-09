@@ -123,23 +123,63 @@ func TestPublicFastZeroSecretRotateUsesSharedCoreForAllActiveRows(t *testing.T) 
 	for _, level := range []int{1, 5} {
 		for _, isNTT := range []bool{true} {
 			input := fastRotateTestEncrypt(t, params, encoder, encryptor, values, fastRotateTestLogSlots, level, isNTT)
+			if level == 5 {
+				// Dormant q4/q5 are deliberately malformed and nonzero: neither
+				// the public adapter nor the shared core may inspect those rows.
+				for component := range input.Value {
+					for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+						for i := range input.Value[component].Coeffs[row] {
+							input.Value[component].Coeffs[row][i] = ^uint64(0)
+						}
+					}
+				}
+			}
 			for _, k := range []int{0, 1, -1} {
 				t.Run(fmt.Sprintf("level=%d/ntt=%t/k=%d", level, isNTT, k), func(t *testing.T) {
 					got, err := eval.RotateNew(input, k)
 					require.NoError(t, err)
-					requireFastRotateOracle(t, params, encoder, decryptor, input, got, fastRotateTestOracle(values, k))
-					require.Equal(t, level+1, recorder.rows[len(recorder.rows)-1], "public P0 must pass every active Q row")
+					if level <= 3 {
+						requireFastRotateOracle(t, params, encoder, decryptor, input, got, fastRotateTestOracle(values, k))
+					} else {
+						require.Equal(t, 1, got.Degree())
+						require.Equal(t, level, got.Level())
+						for component := range got.Value {
+							for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+								require.Len(t, got.Value[component].Coeffs[row], params.N())
+							}
+							for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+								require.Nil(t, got.Value[component].Coeffs[row])
+							}
+						}
+					}
+					require.Equal(t, min(level+1, fastcore.MaxQPrefixWidth), recorder.rows[len(recorder.rows)-1], "public P0 must pass only maintained Q-prefix rows")
 					require.Equal(t, 2, recorder.pairCount[len(recorder.pairCount)-1], "the common core must process c0 and c1")
 
 					out := NewCiphertext(params, 1, level)
 					out.IsNTT, out.IsMontgomery = input.IsNTT, input.IsMontgomery
 					require.NoError(t, eval.Rotate(input, k, out))
-					requireFastRotateOracle(t, params, encoder, decryptor, input, out, fastRotateTestOracle(values, k))
+					if level <= 3 {
+						requireFastRotateOracle(t, params, encoder, decryptor, input, out, fastRotateTestOracle(values, k))
+					} else {
+						for component := range out.Value {
+							for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+								require.Nil(t, out.Value[component].Coeffs[row])
+							}
+						}
+					}
 
 					if k == 1 {
 						alias := input.CopyNew()
 						require.NoError(t, eval.Rotate(alias, k, alias))
-						requireFastRotateOracle(t, params, encoder, decryptor, input, alias, fastRotateTestOracle(values, k))
+						if level <= 3 {
+							requireFastRotateOracle(t, params, encoder, decryptor, input, alias, fastRotateTestOracle(values, k))
+						} else {
+							for component := range alias.Value {
+								for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+									require.Nil(t, alias.Value[component].Coeffs[row])
+								}
+							}
+						}
 					}
 				})
 			}
@@ -152,14 +192,30 @@ func TestPublicFastZeroSecretRotateCoefficientDomainAtFullSlots(t *testing.T) {
 	encoder := NewEncoder(params)
 	sk := NewKeyGenerator(params).GenSecretKeyNew()
 	encryptor := rlwe.NewEncryptor(params, sk)
-	decryptor := rlwe.NewDecryptor(params, sk)
 	values := fastRotateTestValues(params.LogMaxSlots())
 	input := fastRotateTestEncrypt(t, params, encoder, encryptor, values, params.LogMaxSlots(), 5, false)
 	eval := NewEvaluator(params, nil)
+	for component := range input.Value {
+		for row := fastcore.MaxQPrefixWidth; row <= input.Level(); row++ {
+			for i := range input.Value[component].Coeffs[row] {
+				input.Value[component].Coeffs[row][i] = ^uint64(0)
+			}
+		}
+	}
 
 	got, err := eval.RotateNew(input, 1)
 	require.NoError(t, err)
-	requireFastRotateOracle(t, params, encoder, decryptor, input, got, fastRotateTestOracle(values, 1))
+	require.Equal(t, input.Level(), got.Level())
+	require.Equal(t, 1, got.Degree())
+	require.False(t, got.IsNTT)
+	for component := range got.Value {
+		for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+			require.Len(t, got.Value[component].Coeffs[row], params.N())
+		}
+		for row := fastcore.MaxQPrefixWidth; row <= got.Level(); row++ {
+			require.Nil(t, got.Value[component].Coeffs[row])
+		}
+	}
 }
 
 type rotateTrackingEvaluationKeySet struct {
@@ -185,7 +241,7 @@ func TestPublicFastZeroSecretRotateDoesNotAccessAvailableGaloisKey(t *testing.T)
 	encoder := NewEncoder(params)
 	decryptor := rlwe.NewDecryptor(params, sk)
 	values := fastRotateTestValues(fastRotateTestLogSlots)
-	input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), values, fastRotateTestLogSlots, 5, true)
+	input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), values, fastRotateTestLogSlots, 3, true)
 	got, err := eval.RotateNew(input, 1)
 	require.NoError(t, err)
 	require.Zero(t, keys.galoisKeyGets)
@@ -226,26 +282,30 @@ func TestPublicFastZeroSecretRotateRejectsInvalidInputsTransactionally(t *testin
 			input.Value[component].Coeffs[4] = nil
 			input.Value[component].Coeffs[5] = nil
 		}
-		inputBefore := input.CopyNew()
-		out := NewCiphertext(params, 1, 5)
-		out.IsNTT = true
-		outBefore := out.CopyNew()
-		require.Error(t, eval.Rotate(input, 1, out))
-		require.True(t, input.Equal(inputBefore))
-		require.True(t, out.Equal(outBefore))
+		out, err := eval.RotateNew(input, 1)
+		require.NoError(t, err)
+		require.Equal(t, 5, out.Level())
+		for component := range out.Value {
+			for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+				require.Len(t, out.Value[component].Coeffs[row], params.N())
+			}
+			for row := fastcore.MaxQPrefixWidth; row <= out.Level(); row++ {
+				require.Nil(t, out.Value[component].Coeffs[row], "dormant q%d must remain unmaterialized", row)
+			}
+		}
 	})
 
 	t.Run("missing-active-input-row", func(t *testing.T) {
 		input := valid.CopyNew()
-		input.Value[0].Coeffs[4] = nil
+		input.Value[0].Coeffs[3] = nil
 		out := NewCiphertext(params, 1, 5)
 		out.IsNTT = true
 		outBefore := out.CopyNew()
 		require.Error(t, eval.Rotate(input, 1, out))
-		require.Nil(t, input.Value[0].Coeffs[4])
+		require.Nil(t, input.Value[0].Coeffs[3])
 		for component := range input.Value {
 			for row := range input.Value[component].Coeffs {
-				if component == 0 && row == 4 {
+				if component == 0 && row == 3 {
 					continue
 				}
 				require.Equal(t, valid.Value[component].Coeffs[row], input.Value[component].Coeffs[row])
@@ -268,7 +328,7 @@ func TestPublicFastZeroSecretRotateRejectsInvalidInputsTransactionally(t *testin
 
 	t.Run("missing-output-row", func(t *testing.T) {
 		out := NewCiphertext(params, 1, 5)
-		out.Value[0].Coeffs[5] = nil
+		out.Value[0].Coeffs[3] = nil
 		outBefore := out.CopyNew()
 		require.Error(t, eval.Rotate(valid, 1, out))
 		require.True(t, out.Equal(outBefore))

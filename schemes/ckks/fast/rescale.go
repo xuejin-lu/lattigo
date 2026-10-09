@@ -135,9 +135,9 @@ func (scratch *fastRescaleScratch) ensureStagedComponents(ringQ *ring.Ring, comp
 	return nil
 }
 
-// Rescale applies Standard CKKS rescale semantics using the legacy producer
-// authority selected by maintainedLimbCount. The logical top modulus is the
-// divisor even when it is outside that prefix. The input must be NTT-domain.
+// Rescale applies Standard CKKS rescale semantics using the fixed Q-prefix
+// policy w_Q(Level)=min(Level+1, 4). The logical top modulus is the divisor
+// even when it is outside that prefix. The input must be NTT-domain.
 // Both ordinary and Montgomery-form NTT representations are supported and the
 // output preserves the input representation.
 func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
@@ -154,13 +154,16 @@ func (eval *Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) error {
 	if op0.Level() < nbRescales {
 		return errors.New("cannot Rescale: input Ciphertext level is too low")
 	}
-	sourceRows := maintainedLimbCount(&eval.Parameters, op0.Level())
+	sourceRows, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
 	return eval.rescaleNQPrefix(op0, nbRescales, sourceRows, opOut)
 }
 
 // RescaleQPrefixRows applies Standard CKKS Rescale semantics using exactly
-// rows authoritative source limbs. The output contracts naturally to the
-// Q-prefix width of its new logical Level.
+// rows authoritative source limbs. Rows outside the resulting source-derived
+// target prefix remain unavailable in the output backing.
 func (eval *Evaluator) RescaleQPrefixRows(op0 *rlwe.Ciphertext, rows int, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
@@ -195,13 +198,16 @@ func (eval *Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOu
 	if op0 == nil {
 		return errors.New("op0 cannot be nil")
 	}
-	sourceRows := maintainedLimbCount(&eval.Parameters, op0.Level())
+	sourceRows, err := QPrefixWidth(op0.Level())
+	if err != nil {
+		return err
+	}
 	return eval.rescaleToNQPrefix(op0, minScale, sourceRows, opOut)
 }
 
 // RescaleToQPrefixRows applies the Standard RescaleTo stopping rule using an
-// explicit source-prefix authority. Intermediate and final outputs contract
-// only according to their logical levels.
+// explicit source-prefix authority. A no-op preserves Level and Scale while
+// retaining only the explicitly authorized rows.
 func (eval *Evaluator) RescaleToQPrefixRows(op0 *rlwe.Ciphertext, minScale rlwe.Scale, rows int, opOut *rlwe.Ciphertext) error {
 	if eval == nil || op0 == nil || opOut == nil {
 		return errors.New("Fast RescaleTo evaluator and ciphertexts cannot be nil")
@@ -216,8 +222,8 @@ func (eval *Evaluator) RescaleToQPrefixRows(op0 *rlwe.Ciphertext, minScale rlwe.
 }
 
 // rescaleToNQPrefix applies RescaleTo's Standard stopping rule while keeping
-// source authority explicit. Production wrappers pass the current legacy
-// width; same-package Q-prefix tests and later migrated owners may pass 4.
+// source authority explicit. Production wrappers pass the fixed Q-prefix
+// width; explicit row-authority callers may pass a narrower supported prefix.
 func (eval *Evaluator) rescaleToNQPrefix(op0 *rlwe.Ciphertext, minScale rlwe.Scale, sourceRows int, opOut *rlwe.Ciphertext) error {
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
@@ -228,54 +234,10 @@ func (eval *Evaluator) rescaleToNQPrefix(op0 *rlwe.Ciphertext, minScale rlwe.Sca
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return errors.New("op0 and opOut metadata cannot be nil")
 	}
-	if minScale.Cmp(rlwe.NewScale(0)) != 1 {
-		return errors.New("cannot RescaleTo: minScale is not positive")
+	if eval.rescaleCore == nil {
+		return errors.New("Fast Rescale core is not initialized")
 	}
-	if op0.Scale.Cmp(rlwe.NewScale(0)) != 1 {
-		return errors.New("cannot RescaleTo: ciphertext scale is not positive")
-	}
-	if op0.Level() == 0 {
-		return errors.New("cannot RescaleTo: input Ciphertext already at level 0")
-	}
-	if op0.N() != eval.Parameters.N() || opOut.N() != eval.Parameters.N() {
-		return errors.New("ciphertext dimensions do not match Fast evaluator parameters")
-	}
-	maxSourceRows, err := QPrefixWidth(op0.Level())
-	if err != nil {
-		return err
-	}
-	if sourceRows < 1 || sourceRows > maxSourceRows {
-		return fmt.Errorf("explicit Fast Rescale source width %d is outside [1,%d] at Level %d", sourceRows, maxSourceRows, op0.Level())
-	}
-	ringQ := eval.Parameters.RingQ()
-	if ringQ == nil || op0.Level() > ringQ.Level() {
-		return fmt.Errorf("Fast RescaleTo input Level %d exceeds configured ring Level", op0.Level())
-	}
-
-	threshold := minScale.Div(rlwe.NewScale(2))
-	scale := op0.Scale
-	newLevel := op0.Level()
-	nbRescales := 0
-	for newLevel > 0 {
-		if newLevel >= len(ringQ.SubRings) || ringQ.SubRings[newLevel] == nil || ringQ.SubRings[newLevel].Modulus < 2 {
-			return fmt.Errorf("Fast RescaleTo logical divisor q%d is unavailable", newLevel)
-		}
-		candidate := scale.Div(rlwe.NewScale(ringQ.SubRings[newLevel].Modulus))
-		if candidate.Cmp(threshold) == -1 {
-			break
-		}
-		scale = candidate
-		newLevel--
-		nbRescales++
-	}
-
-	if nbRescales == 0 {
-		if op0 != opOut {
-			opOut.Copy(op0)
-		}
-		return nil
-	}
-	return eval.rescaleNQPrefix(op0, nbRescales, sourceRows, opOut)
+	return eval.rescaleCore.ApplyToRows(eval.Parameters.RingQ(), op0, minScale, sourceRows, opOut)
 }
 
 func validateFastRescaleDomain(ct *rlwe.Ciphertext) error {

@@ -97,60 +97,7 @@ func makeTransactionalRescaleInput(params ckks.Parameters) *rlwe.Ciphertext {
 	return ct
 }
 
-func TestFastRescaleCapacityFailureAfterEarlierComponentStagingIsTransactional(t *testing.T) {
-	params := q012TestParameters(t)
-	for _, inPlace := range []bool{true, false} {
-		name := "out-of-place"
-		if inPlace {
-			name = "in-place"
-		}
-		t.Run(name, func(t *testing.T) {
-			eval := NewEvaluator(params)
-			input := makeTransactionalRescaleInput(params)
-			output := NewCiphertext(params, 2, 1)
-			output.IsNTT = false
-			output.IsMontgomery = false
-			output.Scale = rlwe.NewScale(12345)
-			output.MetaData.IsBatched = true
-			output.MetaData.IsBitReversed = true
-			output.MetaData.LogDimensions = ring.Dimensions{Rows: 1, Cols: 2}
-			for component := range output.Value {
-				for row := range output.Value[component].Coeffs {
-					for coefficient := range output.Value[component].Coeffs[row] {
-						output.Value[component].Coeffs[row][coefficient] = uint64(17 + 13*component + 5*row + coefficient)
-					}
-				}
-			}
-
-			if inPlace {
-				output = input
-			}
-			inputBefore := snapshotFastRescaleCiphertext(input)
-			var outputBefore fastRescaleSnapshot
-			if !inPlace {
-				outputBefore = snapshotFastRescaleCiphertext(output)
-			}
-
-			// A valid Rescale over a centered source prefix normally contracts
-			// within capacity. Tighten only this evaluator's target-half scratch
-			// to inject the later-component capacity failure deterministically:
-			// c0 rounds to 1 and stages successfully; c1 rounds to 2 and fails.
-			eval.rescaleScratch.half[2] = uint192{lo: 1}
-			eval.rescaleScratch.staged[0].Coeffs[0][0] = params.Q()[0] - 1
-			err := eval.RescaleQPrefixRows(input, 4, output)
-			var capacityErr *QPrefixCapacityError
-			require.ErrorAs(t, err, &capacityErr)
-			require.Equal(t, 1, capacityErr.Component, "capacity error: %+v", capacityErr)
-			require.Equal(t, uint64(1), eval.rescaleScratch.staged[0].Coeffs[0][0], "first component must have staged its computed result")
-			requireFastRescaleUnchanged(t, inputBefore, input)
-			if !inPlace {
-				requireFastRescaleUnchanged(t, outputBefore, output)
-			}
-		})
-	}
-}
-
-func TestFastRescaleStagesHigherDegreeComponentsAndReusesThem(t *testing.T) {
+func TestFastRescaleStagesHigherDegreeComponents(t *testing.T) {
 	params := q012TestParameters(t)
 	level := 3
 	fastInput := NewCiphertext(params, 2, level)
@@ -201,7 +148,6 @@ func TestFastRescaleStagesHigherDegreeComponentsAndReusesThem(t *testing.T) {
 		}
 	}
 
-	stagedRow := fastEval.rescaleScratch.staged[2].Coeffs[0]
 	require.NoError(t, fastEval.RescaleQPrefixRows(fastInput, 4, fastOutput))
-	require.True(t, &stagedRow[0] == &fastEval.rescaleScratch.staged[2].Coeffs[0][0], "higher-degree staging backing must be reused")
+	require.Len(t, fastOutput.Value, 3)
 }

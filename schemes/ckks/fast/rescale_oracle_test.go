@@ -47,7 +47,7 @@ func TestFastRescaleToMatchesSequentialBigIntOracleAcrossContractions(t *testing
 			name     string
 			rows     int
 			explicit bool
-		}{{"legacy", maintainedLimbCount(&params, tc.level), false}, {"qprefix", qPrefixWidthOrPanic(tc.level), true}} {
+		}{{"default_qprefix", qPrefixWidthOrPanic(tc.level), false}, {"explicit_qprefix", qPrefixWidthOrPanic(tc.level), true}} {
 			t.Run(fmt.Sprintf("level_%d_steps_%d/%s", tc.level, tc.steps, authority.name), func(t *testing.T) {
 				values := rescaleOracleBoundaryValues(t, params, tc.level, authority.rows)
 				fastIn, standardIn := makeRescaleOracleInputs(params, tc.level, authority.rows, values)

@@ -368,7 +368,7 @@ func TestFastRescaleIgnoresDormantResidues(t *testing.T) {
 	}
 }
 
-func TestFastRescaleProductionIgnoresAllocatedQ3Backing(t *testing.T) {
+func TestFastRescaleProductionUsesAllocatedQ3Authority(t *testing.T) {
 	params := q012TestParameters(t)
 	fastEval := NewEvaluator(params)
 	standardEval := ckks.NewEvaluator(params, nil)
@@ -388,11 +388,13 @@ func TestFastRescaleProductionIgnoresAllocatedQ3Backing(t *testing.T) {
 	require.NoError(t, fastEval.Rescale(input, fastOut))
 	require.NoError(t, fastEval.Rescale(poisoned, poisonedOut))
 	require.NoError(t, standardEval.Rescale(input, standardOut))
-	require.Equal(t, 3, maintainedLimbCount(&params, input.Level()))
+	require.Equal(t, 4, qPrefixWidthOrPanic(input.Level()))
 	for component := range fastOut.Value {
 		for row := 0; row < 3; row++ {
 			require.Equal(t, standardOut.Value[component].Coeffs[row], fastOut.Value[component].Coeffs[row], "Standard component=%d q%d", component, row)
-			require.Equal(t, fastOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "production must ignore q3 component=%d q%d", component, row)
+		}
+		for row := 0; row < 3; row++ {
+			require.NotEqual(t, fastOut.Value[component].Coeffs[row], poisonedOut.Value[component].Coeffs[row], "authoritative q3 must affect the reconstructed lift, component=%d q%d", component, row)
 		}
 	}
 }

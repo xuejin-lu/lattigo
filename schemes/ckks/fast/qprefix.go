@@ -48,37 +48,8 @@ func QPrefixProduct(q []uint64, level int) (*big.Int, error) {
 	return product, nil
 }
 
-// QPrefixCapacityError identifies the first component whose proven absolute
-// coefficient bound does not fit the strict centered-capacity contract.
-// Bound and PrefixProduct are independent copies owned by the error.
-type QPrefixCapacityError struct {
-	Level         int
-	Component     int
-	Bound         *big.Int
-	PrefixProduct *big.Int
-}
-
-func (err *QPrefixCapacityError) Error() string {
-	if err == nil {
-		return "Q-prefix capacity exceeded"
-	}
-	return fmt.Sprintf("Q-prefix capacity exceeded at Level %d component %d: strict 2B < S_Q failed (2B=%s, S_Q=%s)",
-		err.Level, err.Component, doubledBoundString(err.Bound), bigIntString(err.PrefixProduct))
-}
-
-func doubledBoundString(bound *big.Int) string {
-	if bound == nil {
-		return "<nil>"
-	}
-	return new(big.Int).Lsh(new(big.Int).Set(bound), 1).String()
-}
-
-func bigIntString(value *big.Int) string {
-	if value == nil {
-		return "<nil>"
-	}
-	return value.String()
-}
+// QPrefixCapacityError aliases the error emitted by the shared Rescale core.
+type QPrefixCapacityError = fastcore.QPrefixCapacityError
 
 // QPrefixCapacitySatisfied reports whether a non-negative component bound is
 // strictly inside the centered uniqueness interval: 2*bound < prefixProduct.

@@ -163,24 +163,68 @@ func TestPublicFastZeroSecretAddSubCompactsAbovePrefixAndRejectsUnsafeConsumers(
 	}
 	require.Equal(t, addSubCoreCall{rows: fastcore.MaxQPrefixWidth, sub: true}, recorder.calls[1])
 
-	// Existing full-active-Q public consumers must reject this compact result
-	// before reading q4 or mutating their outputs.
-	mulOut := NewCiphertext(params, 1, level)
-	mulOutBefore := mulOut.CopyNew()
-	err = evaluator.MulRelin(sum, difference, mulOut)
-	require.ErrorContains(t, err, "q4")
-	require.Equal(t, mulOutBefore.Value, mulOut.Value)
-	require.Equal(t, mulOutBefore.MetaData, mulOut.MetaData)
+	// Public MulRelin consumes exactly q0..q3 and keeps logical Level 5;
+	// dormant q4/q5 stay absent rather than being materialized or read.
+	mulOut, err := evaluator.MulRelinNew(sum, difference)
+	require.NoError(t, err)
+	require.Equal(t, level, mulOut.Level())
+	require.Equal(t, 1, mulOut.Degree())
+	require.True(t, mulOut.Scale.Equal(sum.Scale.Mul(difference.Scale)))
+	for component := range mulOut.Value {
+		for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+			require.Len(t, mulOut.Value[component].Coeffs[row], params.N())
+		}
+		for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+			require.Nil(t, mulOut.Value[component].Coeffs[row], "dormant q%d must remain unmaterialized", row)
+		}
+	}
+	for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+		for _, coefficient := range mulOut.Value[1].Coeffs[row] {
+			require.Zero(t, coefficient)
+		}
+	}
 
-	rescaleOut := NewCiphertext(params, 1, level-1)
-	rescaleOutBefore := rescaleOut.CopyNew()
-	err = evaluator.Rescale(sum, rescaleOut)
-	require.ErrorContains(t, err, "q4")
-	require.Equal(t, rescaleOutBefore.Value, rescaleOut.Value)
-	require.Equal(t, rescaleOutBefore.MetaData, rescaleOut.MetaData)
+	// The same scratch-first core remains safe when output aliases either input.
+	mulAlias := sum.CopyNew()
+	require.NoError(t, evaluator.MulRelin(mulAlias, difference, mulAlias))
+	require.Equal(t, level, mulAlias.Level())
+	require.Equal(t, 1, mulAlias.Degree())
+	for row := fastcore.MaxQPrefixWidth; row <= level; row++ {
+		require.Nil(t, mulAlias.Value[0].Coeffs[row])
+		require.Nil(t, mulAlias.Value[1].Coeffs[row])
+	}
 
-	_, err = evaluator.RotateNew(sum, 1)
-	require.ErrorContains(t, err, "q4")
+	// Level 5 remains structural-only: q4/q5 stay dormant through the
+	// existing Rescale and Rotate consumers, with no numerical claim here.
+	rescaled := NewCiphertext(params, 1, level-1)
+	require.NoError(t, evaluator.Rescale(mulOut, rescaled))
+	require.Equal(t, level-1, rescaled.Level())
+	require.True(t, mulOut.Scale.Div(rlwe.NewScale(params.Q()[level])).Equal(rescaled.Scale))
+	for component := range rescaled.Value {
+		for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+			require.Len(t, rescaled.Value[component].Coeffs[row], params.N())
+		}
+		for row := fastcore.MaxQPrefixWidth; row <= rescaled.Level(); row++ {
+			require.Nil(t, rescaled.Value[component].Coeffs[row], "dormant q%d must remain unmaterialized", row)
+		}
+	}
+	for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+		for _, coefficient := range rescaled.Value[1].Coeffs[row] {
+			require.Zero(t, coefficient)
+		}
+	}
+
+	rotated, err := evaluator.RotateNew(rescaled, 1)
+	require.NoError(t, err)
+	require.Equal(t, level-1, rotated.Level())
+	for component := range rotated.Value {
+		for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+			require.Len(t, rotated.Value[component].Coeffs[row], params.N())
+		}
+		for row := fastcore.MaxQPrefixWidth; row <= rotated.Level(); row++ {
+			require.Nil(t, rotated.Value[component].Coeffs[row], "dormant q%d must remain unmaterialized", row)
+		}
+	}
 	require.Equal(t, 2, len(recorder.calls), "unsupported consumers must not fall back through the Add/Sub core")
 }
 

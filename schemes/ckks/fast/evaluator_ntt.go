@@ -236,87 +236,10 @@ func (eval *Evaluator) mulElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.P
 }
 
 func (eval *Evaluator) mulElementRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, relin bool, rows int) error {
-	if err := eval.validateBinaryPrefix(op0, op1, opOut); err != nil {
-		return err
+	if eval == nil || eval.mulCore == nil {
+		return errors.New("Fast Mul core is not initialized")
 	}
-	if op0.Degree() > 1 || op1.Degree() > 1 {
-		return errors.New("Fast Mul requires operands of degree at most one")
-	}
-	degree := op0.Degree() + op1.Degree()
-	if relin && degree == 2 {
-		degree = 1
-	}
-	level := utils.Min(utils.Min(op0.Level(), op1.Level()), opOut.Level())
-	ringQ := eval.Parameters.RingQ()
-	for d := range op0.Value {
-		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
-			return fmt.Errorf("op0 component %d: %w", d, err)
-		}
-	}
-	for d := range op1.Value {
-		if err := validatePrefixRows(ringQ, level, rows, op1.Value[d]); err != nil {
-			return fmt.Errorf("op1 component %d: %w", d, err)
-		}
-	}
-	for d := range eval.nttScratch {
-		if err := validatePrefixBacking(ringQ, rows, eval.nttScratch[d]); err != nil {
-			return fmt.Errorf("evaluator scratch %d: %w", d, err)
-		}
-	}
-	if op0.Degree() == 1 && op1.Degree() == 1 {
-		t0, t1, t2 := eval.nttScratch[0], eval.nttScratch[1], eval.nttScratch[2]
-		if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[0], t0, op0.IsMontgomery, false); err != nil {
-			return err
-		}
-		if op0.El() == op1 {
-			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op0.Value[1], t1, op0.IsMontgomery, false); err != nil {
-				return err
-			}
-			for limb := 0; limb < rows; limb++ {
-				ringQ.SubRings[limb].Add(t1.Coeffs[limb], t1.Coeffs[limb], t1.Coeffs[limb])
-			}
-		} else {
-			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[0], op1.Value[1], t1, op0.IsMontgomery, false); err != nil {
-				return err
-			}
-			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[0], t1, op0.IsMontgomery, true); err != nil {
-				return err
-			}
-		}
-		if !relin {
-			if err := pointMulPrefixRows(ringQ, level, rows, op0.Value[1], op1.Value[1], t2, op0.IsMontgomery, false); err != nil {
-				return err
-			}
-		}
-		Resize(opOut, degree, level, eval.Parameters.N())
-		copyPrefixRowsUnchecked(rows, t0, opOut.Value[0])
-		copyPrefixRowsUnchecked(rows, t1, opOut.Value[1])
-		if !relin {
-			copyPrefixRowsUnchecked(rows, t2, opOut.Value[2])
-		}
-	} else {
-		var ct []ring.Poly
-		var pt ring.Poly
-		if op0.Degree() == 0 {
-			pt, ct = op0.Value[0], op1.Value
-		} else {
-			pt, ct = op1.Value[0], op0.Value
-		}
-		for d := range ct {
-			if err := pointMulPrefixRows(ringQ, level, rows, pt, ct[d], eval.nttScratch[d], op0.IsMontgomery, false); err != nil {
-				return err
-			}
-		}
-		Resize(opOut, degree, level, eval.Parameters.N())
-		for d := range ct {
-			copyPrefixRowsUnchecked(rows, eval.nttScratch[d], opOut.Value[d])
-		}
-	}
-	*opOut.MetaData = *op0.MetaData
-	opOut.Scale = op0.Scale.Mul(op1.Scale)
-	opOut.LogDimensions.Rows = utils.Max(op0.LogDimensions.Rows, op1.LogDimensions.Rows)
-	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
-	return nil
+	return eval.mulCore.ApplyRows(eval.Parameters.RingQ(), op0, op1, opOut, rows, relin)
 }
 
 // Relinearize applies the current Stage-A zero-secret c2 truncation.

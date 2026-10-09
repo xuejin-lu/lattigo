@@ -27,7 +27,7 @@ func fastCKKSZeroSecretCiphertextLevel(ct *rlwe.Ciphertext) (int, error) {
 	return level, nil
 }
 
-func inspectFastCKKSZeroSecretRotateCiphertext(name string, ct *rlwe.Ciphertext, n, maxLevel int) (int, error) {
+func inspectFastCKKSZeroSecretRotateCiphertext(name string, ct *rlwe.Ciphertext, n, maxLevel, rows int, ringQ *ring.Ring) (int, error) {
 	level, err := fastCKKSZeroSecretCiphertextLevel(ct)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", name, err)
@@ -41,22 +41,14 @@ func inspectFastCKKSZeroSecretRotateCiphertext(name string, ct *rlwe.Ciphertext,
 	if ct.IsMontgomery && !ct.IsNTT {
 		return 0, fmt.Errorf("cannot Fast CKKS zero-secret Rotate: %s Montgomery representation requires NTT domain", name)
 	}
-	for component := range ct.Value {
-		poly := ct.Value[component]
-		if len(poly.Coeffs) != level+1 {
-			return 0, fmt.Errorf("cannot Fast CKKS zero-secret Rotate: %s component %d logical rows do not match level %d", name, component, level)
-		}
-		for row := 0; row <= level; row++ {
-			if len(poly.Coeffs[row]) != n {
-				return 0, fmt.Errorf("cannot Fast CKKS zero-secret Rotate: %s component %d q%d row is not fully materialized at N=%d", name, component, row, n)
-			}
-		}
+	if err := fastcore.ValidatePrefixRows(ringQ, level, rows, ct.Value...); err != nil {
+		return 0, fmt.Errorf("cannot Fast CKKS zero-secret Rotate: %s: %w", name, err)
 	}
 	return level, nil
 }
 
 // rotateFastCKKSZeroSecret applies the shared ring-level Fast permutation to
-// the complete active-Q ciphertext. It deliberately bypasses Galois-key lookup
+// the fixed authoritative Q-prefix ciphertext. It deliberately bypasses Galois-key lookup
 // only for the Fast zero-secret capability and rejects unsupported inputs
 // before the shared core can write any output row.
 func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint64, ctOut *rlwe.Ciphertext) error {
@@ -70,11 +62,22 @@ func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint
 	if eval.automorphismCore == nil {
 		return fmt.Errorf("cannot Fast CKKS zero-secret Rotate: shared automorphism core is unavailable")
 	}
-	level, err := inspectFastCKKSZeroSecretRotateCiphertext("input", ctIn, params.N(), params.MaxLevel())
+	level, err := fastCKKSZeroSecretCiphertextLevel(ctIn)
 	if err != nil {
 		return err
 	}
-	outLevel, err := inspectFastCKKSZeroSecretRotateCiphertext("output", ctOut, params.N(), params.MaxLevel())
+	if level > params.MaxLevel() {
+		return fmt.Errorf("cannot Fast CKKS zero-secret Rotate: input level %d exceeds configured maximum %d", level, params.MaxLevel())
+	}
+	rows, err := fastcore.QPrefixWidth(level)
+	if err != nil {
+		return fmt.Errorf("cannot Fast CKKS zero-secret Rotate: %w", err)
+	}
+	level, err = inspectFastCKKSZeroSecretRotateCiphertext("input", ctIn, params.N(), params.MaxLevel(), rows, params.RingQ())
+	if err != nil {
+		return err
+	}
+	outLevel, err := inspectFastCKKSZeroSecretRotateCiphertext("output", ctOut, params.N(), params.MaxLevel(), rows, params.RingQ())
 	if err != nil {
 		return err
 	}
@@ -84,7 +87,7 @@ func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint
 	if ctIn.IsNTT != ctOut.IsNTT || ctIn.IsMontgomery != ctOut.IsMontgomery {
 		return fmt.Errorf("cannot Fast CKKS zero-secret Rotate: input and output domains/representations must match")
 	}
-	for row := 0; row <= level; row++ {
+	for row := 0; row < rows; row++ {
 		modulus := params.RingQ().SubRings[row].Modulus
 		for coefficient, value := range ctIn.Value[0].Coeffs[row] {
 			if value >= modulus {
@@ -98,7 +101,6 @@ func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint
 		}
 	}
 
-	rows := level + 1
 	ringQ := params.RingQ().AtLevel(level)
 	if err := eval.automorphismCore.ApplyRows(ringQ, galEl, ctIn.IsNTT, rows,
 		fastcore.PolynomialPair{Input: ctIn.Value[0], Output: ctOut.Value[0]},
@@ -110,7 +112,7 @@ func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint
 		// The reused coefficient permutation represents -0 as q, matching the
 		// ring primitive. Canonicalize that equivalent residue in the public
 		// zero-secret contract so c1 remains exactly zero and rows stay in [0,q).
-		for row := 0; row <= level; row++ {
+		for row := 0; row < rows; row++ {
 			modulus := ringQ.SubRings[row].Modulus
 			for component := range ctOut.Value {
 				for coefficient, value := range ctOut.Value[component].Coeffs[row] {
@@ -121,6 +123,9 @@ func (eval Evaluator) rotateFastCKKSZeroSecret(ctIn *rlwe.Ciphertext, galEl uint
 			}
 		}
 	}
+	fastcore.ResizeCompactCiphertext(ctOut, 1, level, params.N())
 	*ctOut.MetaData = *ctIn.MetaData
+	ctOut.IsNTT = ctIn.IsNTT
+	ctOut.IsMontgomery = ctIn.IsMontgomery
 	return nil
 }

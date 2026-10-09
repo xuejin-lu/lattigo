@@ -20,6 +20,8 @@ type Evaluator struct {
 	pool             *rlwe.BufferPool
 	automorphismCore fastcore.AutomorphismCore
 	addSubCore       fastcore.AddSubCore
+	mulCore          fastcore.MulCore
+	rescaleCore      fastcore.RescaleCore
 }
 
 // NewEvaluator creates a new [Evaluator], that can be used to do homomorphic
@@ -35,6 +37,9 @@ func NewEvaluator(parameters Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
 	if eval.usesFastCKKSZeroSecretSimulation() {
 		eval.automorphismCore = fastcore.NewAutomorphismWorkspace(parameters.N(), parameters.MaxLevel()+1)
 		eval.addSubCore = fastcore.NewAddSubWorkspace()
+		eval.mulCore = fastcore.NewMulWorkspace(parameters.RingQ(), fastcore.MaxQPrefixWidth)
+		prefixWidth, _ := fastcore.QPrefixWidth(parameters.MaxLevel())
+		eval.rescaleCore = fastcore.NewRescaleWorkspace(parameters.RingQ(), prefixWidth)
 	}
 	return eval
 }
@@ -557,22 +562,29 @@ func (eval Evaluator) DropLevel(op0 *rlwe.Ciphertext, levels int) {
 //   - Either op0 or opOut MetaData are nil
 //   - The level of op0 is too low to enable a rescale
 func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
-
+	if op0 == nil || opOut == nil {
+		return fmt.Errorf("cannot Rescale: op0 and opOut cannot be nil")
+	}
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return fmt.Errorf("cannot Rescale: op0.MetaData or opOut.MetaData is nil")
-	}
-	if eval.usesFastCKKSZeroSecretSimulation() {
-		if err := eval.requireFastCKKSFullActiveRows("Rescale", op0); err != nil {
-			return err
-		}
-		if err := eval.requireFastCKKSFullActiveRows("Rescale output", opOut); err != nil {
-			return err
-		}
 	}
 
 	params := eval.GetParameters()
 
 	nbRescales := params.LevelsConsumedPerRescaling()
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op0.Level() < nbRescales {
+			return fmt.Errorf("cannot Rescale: input Ciphertext level is too low")
+		}
+		if eval.rescaleCore == nil {
+			return fmt.Errorf("cannot Rescale: shared Fast Rescale core is unavailable")
+		}
+		rows, err := fastcore.QPrefixWidth(op0.Level())
+		if err != nil {
+			return fmt.Errorf("cannot Rescale: %w", err)
+		}
+		return eval.rescaleCore.ApplyRows(params.RingQ(), op0, opOut, nbRescales, rows)
+	}
 
 	if op0.Level() <= nbRescales-1 {
 		return fmt.Errorf("cannot Rescale: input Ciphertext level is too low")
@@ -611,9 +623,30 @@ func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
 // - ct.Scale <= 0
 // - ct.Level() = 0
 func (eval Evaluator) RescaleTo(op0 *rlwe.Ciphertext, minScale rlwe.Scale, opOut *rlwe.Ciphertext) (err error) {
-
+	if op0 == nil || opOut == nil {
+		return fmt.Errorf("cannot RescaleTo: op0 and opOut cannot be nil")
+	}
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return fmt.Errorf("cannot RescaleTo: op0.MetaData or opOut.MetaData is nil")
+	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if minScale.Cmp(rlwe.NewScale(0)) != 1 {
+			return fmt.Errorf("cannot RescaleTo: minScale is <0")
+		}
+		if op0.Scale.Cmp(rlwe.NewScale(0)) != 1 {
+			return fmt.Errorf("cannot RescaleTo: ciphertext scale is <0")
+		}
+		if op0.Level() == 0 {
+			return fmt.Errorf("cannot RescaleTo: input Ciphertext already at level 0")
+		}
+		if eval.rescaleCore == nil {
+			return fmt.Errorf("cannot RescaleTo: shared Fast Rescale core is unavailable")
+		}
+		rows, err := fastcore.QPrefixWidth(op0.Level())
+		if err != nil {
+			return fmt.Errorf("cannot RescaleTo: %w", err)
+		}
+		return eval.rescaleCore.ApplyToRows(eval.GetParameters().RingQ(), op0, minScale, rows, opOut)
 	}
 
 	if minScale.Cmp(rlwe.NewScale(0)) != 1 {
@@ -806,11 +839,28 @@ func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 //
 // The procedure will return an error if either op0.Degree or op1.Degree > 1.
 // The procedure will return an error if the evaluator was not created with a relinearization key,
-// except for Fast CKKS zero-secret simulation inputs with fully materialized active Q rows and c1=0.
+// except for Fast CKKS zero-secret simulation ciphertext pairs with degree-one
+// inputs, authoritative Q-prefix backing, and c1=0.
 func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlwe.Ciphertext, err error) {
 	if eval.usesFastCKKSZeroSecretSimulation() {
-		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok && (op0 == nil || op1Ciphertext == nil) {
-			return nil, fmt.Errorf("cannot Fast CKKS zero-secret MulRelin: ciphertexts cannot be nil")
+		level0, err := validateFastCKKSZeroSecretMulBacking("op0", op0, eval.GetParameters())
+		if err != nil {
+			return nil, err
+		}
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			if op1Ciphertext == nil {
+				return nil, fmt.Errorf("cannot Fast CKKS zero-secret MulRelin: ciphertexts cannot be nil")
+			}
+			level1, err := validateFastCKKSZeroSecretMulShape("op1", op1Ciphertext, eval.GetParameters())
+			if err != nil {
+				return nil, err
+			}
+			if len(op0.Value) != 2 {
+				return nil, fmt.Errorf("cannot Fast CKKS zero-secret MulRelin: op0 must have exactly two components")
+			}
+			level := min(level0, level1)
+			opOut = fastcore.NewCompactCiphertext(*eval.GetParameters(), 1, level)
+			return opOut, eval.MulRelin(op0, op1Ciphertext, opOut)
 		}
 	}
 
@@ -836,16 +886,23 @@ func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut
 // The procedure will return an error if either op0.Degree or op1.Degree > 1.
 // The procedure will return an error if opOut.Degree != op0.Degree + op1.Degree.
 // The procedure will return an error if the evaluator was not created with a relinearization key,
-// except for Fast CKKS zero-secret simulation inputs with fully materialized active Q rows and c1=0.
+// except for Fast CKKS zero-secret simulation ciphertext pairs with degree-one
+// inputs, authoritative Q-prefix backing, and c1=0.
 func (eval Evaluator) MulRelin(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
 		// Fast CKKS zero-secret simulation accepts only the explicitly supported
-		// ciphertext/ciphertext case. Reject unsupported ciphertext pairs here so
-		// they cannot fall through to native full-Q KeySwitch/GadgetProduct.
+		// ciphertext/ciphertext compact-Q case. Other operand forms are retained
+		// only for fully materialized inputs, so they cannot read dormant rows.
 		if eval.usesFastCKKSZeroSecretSimulation() {
 			if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
 				return eval.mulRelinFastCKKSZeroSecret(op0, op1Ciphertext, opOut)
+			}
+			if err := eval.requireFastCKKSFullActiveRows("MulRelin", op0); err != nil {
+				return err
+			}
+			if err := eval.requireFastCKKSFullActiveElementRows("MulRelin operand", op1.El()); err != nil {
+				return err
 			}
 		}
 
@@ -1305,7 +1362,7 @@ func (eval Evaluator) RotateNew(op0 *rlwe.Ciphertext, k int) (opOut *rlwe.Cipher
 		if level > eval.GetParameters().MaxLevel() {
 			return nil, fmt.Errorf("cannot Fast CKKS zero-secret RotateNew: level %d exceeds configured maximum %d", level, eval.GetParameters().MaxLevel())
 		}
-		opOut = NewCiphertext(*eval.GetParameters(), 1, level)
+		opOut = fastcore.NewCompactCiphertext(*eval.GetParameters(), 1, level)
 		opOut.IsNTT = op0.IsNTT
 		opOut.IsMontgomery = op0.IsMontgomery
 		return opOut, eval.Rotate(op0, k, opOut)
