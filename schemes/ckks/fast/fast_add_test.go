@@ -6,7 +6,21 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
+
+type recordingFastAddSubCore struct {
+	delegate fastcore.AddSubCore
+	rows     int
+	sub      bool
+	calls    int
+}
+
+func (recorder *recordingFastAddSubCore) ApplyRows(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, rows int, sub bool) error {
+	recorder.rows, recorder.sub = rows, sub
+	recorder.calls++
+	return recorder.delegate.ApplyRows(ringQ, op0, op1, opOut, rows, sub)
+}
 
 func newFastTestCiphertext(t *testing.T, r *ring.Ring, degree, level int) *rlwe.Ciphertext {
 	t.Helper()
@@ -76,6 +90,26 @@ func TestFastAddSubQ01(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestExplicitFastAddQPrefixRowsUsesSharedCore(t *testing.T) {
+	params := testFastCKKSParameters(t)
+	eval := NewEvaluator(params)
+	recorder := &recordingFastAddSubCore{delegate: fastcore.NewAddSubWorkspace()}
+	eval.addSubCore = recorder
+
+	const level, rows = 3, 3
+	a, b, out := NewCiphertext(params, 1, level), NewCiphertext(params, 1, level), NewCiphertext(params, 1, level)
+	fillFastCiphertext(a, params.RingQ(), 13)
+	fillFastCiphertext(b, params.RingQ(), 29)
+	fillFastCiphertext(out, params.RingQ(), 101)
+	untouchedQ3 := append([]uint64(nil), out.Value[0].Coeffs[3]...)
+
+	require.NoError(t, eval.AddQPrefixRows(a, b, out, rows))
+	require.Equal(t, 1, recorder.calls)
+	require.Equal(t, rows, recorder.rows)
+	require.False(t, recorder.sub)
+	require.Equal(t, untouchedQ3, out.Value[0].Coeffs[3], "row above the explicit request must remain untouched")
 }
 
 func TestFastAddSubIgnoresDormantInputs(t *testing.T) {

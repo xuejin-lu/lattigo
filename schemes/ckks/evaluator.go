@@ -19,6 +19,7 @@ type Evaluator struct {
 	*rlwe.Evaluator
 	pool             *rlwe.BufferPool
 	automorphismCore fastcore.AutomorphismCore
+	addSubCore       fastcore.AddSubCore
 }
 
 // NewEvaluator creates a new [Evaluator], that can be used to do homomorphic
@@ -33,6 +34,7 @@ func NewEvaluator(parameters Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
 	}
 	if eval.usesFastCKKSZeroSecretSimulation() {
 		eval.automorphismCore = fastcore.NewAutomorphismWorkspace(parameters.N(), parameters.MaxLevel()+1)
+		eval.addSubCore = fastcore.NewAddSubWorkspace()
 	}
 	return eval
 }
@@ -55,6 +57,32 @@ func (eval Evaluator) GetRLWEParameters() *rlwe.Parameters {
 //
 // Passing an invalid type will return an error.
 func (eval Evaluator) Add(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
+				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, false)
+			}
+			if err := eval.requireFastCKKSFullActiveRows("Add", op1Ciphertext); err != nil {
+				return err
+			}
+			if err := eval.requireFastCKKSFullActiveRows("Add output", opOut); err != nil {
+				return err
+			}
+		}
+		if err := eval.requireFastCKKSFullActiveRows("Add", op0); err != nil {
+			return err
+		}
+		if element, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+			if err := eval.requireFastCKKSFullActiveElementRows("Add operand", element.El()); err != nil {
+				return err
+			}
+		}
+		if _, ok := op1.(*rlwe.Ciphertext); !ok {
+			if err := eval.requireFastCKKSFullActiveRows("Add output", opOut); err != nil {
+				return err
+			}
+		}
+	}
 
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
@@ -128,6 +156,17 @@ func (eval Evaluator) Add(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 //
 // Passing an invalid type will return an error.
 func (eval Evaluator) AddNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlwe.Ciphertext, err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			degree, level := max(op0.Degree(), op1Ciphertext.Degree()), min(op0.Level(), op1Ciphertext.Level())
+			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
+				opOut = fastcore.NewCompactCiphertext(eval.GetParameters(), degree, level)
+			} else {
+				opOut = NewCiphertext(*eval.GetParameters(), degree, level)
+			}
+			return opOut, eval.Add(op0, op1, opOut)
+		}
+	}
 	opOut = NewCiphertext(*eval.GetParameters(), op0.Degree(), op0.Level())
 	return opOut, eval.Add(op0, op1, opOut)
 }
@@ -140,6 +179,32 @@ func (eval Evaluator) AddNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlw
 //
 // Passing an invalid type will return an error.
 func (eval Evaluator) Sub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
+				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, true)
+			}
+			if err := eval.requireFastCKKSFullActiveRows("Sub", op1Ciphertext); err != nil {
+				return err
+			}
+			if err := eval.requireFastCKKSFullActiveRows("Sub output", opOut); err != nil {
+				return err
+			}
+		}
+		if err := eval.requireFastCKKSFullActiveRows("Sub", op0); err != nil {
+			return err
+		}
+		if element, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+			if err := eval.requireFastCKKSFullActiveElementRows("Sub operand", element.El()); err != nil {
+				return err
+			}
+		}
+		if _, ok := op1.(*rlwe.Ciphertext); !ok {
+			if err := eval.requireFastCKKSFullActiveRows("Sub output", opOut); err != nil {
+				return err
+			}
+		}
+	}
 
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
@@ -220,6 +285,17 @@ func (eval Evaluator) Sub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 //
 // Passing an invalid type will return an error.
 func (eval Evaluator) SubNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlwe.Ciphertext, err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			degree, level := max(op0.Degree(), op1Ciphertext.Degree()), min(op0.Level(), op1Ciphertext.Level())
+			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
+				opOut = fastcore.NewCompactCiphertext(eval.GetParameters(), degree, level)
+			} else {
+				opOut = NewCiphertext(*eval.GetParameters(), degree, level)
+			}
+			return opOut, eval.Sub(op0, op1, opOut)
+		}
+	}
 	opOut = NewCiphertext(*eval.GetParameters(), op0.Degree(), op0.Level())
 	return opOut, eval.Sub(op0, op1, opOut)
 }
@@ -484,6 +560,14 @@ func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
 
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return fmt.Errorf("cannot Rescale: op0.MetaData or opOut.MetaData is nil")
+	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if err := eval.requireFastCKKSFullActiveRows("Rescale", op0); err != nil {
+			return err
+		}
+		if err := eval.requireFastCKKSFullActiveRows("Rescale output", opOut); err != nil {
+			return err
+		}
 	}
 
 	params := eval.GetParameters()

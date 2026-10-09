@@ -22,6 +22,7 @@ type Evaluator struct {
 	nttScratch              [3]ring.Poly
 	linearTransformScratch  fastLinearTransformScratch
 	automorphismCore        fastcore.AutomorphismCore
+	addSubCore              fastcore.AddSubCore
 	lastBSGSBabyRotations   int
 	qPrefixCapacityObserver func(QPrefixCapacitySnapshot) error
 }
@@ -36,6 +37,7 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
 		linearTransformScratch: newFastLinearTransformScratch(params.N(), prefixWidth),
 		automorphismCore:       fastcore.NewAutomorphismWorkspace(params.N(), prefixWidth),
+		addSubCore:             fastcore.NewAddSubWorkspace(),
 	}
 	for i := range eval.nttScratch {
 		eval.nttScratch[i] = ring.NewPoly(params.N(), prefixWidth-1)

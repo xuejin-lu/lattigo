@@ -2,10 +2,10 @@ package fast
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
@@ -48,96 +48,7 @@ func fastAddSub(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool) er
 }
 
 func fastAddSubRows(ringQ *ring.Ring, op0, op1, opOut *rlwe.Ciphertext, sub bool, rows int) error {
-	if ringQ == nil {
-		return errors.New("ringQ cannot be nil")
-	}
-	if op0 == nil || op1 == nil || opOut == nil {
-		return errors.New("op0, op1 and opOut cannot be nil")
-	}
-	if op0.MetaData == nil || op1.MetaData == nil || opOut.MetaData == nil {
-		return errors.New("op0, op1 and opOut metadata cannot be nil")
-	}
-	if ringQ.Level() < 1 || op0.Level() < 1 || op1.Level() < 1 || opOut.Level() < 1 {
-		return errors.New("FastAdd/FastSub requires q0 and q1")
-	}
-	if !op0.Scale.Equal(op1.Scale) {
-		return errors.New("FastAdd/FastSub requires equal operand scales")
-	}
-	if op0.IsNTT != op1.IsNTT {
-		return errors.New("FastAdd/FastSub requires equal IsNTT domains")
-	}
-	if op0.IsMontgomery != op1.IsMontgomery {
-		return errors.New("FastAdd/FastSub requires equal Montgomery representations")
-	}
-
-	level := utils.Min(op0.Level(), op1.Level())
-	level = utils.Min(level, opOut.Level())
-	if level < 1 {
-		return errors.New("FastAdd/FastSub output level must contain q0 and q1")
-	}
-	maxDegree := utils.Max(op0.Degree(), op1.Degree())
-	minDegree := utils.Min(op0.Degree(), op1.Degree())
-
-	validate := func(name string, ct *rlwe.Ciphertext, degree int) error {
-		if ct.N() != opOut.N() || ct.N() != ringQ.N() {
-			return fmt.Errorf("%s dimension does not match output", name)
-		}
-		for i := 0; i <= degree; i++ {
-			if err := validatePrefixRows(ringQ, level, rows, ct.Value[i]); err != nil {
-				return fmt.Errorf("%s component %d: %w", name, i, err)
-			}
-		}
-		return nil
-	}
-	if err := validate("op0", op0, op0.Degree()); err != nil {
-		return err
-	}
-	if err := validate("op1", op1, op1.Degree()); err != nil {
-		return err
-	}
-	if opOut.N() == 0 || opOut.N() != ringQ.N() || len(opOut.Value) < maxDegree+1 {
-		return errors.New("output ciphertext has invalid storage")
-	}
-	if err := validate("opOut", opOut, maxDegree); err != nil {
-		return err
-	}
-
-	// Resize only changes level/degree metadata and allocation. It does not
-	// cause dormant limbs to be read; the arithmetic below explicitly touches
-	// q0 and q1 only.
-	Resize(opOut, maxDegree, level, ringQ.N())
-	*opOut.MetaData = *op0.MetaData
-	opOut.Scale = op0.Scale
-	opOut.IsNTT = op0.IsNTT
-	opOut.IsMontgomery = op0.IsMontgomery
-	opOut.IsBatched = op0.IsBatched
-	opOut.LogDimensions.Rows = utils.Max(op0.LogDimensions.Rows, op1.LogDimensions.Rows)
-	opOut.LogDimensions.Cols = utils.Max(op0.LogDimensions.Cols, op1.LogDimensions.Cols)
-
-	for i := 0; i <= minDegree; i++ {
-		if err := addSubPrefixRows(ringQ, level, rows, op0.Value[i], op1.Value[i], opOut.Value[i], sub); err != nil {
-			return err
-		}
-	}
-
-	// Preserve standard degree semantics without touching dormant limbs.
-	if op0.Degree() > minDegree && opOut != op0 {
-		for i := minDegree + 1; i <= op0.Degree(); i++ {
-			copyPrefixRowsUnchecked(rows, op0.Value[i], opOut.Value[i])
-		}
-	} else if op1.Degree() > minDegree && opOut != op1 {
-		for i := minDegree + 1; i <= op1.Degree(); i++ {
-			if sub {
-				if err := negatePrefixRows(ringQ, level, rows, op1.Value[i], opOut.Value[i]); err != nil {
-					return err
-				}
-			} else {
-				copyPrefixRowsUnchecked(rows, op1.Value[i], opOut.Value[i])
-			}
-		}
-	}
-
-	return nil
+	return fastcore.NewAddSubWorkspace().ApplyRows(ringQ, op0, op1, opOut, rows, sub)
 }
 
 // AddQPrefixRows adds two ciphertexts using exactly rows explicit Q-prefix
@@ -147,7 +58,10 @@ func (eval *Evaluator) AddQPrefixRows(op0, op1, opOut *rlwe.Ciphertext, rows int
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
-	return FastAddQPrefixRows(eval.Parameters.RingQ(), op0, op1, opOut, rows)
+	if eval.addSubCore == nil {
+		return errors.New("Fast Add/Sub core is not initialized")
+	}
+	return eval.addSubCore.ApplyRows(eval.Parameters.RingQ(), op0, op1, opOut, rows, false)
 }
 
 // SubQPrefixRows subtracts two ciphertexts using exactly rows explicit
@@ -157,7 +71,10 @@ func (eval *Evaluator) SubQPrefixRows(op0, op1, opOut *rlwe.Ciphertext, rows int
 	if eval == nil {
 		return errors.New("Fast evaluator cannot be nil")
 	}
-	return FastSubQPrefixRows(eval.Parameters.RingQ(), op0, op1, opOut, rows)
+	if eval.addSubCore == nil {
+		return errors.New("Fast Add/Sub core is not initialized")
+	}
+	return eval.addSubCore.ApplyRows(eval.Parameters.RingQ(), op0, op1, opOut, rows, true)
 }
 
 func copyQ01(src, dst ring.Poly) {

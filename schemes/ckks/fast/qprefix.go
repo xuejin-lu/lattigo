@@ -4,23 +4,19 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 // MaxQPrefixWidth is the initial Q-prefix v2 engineering cap. It is not a
 // claim that four residues are sufficient for every possible CKKS operation.
-const MaxQPrefixWidth = 4
+const MaxQPrefixWidth = fastcore.MaxQPrefixWidth
 
 // QPrefixWidth returns the number of logical-Q residues maintained at level.
 // The logical Level remains authoritative; this policy only caps the active
 // prefix at q0..q3.
 func QPrefixWidth(level int) (int, error) {
-	if level < 0 {
-		return 0, fmt.Errorf("Q-prefix level must be non-negative: %d", level)
-	}
-	if level >= MaxQPrefixWidth-1 {
-		return MaxQPrefixWidth, nil
-	}
-	return level + 1, nil
+	return fastcore.QPrefixWidth(level)
 }
 
 func qPrefixWidthOrPanic(level int) int {
