@@ -7,6 +7,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/ring/ringqp"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 	"github.com/tuneinsight/lattigo/v6/utils"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
@@ -16,7 +17,8 @@ import (
 type Evaluator struct {
 	*Encoder
 	*rlwe.Evaluator
-	pool *rlwe.BufferPool
+	pool             *rlwe.BufferPool
+	automorphismCore fastcore.AutomorphismCore
 }
 
 // NewEvaluator creates a new [Evaluator], that can be used to do homomorphic
@@ -24,11 +26,15 @@ type Evaluator struct {
 // and Ciphertexts that will be used for intermediate values.
 func NewEvaluator(parameters Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
 
-	return &Evaluator{
+	eval := &Evaluator{
 		Encoder:   NewEncoder(parameters),
 		Evaluator: rlwe.NewEvaluator(parameters.Parameters, evk),
 		pool:      rlwe.NewPool(parameters.RingQP()),
 	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		eval.automorphismCore = fastcore.NewAutomorphismWorkspace(parameters.N(), parameters.MaxLevel()+1)
+	}
+	return eval
 }
 
 // GetParameters returns a pointer to the underlying [ckks.Parameters].
@@ -1204,6 +1210,22 @@ func (eval Evaluator) ApplyEvaluationKeyNew(op0 *rlwe.Ciphertext, evk *rlwe.Eval
 // RotateNew rotates the columns of op0 by k positions to the left, and returns the result in a newly created element.
 // The method will return an error if the evaluator hasn't been given an evaluation key set with the appropriate GaloisKey.
 func (eval Evaluator) RotateNew(op0 *rlwe.Ciphertext, k int) (opOut *rlwe.Ciphertext, err error) {
+	if op0 == nil {
+		return nil, fmt.Errorf("cannot RotateNew: input ciphertext cannot be nil")
+	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		level, levelErr := fastCKKSZeroSecretCiphertextLevel(op0)
+		if levelErr != nil {
+			return nil, levelErr
+		}
+		if level > eval.GetParameters().MaxLevel() {
+			return nil, fmt.Errorf("cannot Fast CKKS zero-secret RotateNew: level %d exceeds configured maximum %d", level, eval.GetParameters().MaxLevel())
+		}
+		opOut = NewCiphertext(*eval.GetParameters(), 1, level)
+		opOut.IsNTT = op0.IsNTT
+		opOut.IsMontgomery = op0.IsMontgomery
+		return opOut, eval.Rotate(op0, k, opOut)
+	}
 	opOut = NewCiphertext(*eval.GetParameters(), op0.Degree(), op0.Level())
 	return opOut, eval.Rotate(op0, k, opOut)
 }
@@ -1211,6 +1233,12 @@ func (eval Evaluator) RotateNew(op0 *rlwe.Ciphertext, k int) (opOut *rlwe.Cipher
 // Rotate rotates the columns of op0 by k positions to the left and returns the result in opOut.
 // The method will return an error if the evaluator hasn't been given an evaluation key set with the appropriate GaloisKey.
 func (eval Evaluator) Rotate(op0 *rlwe.Ciphertext, k int, opOut *rlwe.Ciphertext) (err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if err = eval.rotateFastCKKSZeroSecret(op0, eval.GetParameters().GaloisElement(k), opOut); err != nil {
+			return fmt.Errorf("cannot Rotate: %w", err)
+		}
+		return nil
+	}
 	if err = eval.Automorphism(op0, eval.GetParameters().GaloisElement(k), opOut); err != nil {
 		return fmt.Errorf("cannot Rotate: %w", err)
 	}

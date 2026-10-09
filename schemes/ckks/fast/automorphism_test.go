@@ -7,6 +7,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 func fastAutomorphismTestParameters(t *testing.T, ringType ring.Type) ckks.Parameters {
@@ -172,4 +173,41 @@ func TestFastRotateNew(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want.Value[0].Coeffs[:2], got.Value[0].Coeffs[:2])
 	require.Equal(t, want.Value[1].Coeffs[:2], got.Value[1].Coeffs[:2])
+}
+
+type recordingAutomorphismCore struct {
+	fastcore.AutomorphismCore
+	rows      []int
+	pairCount []int
+}
+
+func (core *recordingAutomorphismCore) ApplyRows(ringQ *ring.Ring, galEl uint64, isNTT bool, rows int, pairs ...fastcore.PolynomialPair) error {
+	core.rows = append(core.rows, rows)
+	core.pairCount = append(core.pairCount, len(pairs))
+	return core.AutomorphismCore.ApplyRows(ringQ, galEl, isNTT, rows, pairs...)
+}
+
+func TestFastAutomorphismWrappersUseSharedCoreAndKeepRowPolicies(t *testing.T) {
+	params := fastAutomorphismTestParameters(t, ring.Standard)
+	eval := NewEvaluator(params)
+	recorder := &recordingAutomorphismCore{AutomorphismCore: eval.automorphismCore}
+	eval.automorphismCore = recorder
+
+	level := params.MaxLevel()
+	in, out := ckks.NewCiphertext(params, 1, level), ckks.NewCiphertext(params, 1, level)
+	fillFastCKKSCiphertext(in, params, nil, 107)
+	fillFastCKKSCiphertext(out, params, nil, 211)
+	untouched := cloneDormant(out, 2)
+	galEl := params.GaloisElementForRotation(1)
+
+	require.NoError(t, eval.Automorphism(in, out, galEl))
+	require.Equal(t, []int{2}, recorder.rows, "legacy producer should keep its q0/q1 row policy")
+	require.Equal(t, []int{2}, recorder.pairCount, "both ciphertext components must be sent through the same core call")
+	require.Equal(t, untouched, cloneDormant(out, 2))
+
+	q3BeforeExplicit := cloneDormant(out, 3)
+	require.NoError(t, eval.AutomorphismQPrefixRows(in, out, galEl, 3))
+	require.Equal(t, []int{2, 3}, recorder.rows, "explicit Q-prefix API should process only its requested rows")
+	require.Equal(t, []int{2, 2}, recorder.pairCount)
+	require.Equal(t, q3BeforeExplicit, cloneDormant(out, 3), "explicit three-row call must leave q3 untouched")
 }

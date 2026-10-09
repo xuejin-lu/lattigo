@@ -3,9 +3,9 @@ package fast
 import (
 	"errors"
 	"fmt"
-	"math/bits"
 
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 // FastAutomorphism applies a ring automorphism using the legacy authoritative
@@ -44,42 +44,8 @@ func FastAutomorphismRows(ringQ *ring.Ring, polIn, polOut ring.Poly, galEl uint6
 	if err := validatePrefixRows(ringQ, level, rows, polIn, polOut); err != nil {
 		return err
 	}
-	if isNTT {
-		index, err := ring.AutomorphismNTTIndex(ringQ.N(), ringQ.NthRoot(), galEl)
-		if err != nil {
-			return fmt.Errorf("compute NTT automorphism index: %w", err)
-		}
-		for limb := 0; limb < rows; limb++ {
-			// The temporary is intentional: ring automorphism primitives are
-			// non-in-place, while Fast explicitly permits input/output aliasing.
-			tmp := make([]uint64, ringQ.N())
-			for j, src := range index {
-				tmp[j] = polIn.Coeffs[limb][src]
-			}
-			copy(polOut.Coeffs[limb], tmp)
-		}
-		return nil
-	}
-
-	mask := uint64(ringQ.N() - 1)
-	logN := uint(bits.Len64(mask))
-	for limb := 0; limb < rows; limb++ {
-		modulus := ringQ.SubRings[limb].Modulus
-		tmp := make([]uint64, ringQ.N())
-		for i, value := range polIn.Coeffs[limb] {
-			raw := uint64(i) * galEl
-			index := raw & mask
-			if (raw>>logN)&1 == 0 {
-				tmp[index] = value
-			} else {
-				// Keep the same representation as ring.Ring.Automorphism,
-				// including modulus for an input zero.
-				tmp[index] = modulus - value
-			}
-		}
-		copy(polOut.Coeffs[limb], tmp)
-	}
-	return nil
+	workspace := fastcore.NewAutomorphismWorkspace(ringQ.N(), rows)
+	return workspace.ApplyRows(ringQ, galEl, isNTT, rows, fastcore.PolynomialPair{Input: polIn, Output: polOut})
 }
 
 // fastAutomorphism is the evaluator-owned legacy-width hot path. Its index
@@ -110,33 +76,9 @@ func (eval *Evaluator) fastAutomorphismRows(ringQ *ring.Ring, polIn, polOut ring
 	if err := validatePrefixRows(ringQ, level, rows, polIn, polOut); err != nil {
 		return err
 	}
-	if len(eval.automorphismScratch) < rows {
-		return fmt.Errorf("automorphism scratch has %d rows, requested %d", len(eval.automorphismScratch), rows)
+	if eval.automorphismCore == nil {
+		return errors.New("Fast automorphism core is not initialized")
 	}
-	for row := 0; row < rows; row++ {
-		if len(eval.automorphismScratch[row]) != ringQ.N() {
-			return fmt.Errorf("automorphism scratch q%d has invalid dimension", row)
-		}
-	}
-	if !isNTT {
-		return FastAutomorphismRows(ringQ, polIn, polOut, galEl, false, rows)
-	}
-
-	index, ok := eval.automorphismIndexCache[galEl]
-	if !ok {
-		var err error
-		index, err = ring.AutomorphismNTTIndex(ringQ.N(), ringQ.NthRoot(), galEl)
-		if err != nil {
-			return fmt.Errorf("compute NTT automorphism index: %w", err)
-		}
-		eval.automorphismIndexCache[galEl] = index
-	}
-	for limb := 0; limb < rows; limb++ {
-		tmp := eval.automorphismScratch[limb]
-		for j, src := range index {
-			tmp[j] = polIn.Coeffs[limb][src]
-		}
-		copy(polOut.Coeffs[limb], tmp)
-	}
-	return nil
+	return eval.automorphismCore.ApplyRows(ringQ, galEl, isNTT, rows,
+		fastcore.PolynomialPair{Input: polIn, Output: polOut})
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 func traceTestParameters(t *testing.T) ckks.Parameters {
@@ -210,7 +211,9 @@ func TestFastTraceNontrivialAndLogNZero(t *testing.T) {
 		require.NoError(t, eval.Trace(in, logN, out))
 		requireTraceMatches(t, want, out)
 	}
-	require.Len(t, eval.automorphismIndexCache, 4)
+	workspace, ok := eval.automorphismCore.(*fastcore.AutomorphismWorkspace)
+	require.True(t, ok)
+	require.Equal(t, 4, workspace.CachedGaloisElementCount())
 }
 
 func TestFastTraceMontgomeryAndPoisonedResidues(t *testing.T) {

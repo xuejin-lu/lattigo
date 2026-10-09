@@ -8,6 +8,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 // Evaluator is an explicit Fast CKKS execution boundary. It intentionally
@@ -20,8 +21,7 @@ type Evaluator struct {
 	rescaleScratch          fastRescaleScratch
 	nttScratch              [3]ring.Poly
 	linearTransformScratch  fastLinearTransformScratch
-	automorphismIndexCache  map[uint64][]uint64
-	automorphismScratch     [][]uint64
+	automorphismCore        fastcore.AutomorphismCore
 	lastBSGSBabyRotations   int
 	qPrefixCapacityObserver func(QPrefixCapacitySnapshot) error
 }
@@ -35,14 +35,10 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 		Parameters:             params,
 		rescaleScratch:         newFastRescaleScratch(params.RingQ()),
 		linearTransformScratch: newFastLinearTransformScratch(params.N(), prefixWidth),
-		automorphismIndexCache: make(map[uint64][]uint64),
-		automorphismScratch:    make([][]uint64, prefixWidth),
+		automorphismCore:       fastcore.NewAutomorphismWorkspace(params.N(), prefixWidth),
 	}
 	for i := range eval.nttScratch {
 		eval.nttScratch[i] = ring.NewPoly(params.N(), prefixWidth-1)
-	}
-	for i := range eval.automorphismScratch {
-		eval.automorphismScratch[i] = make([]uint64, params.N())
 	}
 	return eval
 }
@@ -274,11 +270,20 @@ func (eval *Evaluator) Automorphism(ctIn, ctOut *rlwe.Ciphertext, galEl uint64) 
 	}
 
 	ringQ := eval.Parameters.RingQ().AtLevel(ctIn.Level())
-	if err := eval.fastAutomorphism(ringQ, ctIn.Value[0], ctOut.Value[0], galEl, ctIn.IsNTT); err != nil {
-		return fmt.Errorf("FastAutomorphism(c0): %w", err)
+	rows := maintainedLimbCountForRingAtLevel(ringQ, ctIn.Level())
+	if err := validatePrefixRows(ringQ, ctIn.Level(), rows,
+		ctIn.Value[0], ctOut.Value[0], ctIn.Value[1], ctOut.Value[1],
+	); err != nil {
+		return fmt.Errorf("Fast automorphism rows: %w", err)
 	}
-	if err := eval.fastAutomorphism(ringQ, ctIn.Value[1], ctOut.Value[1], galEl, ctIn.IsNTT); err != nil {
-		return fmt.Errorf("FastAutomorphism(c1): %w", err)
+	if eval.automorphismCore == nil {
+		return errors.New("Fast automorphism core is not initialized")
+	}
+	if err := eval.automorphismCore.ApplyRows(ringQ, galEl, ctIn.IsNTT, rows,
+		fastcore.PolynomialPair{Input: ctIn.Value[0], Output: ctOut.Value[0]},
+		fastcore.PolynomialPair{Input: ctIn.Value[1], Output: ctOut.Value[1]},
+	); err != nil {
+		return fmt.Errorf("FastAutomorphism: %w", err)
 	}
 	*ctOut.MetaData = *ctIn.MetaData
 	return nil
@@ -311,10 +316,14 @@ func (eval *Evaluator) AutomorphismQPrefixRows(ctIn, ctOut *rlwe.Ciphertext, gal
 			}
 		}
 	}
-	for d := 0; d <= 1; d++ {
-		if err := eval.fastAutomorphismRows(ringQ, ctIn.Value[d], ctOut.Value[d], galEl, ctIn.IsNTT, rows); err != nil {
-			return fmt.Errorf("Fast Q-prefix automorphism component %d: %w", d, err)
-		}
+	if eval.automorphismCore == nil {
+		return errors.New("Fast automorphism core is not initialized")
+	}
+	if err := eval.automorphismCore.ApplyRows(ringQ, galEl, ctIn.IsNTT, rows,
+		fastcore.PolynomialPair{Input: ctIn.Value[0], Output: ctOut.Value[0]},
+		fastcore.PolynomialPair{Input: ctIn.Value[1], Output: ctOut.Value[1]},
+	); err != nil {
+		return fmt.Errorf("Fast Q-prefix automorphism: %w", err)
 	}
 	*ctOut.MetaData = *ctIn.MetaData
 	return nil

@@ -7,6 +7,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 )
 
 func TestFastCompactCiphertextStorage(t *testing.T) {
@@ -180,10 +181,9 @@ func TestFastEvaluatorScratchUsesQPrefixWidth(t *testing.T) {
 	} {
 		require.Len(t, poly, width)
 	}
-	require.Len(t, eval.automorphismScratch, width)
-	for _, scratch := range eval.automorphismScratch {
-		require.Len(t, scratch, params.N())
-	}
+	workspace, ok := eval.automorphismCore.(*fastcore.AutomorphismWorkspace)
+	require.True(t, ok)
+	require.Equal(t, width, workspace.ScratchRows())
 	require.Len(t, eval.rescaleScratch.coeff.Coeffs, width)
 	require.Len(t, eval.rescaleScratch.result.Coeffs, width)
 }
