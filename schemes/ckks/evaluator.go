@@ -715,7 +715,8 @@ func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 // Passing an invalid type will return an error.
 //
 // The procedure will return an error if either op0.Degree or op1.Degree > 1.
-// The procedure will return an error if the evaluator was not created with an relinearization key.
+// The procedure will return an error if the evaluator was not created with a relinearization key,
+// except for Fast CKKS zero-secret simulation inputs with fully materialized active Q rows and c1=0.
 func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlwe.Ciphertext, err error) {
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
@@ -738,10 +739,27 @@ func (eval Evaluator) MulRelinNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut
 //
 // The procedure will return an error if either op0.Degree or op1.Degree > 1.
 // The procedure will return an error if opOut.Degree != op0.Degree + op1.Degree.
-// The procedure will return an error if the evaluator was not created with an relinearization key.
+// The procedure will return an error if the evaluator was not created with a relinearization key,
+// except for Fast CKKS zero-secret simulation inputs with fully materialized active Q rows and c1=0.
 func (eval Evaluator) MulRelin(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
+		// Fast CKKS zero-secret simulation has a narrowly valid keyless path for
+		// fresh degree-one ciphertexts. Keep the ordinary Standard path unchanged
+		// and do not route other operand types through this capability.
+		if eval.usesFastCKKSZeroSecretSimulation() {
+			if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok && (op0 == nil || op1Ciphertext == nil || (op0.Degree() == 1 && op1Ciphertext.Degree() == 1)) {
+				handled, err := eval.mulRelinFastCKKSZeroSecret(op0, op1Ciphertext, opOut)
+				if handled {
+					return err
+				}
+				// Nonzero-c1 Fast ciphertexts retain the existing native path. Check
+				// key availability before it writes any part of the destination.
+				if _, err := eval.CheckAndGetRelinearizationKey(); err != nil {
+					return fmt.Errorf("cannot Fast CKKS MulRelin with nonzero c1: %w", err)
+				}
+			}
+		}
 
 		_, level, err := eval.InitOutputBinaryOp(op0.El(), op1.El(), 2, opOut.El())
 		if err != nil {
