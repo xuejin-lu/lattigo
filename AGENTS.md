@@ -54,7 +54,7 @@ The separate `fast-ckks` branch remains a historical/private-F comparison branch
 - Never call Standard full-RNS code on stale or unmaintained Fast residue storage as a hidden fallback.
 - The current zero-secret implementation is a mode, not a permanent scientific invariant. Preserve extension points for sampled secrets and future noise experiments.
 - Preserve public APIs and CKKS parameter objects where practical; preserve structure while eliding expensive dormant or security-only computation.
-- Do not add expensive noise-fidelity work during Stage A. Normal and Fast implementations must coexist for correctness and performance comparison.
+- Do not add expensive noise-fidelity work during Stage A. For correctness and performance comparisons, use a separately pinned, unmodified original Standard Lattigo checkout/commit as the baseline; the Fast fork does not need to retain a parallel Normal/Standard implementation solely for comparison.
 - Keep changes CKKS-specific where possible. Do not modify BFV, BGV, TFHE, or unrelated infrastructure merely for consistency.
 
 ## Conflict resolution
