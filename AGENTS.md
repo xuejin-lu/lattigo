@@ -22,8 +22,11 @@ Before starting any task on this branch:
 
 1. Safely synchronize the local `fast-qprefix` branch with `origin/fast-qprefix` before reading the task.
    - Check that the current branch is `fast-qprefix` and inspect `git status --short`.
-   - If the worktree is clean, run `git fetch origin` and update with `git pull --ff-only origin fast-qprefix`.
+   - If the worktree is clean, run `git fetch origin`, then update with `git merge --ff-only origin/fast-qprefix`.
+   - Once `git fetch origin` succeeds, use that fetched remote-tracking ref; **do not run `git pull`**, since it would fetch again.
    - If the worktree has uncommitted changes, the branch is not `fast-qprefix`, or the fast-forward update fails, do not reset, stash, overwrite, or discard anything automatically. Stop and report the condition instead.
+   - After merging, verify `git rev-parse HEAD` equals `git rev-parse origin/fast-qprefix` before continuing.
+   - Report a Git command's metadata-write failure (for example `.git/FETCH_HEAD: Operation not permitted`) separately from a tool failure to create the execution process. For process-creation failures, first verify the working-directory and Git executable paths; do not retry indefinitely. Use formal permission escalation for Git metadata write denial when available. Never use `sudo` or arbitrary permission changes as a workaround.
    - After synchronization, re-read this `AGENTS.md` because the repository instructions themselves may have changed.
 2. Safely synchronize the Primary `xuejin-lu/heart-lattigo-bootstrap` `main` branch according to its `AGENTS.md`; read its freshly synchronized `CURRENT_TASK.md` and the active specification referenced there. A blocked, completed, or missing Primary task does not authorize Secondary execution.
 3. Read `docs/FAST_QPREFIX_SPEC.md` for authoritative Q-prefix architecture and invariants.
