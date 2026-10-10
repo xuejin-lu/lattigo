@@ -246,8 +246,15 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 	require.NoError(t, err)
 	var vectors fastDiagPublicVectors
 	require.NoError(t, json.Unmarshal(vectorBytes, &vectors))
-	require.Equal(t, "fast-standard-public-native-repeatability-vectors.v1", vectors.SchemaVersion)
-	require.Equal(t, "public-native-repeatability", vectors.Mode)
+	validateOnly := os.Getenv("FASTDIAG_VALIDATE_ONLY") == "1"
+	if validateOnly {
+		preflightVectors := vectors.SchemaVersion == "fast-standard-public-native-vectors.v1" && vectors.Mode == "public-native"
+		repeatabilityVectors := vectors.SchemaVersion == "fast-standard-public-native-repeatability-vectors.v1" && vectors.Mode == "public-native-repeatability"
+		require.True(t, preflightVectors || repeatabilityVectors, "validate-only mode requires a public-native held-input vector artifact")
+	} else {
+		require.Equal(t, "fast-standard-public-native-repeatability-vectors.v1", vectors.SchemaVersion)
+		require.Equal(t, "public-native-repeatability", vectors.Mode)
+	}
 	require.Equal(t, "fast", vectors.Backend)
 	require.Equal(t, manifest.BackendCommit, vectors.BackendCommit)
 	require.Equal(t, manifest.PrimaryCommit, vectors.PrimaryCommit)
@@ -263,6 +270,11 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 	require.True(t, fastDiagFinite(inputOracle))
 	require.Equal(t, manifest.DecodedSHA256, fastDiagInputSHA256(inputOracle))
 	require.LessOrEqual(t, fastDiagVectorMetrics(inputOracle, decodedInput).max, manifest.NumericalGate)
+	if validateOnly {
+		// A zero-call preflight has only the held drop_level0 vector. Validate
+		// its binary fixture compatibility without requiring Bootstrap outputs.
+		return
+	}
 	fastReferenceNames := []string{"bootstrap_first_cold", "bootstrap_warm_01", "bootstrap_warm_02", "bootstrap_warm_03", "bootstrap_warm_04", "bootstrap_warm_05"}
 	fastReferences := make([][]complex128, len(fastReferenceNames))
 	for index, name := range fastReferenceNames {
@@ -273,12 +285,6 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 		require.True(t, fastDiagFinite(fastReferences[index]))
 	}
 	require.Len(t, vectors.BootstrapOutputs, 6, "reference vectors must contain exactly six uninstrumented Fast outputs")
-	if os.Getenv("FASTDIAG_VALIDATE_ONLY") == "1" {
-		// The parent invokes this mode before reserving Bootstrap tokens. All
-		// serialized parameter/ciphertext, state, hash, and vector checks above
-		// are therefore a zero-Bootstrap compatibility preflight.
-		return
-	}
 
 	keygen := rlwe.NewKeyGenerator(params.ResidualParameters)
 	sk := keygen.GenSecretKeyNew()
