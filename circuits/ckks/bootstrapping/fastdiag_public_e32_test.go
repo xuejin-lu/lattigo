@@ -273,6 +273,12 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 		require.True(t, fastDiagFinite(fastReferences[index]))
 	}
 	require.Len(t, vectors.BootstrapOutputs, 6, "reference vectors must contain exactly six uninstrumented Fast outputs")
+	if os.Getenv("FASTDIAG_VALIDATE_ONLY") == "1" {
+		// The parent invokes this mode before reserving Bootstrap tokens. All
+		// serialized parameter/ciphertext, state, hash, and vector checks above
+		// are therefore a zero-Bootstrap compatibility preflight.
+		return
+	}
 
 	keygen := rlwe.NewKeyGenerator(params.ResidualParameters)
 	sk := keygen.GenSecretKeyNew()
