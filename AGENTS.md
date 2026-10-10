@@ -83,6 +83,12 @@ Do not create ad-hoc per-task exceptions to bypass this amendment process.
 
 A stale mention of `fast-ckks` in historical documentation is not, by itself, a reason to leave `fast-qprefix`.
 
+## Mandatory shared measurement platform (cross-chat persistence)
+
+The PRIMARY repository `xuejin-lu/heart-lattigo-bootstrap` ALREADY has a reusable experimental platform: `cmd/perfprobe/` for matched Standard/Fast Bootstrap timing and input evidence, `cmd/fastdiag/` for stage/power/rescale attribution, `internal/perfmeasure/` for shared parameter/provenance, and `internal/numericalmetrics/` for decoded metrics. Before editing any benchmark, instrumented kernel, diagnostic, or performance experiment, safely synchronize Primary and read its `docs/MEASUREMENT_PLATFORM.md` plus `AGENTS.md` and active task. Prefer reusing/extending these tools and Secondary `internal/fastdiag/` hooks over reimplementing stopwatch/profile/metric infrastructure in temporary tests or Batch-specific runners.
+
+Old tools may impose E=0, direct-encoded c0 input, explicit `NewFastEvaluator`, fixed old commits or mandatory warmups; these are HISTORICAL MODE assumptions, not universal present contracts. Refit Primary measurement infrastructure to public E32 and native formal input before new experiments, preserving old diagnostics as explicitly labelled. Secondary **zero-secret c1=0 is currently meaningful**, but it is not a permanent requirement that E=0 or every Fast input be manually constructed from c0. New mathematical/library behavior requires scientific Web authorization. Do not mutate Secondary production semantics merely to make a legacy tool pass.
+
 ## Working style
 
 Trace the exact source call path, identify the smallest modification surface, change one bounded behavior at a time, and prefer source-backed behavior over guesswork. Use the reusable fastdiag framework for supported performance attribution instead of rebuilding one-off instrumentation.
