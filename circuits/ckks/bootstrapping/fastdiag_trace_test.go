@@ -262,6 +262,26 @@ func fastDiagValidateRescalePass(t testing.TB, pass fastdiag.Event, children map
 	}
 }
 
+func TestFastDiagP93RescaleValidatorAcceptsSyntheticClosedProducerTree(t *testing.T) {
+	count := 2
+	events := []fastdiag.Event{
+		{Scope: fastdiag.Rescale, Name: "rescale", Sequence: 1},
+		{Scope: fastdiag.Rescale, Name: "preflight", Sequence: 2, ParentSequence: 1, Fields: fastdiag.Fields{Count: &count}},
+		{Scope: fastdiag.Rescale, Name: "materialization", Sequence: 3, ParentSequence: 1, Fields: fastdiag.Fields{Count: &count}},
+		{Scope: fastdiag.Rescale, Name: "prefix_to_coefficient", Sequence: 4, ParentSequence: 2, Fields: fastdiag.Fields{Component: "c0"}},
+		{Scope: fastdiag.Rescale, Name: "coefficient_loop", Sequence: 5, ParentSequence: 2, Fields: fastdiag.Fields{Component: "c0"}},
+		{Scope: fastdiag.Rescale, Name: "reconstruct_center_round_capacity", Sequence: 6, ParentSequence: 5},
+		{Scope: fastdiag.Rescale, Name: "residue_materialization", Sequence: 7, ParentSequence: 5},
+		{Scope: fastdiag.Rescale, Name: "prefix_to_coefficient", Sequence: 8, ParentSequence: 2, Fields: fastdiag.Fields{Component: "c1"}},
+		{Scope: fastdiag.Rescale, Name: "coefficient_loop", Sequence: 9, ParentSequence: 2, Fields: fastdiag.Fields{Component: "c1"}},
+		{Scope: fastdiag.Rescale, Name: "reconstruct_center_round_capacity", Sequence: 10, ParentSequence: 9},
+		{Scope: fastdiag.Rescale, Name: "residue_materialization", Sequence: 11, ParentSequence: 9},
+		{Scope: fastdiag.Rescale, Name: "ntt_montgomery_restore", Sequence: 12, ParentSequence: 3, Fields: fastdiag.Fields{Component: "c0"}},
+		{Scope: fastdiag.Rescale, Name: "ntt_montgomery_restore", Sequence: 13, ParentSequence: 3, Fields: fastdiag.Fields{Component: "c1"}},
+	}
+	fastDiagValidateEvents(t, "rescale", events)
+}
+
 func fastDiagEnvInt(t testing.TB, name string, fallback int) int {
 	t.Helper()
 	value := os.Getenv(name)

@@ -235,15 +235,26 @@ func (w *RescaleWorkspace) ApplyRows(ringQ *ring.Ring, op0, opOut *rlwe.Cipherte
 		preflightSpan.End(fastdiag.Output(op0, sourceRows))
 	}
 
+	var materializationSpan fastdiag.Span
+	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		materializationSpan = fastdiag.Begin(fastdiag.Rescale, "materialization", wholeSpan.Sequence(), fastdiag.Input(op0, sourceRows).Merge(fastdiag.InPlace(op0 == opOut)).Merge(fastdiag.RepetitionCount(len(op0.Value))))
+	}
 	if opOut != op0 {
 		ResizeCompactCiphertext(opOut, op0.Degree(), targetLevel, w.n)
 	}
 	for component := range op0.Value {
+		var restoreSpan fastdiag.Span
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			restoreSpan = fastdiag.Begin(fastdiag.Rescale, "ntt_montgomery_restore", materializationSpan.Sequence(), rescaleDiagFields(op0.Level(), targetLevel, sourceRows, targetRows, fmt.Sprintf("c%d", component), op0 == opOut))
+		}
 		for row := 0; row < targetRows; row++ {
 			ringQ.SubRings[row].NTT(w.staged[component].Coeffs[row], opOut.Value[component].Coeffs[row])
 			if op0.IsMontgomery {
 				ringQ.SubRings[row].MForm(opOut.Value[component].Coeffs[row], opOut.Value[component].Coeffs[row])
 			}
+		}
+		if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+			restoreSpan.End(fastdiag.Fields{})
 		}
 	}
 	*opOut.MetaData = *op0.MetaData
@@ -260,6 +271,7 @@ func (w *RescaleWorkspace) ApplyRows(ringQ *ring.Ring, op0, opOut *rlwe.Cipherte
 	}
 	retainQPrefixRows(opOut, targetRows)
 	if fastdiag.Enabled && fastdiag.Selected(fastdiag.Rescale) {
+		materializationSpan.End(fastdiag.Output(opOut, targetRows))
 		wholeSpan.End(fastdiag.Output(opOut, targetRows))
 	}
 	return nil

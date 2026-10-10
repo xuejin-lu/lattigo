@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -115,9 +117,14 @@ type fastDiagPublicMetrics struct {
 type fastDiagPublicE32Artifact struct {
 	SchemaVersion         string                 `json:"schema_version"`
 	Timestamp             time.Time              `json:"timestamp"`
+	TraceStatus           string                 `json:"trace_status"`
+	TraceValidationError  string                 `json:"trace_validation_error,omitempty"`
+	RawEvidenceFile       string                 `json:"raw_unverified_file,omitempty"`
+	RawEvidenceSHA256     string                 `json:"raw_unverified_sha256,omitempty"`
 	Profile               string                 `json:"profile"`
 	Mode                  string                 `json:"mode"`
 	PrimaryCommit         string                 `json:"primary_commit"`
+	FixturePrimaryCommit  string                 `json:"fixture_primary_commit"`
 	PrimarySourceSHA256   string                 `json:"primary_measurement_source_sha256"`
 	ProductionFastCommit  string                 `json:"production_fast_commit"`
 	DiagnosticHead        string                 `json:"diagnostic_head"`
@@ -147,6 +154,22 @@ type fastDiagPublicE32Artifact struct {
 	Events                []fastdiag.Event       `json:"warm_traced_events"`
 }
 
+type fastDiagPublicE32FailureArtifact struct {
+	SchemaVersion        string    `json:"schema_version"`
+	Timestamp            time.Time `json:"timestamp"`
+	TraceStatus          string    `json:"trace_status"`
+	FailurePhase         string    `json:"failure_phase"`
+	FailureReason        string    `json:"failure_reason"`
+	RawEvidenceFile      string    `json:"raw_unverified_file"`
+	RawEvidenceSHA256    string    `json:"raw_unverified_sha256"`
+	PrimaryCommit        string    `json:"primary_commit"`
+	FixturePrimaryCommit string    `json:"fixture_primary_commit"`
+	ProductionFastCommit string    `json:"production_fast_commit"`
+	DiagnosticHead       string    `json:"diagnostic_head"`
+	CallBudget           int       `json:"call_budget"`
+	ActualCalls          int       `json:"actual_calls"`
+}
+
 // TestFastDiagPublicE32Trace consumes the exact held Level0 ciphertext exported
 // by Primary perfprobe. It executes one untraced cold call and one traced warm
 // call only; the caller reserves both attempts before spawning this test.
@@ -154,17 +177,23 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 	manifestPath := os.Getenv("FASTDIAG_PUBLIC_E32_MANIFEST")
 	referenceVectorsPath := os.Getenv("FASTDIAG_PUBLIC_E32_FAST_VECTORS")
 	outputPath := os.Getenv("FASTDIAG_OUTPUT")
+	rawOutputPath := os.Getenv("FASTDIAG_RAW_OUTPUT")
+	failureOutputPath := os.Getenv("FASTDIAG_FAILURE_OUTPUT")
 	profileDir := os.Getenv("FASTDIAG_PROFILE_DIR")
+	primaryHead := os.Getenv("FASTDIAG_PRIMARY_HEAD")
 	scopes := os.Getenv("FASTDIAG_TRACE")
 	require.NotEmpty(t, manifestPath)
 	require.NotEmpty(t, referenceVectorsPath)
 	require.NotEmpty(t, outputPath)
+	require.NotEmpty(t, rawOutputPath)
+	require.NotEmpty(t, failureOutputPath)
 	require.NotEmpty(t, profileDir)
+	require.NotEmpty(t, primaryHead)
 	require.Equal(t, "stage,power,rescale", scopes, "E32 trace scope is frozen for this task")
 	profileInfo, err := os.Stat(profileDir)
 	require.NoError(t, err)
 	require.True(t, profileInfo.IsDir())
-	for _, path := range []string{outputPath, filepath.Join(profileDir, "warm-cpu.pprof"), filepath.Join(profileDir, "post-warm-heap.pprof")} {
+	for _, path := range []string{outputPath, rawOutputPath, failureOutputPath, filepath.Join(profileDir, "warm-cpu.pprof"), filepath.Join(profileDir, "post-warm-heap.pprof")} {
 		_, err := os.Lstat(path)
 		require.True(t, os.IsNotExist(err), "refusing to overwrite diagnostic output %s (stat error: %v)", path, err)
 	}
@@ -298,36 +327,135 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 
 	inputBytesBefore, err := input.MarshalBinary()
 	require.NoError(t, err)
+	manifestSum := sha256.Sum256(manifestBytes)
+	cpuProfilePath := filepath.Join(profileDir, "warm-cpu.pprof")
+	heapProfilePath := filepath.Join(profileDir, "post-warm-heap.pprof")
+	artifact := fastDiagPublicE32Artifact{
+		SchemaVersion: "fastdiag.public-e32.trace.v1", Timestamp: time.Now().UTC(), TraceStatus: "TRACE_UNVERIFIED",
+		TraceValidationError: "raw event capture is not certified; a separate certified result is written only after all gates pass",
+		Profile:              manifest.Profile, Mode: "test-only-public-e32-fast", PrimaryCommit: primaryHead, FixturePrimaryCommit: manifest.PrimaryCommit,
+		PrimarySourceSHA256: manifest.PrimarySourceSHA256, ProductionFastCommit: manifest.BackendCommit,
+		DiagnosticHead: os.Getenv("FASTDIAG_DIAGNOSTIC_HEAD"), ConfigSHA256: manifest.ConfigSHA256,
+		QPSHA256: manifest.QPSHA256, InputSHA256: manifest.InputSHA256, WorkloadSHA256: manifest.WorkloadSHA256,
+		FixtureManifestSHA256: hex.EncodeToString(manifestSum[:]), CiphertextSHA256: manifest.CiphertextSHA256,
+		ExpectedInputSHA256: manifest.DecodedSHA256, CallBudget: 2, NumericalGate: manifest.NumericalGate,
+		GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
+		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
+		GOGC: fastDiagEnvironmentSetting("GOGC"), GOMEMLIMIT: fastDiagEnvironmentSetting("GOMEMLIMIT"), GODEBUG: fastDiagEnvironmentSetting("GODEBUG"),
+		CPUProfileFile: filepath.Base(cpuProfilePath), HeapProfileFile: filepath.Base(heapProfilePath),
+	}
 	callCount := 0
+	rawSHA256 := ""
+	failureArtifactWritten := false
+	writeRaw := func() error {
+		artifact.Timestamp = time.Now().UTC()
+		artifact.ActualCalls = callCount
+		var writeErr error
+		rawSHA256, writeErr = fastDiagWriteExclusiveJSON(rawOutputPath, artifact)
+		return writeErr
+	}
+	writeFailure := func(phase, reason string) {
+		if rawSHA256 == "" {
+			if err := writeRaw(); err != nil {
+				t.Errorf("cannot preserve unverified raw E32 trace %s: %v", rawOutputPath, err)
+				return
+			}
+		}
+		if err := fastDiagWritePublicE32Failure(failureOutputPath, rawOutputPath, rawSHA256, phase, reason, artifact); err != nil {
+			t.Errorf("cannot preserve E32 trace failure reason at %s: %v", failureOutputPath, err)
+			return
+		}
+		failureArtifactWritten = true
+	}
+	fastdiag.Reset()
+	if err := fastdiag.ConfigureCSV(""); err != nil {
+		t.Fatalf("configure untraced cold call: %v", err)
+	}
+	coldRun := fastDiagPublicE32Run{Index: 1, Phase: "first_cold_bootstrap"}
 	coldStarted := time.Now()
 	fastdiag.Reset()
-	require.NoError(t, fastdiag.ConfigureCSV(""))
 	coldOutput, err := eval.Bootstrap(input.CopyNew())
 	coldElapsed := time.Since(coldStarted).Nanoseconds()
-	require.NoError(t, err)
 	callCount++
-	coldRun := fastDiagValidatePublicE32Output(t, params, manifest, coldOutput, inputOracle, fastReferences, 1, "first_cold_bootstrap", coldElapsed)
-	require.Empty(t, fastdiag.Events(), "cold call must be untraced")
+	coldRun.ElapsedNS = coldElapsed
+	coldOK := false
+	if err == nil {
+		coldOK = t.Run("cold_native_output_oracle", func(t *testing.T) {
+			coldRun = fastDiagValidatePublicE32Output(t, params, manifest, coldOutput, inputOracle, fastReferences, 1, "first_cold_bootstrap", coldElapsed)
+		})
+	}
+	coldEvents := fastdiag.Events()
+	artifact.Runs = []fastDiagPublicE32Run{coldRun}
+	artifact.Events = coldEvents
+	if err != nil || !coldOK || len(coldEvents) != 0 {
+		reason := "cold public Bootstrap output failed its native oracle or unexpectedly emitted trace events; warm call was not launched"
+		if err != nil {
+			reason = fmt.Sprintf("cold public Bootstrap failed: %v", err)
+		}
+		writeFailure("cold_call_oracle", reason)
+		t.Fatalf("%s; raw trace: %s; failure record: %s", reason, rawOutputPath, failureOutputPath)
+	}
 
 	traceScopes := "stage,power,rescale"
-	require.NoError(t, fastdiag.ConfigureCSV(traceScopes))
+	if err := fastdiag.ConfigureCSV(traceScopes); err != nil {
+		writeFailure("trace_configuration", fmt.Sprintf("configure trace scopes: %v", err))
+		t.Fatalf("configure trace scopes: %v; raw trace: %s", err, rawOutputPath)
+	}
 	fastdiag.Reset()
-	cpuProfilePath := filepath.Join(profileDir, "warm-cpu.pprof")
 	cpuProfile, err := os.OpenFile(cpuProfilePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	require.NoError(t, err)
-	require.NoError(t, pprof.StartCPUProfile(cpuProfile))
+	if err != nil {
+		writeFailure("warm_profile_setup", fmt.Sprintf("create warm CPU profile: %v", err))
+		t.Fatalf("create warm CPU profile: %v; raw trace: %s", err, rawOutputPath)
+	}
+	if err := pprof.StartCPUProfile(cpuProfile); err != nil {
+		_ = cpuProfile.Close()
+		writeFailure("warm_profile_setup", fmt.Sprintf("start warm CPU profile: %v", err))
+		t.Fatalf("start warm CPU profile: %v; raw trace: %s", err, rawOutputPath)
+	}
 	warmStarted := time.Now()
-	warmOutput, err := eval.Bootstrap(input.CopyNew())
+	warmOutput, warmErr := eval.Bootstrap(input.CopyNew())
 	warmElapsed := time.Since(warmStarted).Nanoseconds()
 	pprof.StopCPUProfile()
 	cpuCloseErr := cpuProfile.Close()
-	require.NoError(t, cpuCloseErr)
 	callCount++
-	warmRun := fastDiagValidatePublicE32Output(t, params, manifest, warmOutput, inputOracle, fastReferences, 2, "warm_bootstrap_01", warmElapsed)
+	warmRun := fastDiagPublicE32Run{Index: 2, Phase: "warm_bootstrap_01", ElapsedNS: warmElapsed}
+	warmOracleOK := false
+	if warmErr == nil {
+		warmOracleOK = t.Run("warm_native_output_oracle", func(t *testing.T) {
+			warmRun = fastDiagValidatePublicE32Output(t, params, manifest, warmOutput, inputOracle, fastReferences, 2, "warm_bootstrap_01", warmElapsed)
+		})
+	}
 	events := fastdiag.Events()
-	fastDiagValidatePublicE32Events(t, events)
-	require.NoError(t, err)
-	heapProfilePath := filepath.Join(profileDir, "post-warm-heap.pprof")
+	artifact.Runs = []fastDiagPublicE32Run{coldRun, warmRun}
+	artifact.Events = events
+	if err := writeRaw(); err != nil {
+		t.Fatalf("cannot atomically preserve unverified E32 raw trace at %s: %v", rawOutputPath, err)
+	}
+	defer func() {
+		if t.Failed() && !failureArtifactWritten {
+			writeFailure("post_capture_validation", "a post-capture oracle, event, profile, fixture-integrity, or certification gate failed; see the test output")
+		}
+	}()
+	if warmErr != nil {
+		reason := fmt.Sprintf("warm public Bootstrap failed: %v", warmErr)
+		writeFailure("warm_call", reason)
+		t.Fatalf("%s; raw trace: %s; failure record: %s", reason, rawOutputPath, failureOutputPath)
+	}
+	if !warmOracleOK {
+		reason := "warm decoded plaintext oracle or original-Fast reference gate failed"
+		writeFailure("warm_output_oracle", reason)
+		t.Fatalf("%s; raw trace: %s; failure record: %s", reason, rawOutputPath, failureOutputPath)
+	}
+	if cpuCloseErr != nil {
+		reason := fmt.Sprintf("close warm CPU profile: %v", cpuCloseErr)
+		writeFailure("warm_profile", reason)
+		t.Fatalf("%s; raw trace: %s; failure record: %s", reason, rawOutputPath, failureOutputPath)
+	}
+	if eventErr := fastDiagPublicE32EventsValidationError(events); eventErr != nil {
+		writeFailure("event_tree_validation", eventErr.Error())
+		t.Fatalf("E32 event-tree validation failed: %v; raw TRACE_UNVERIFIED: %s; failure record: %s", eventErr, rawOutputPath, failureOutputPath)
+	}
+
 	heapProfile, err := os.OpenFile(heapProfilePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	require.NoError(t, err)
 	runtime.GC()
@@ -346,30 +474,16 @@ func TestFastDiagPublicE32Trace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fastDiagSHA256(inputBytesBefore), fastDiagSHA256(inputBytesAfter), "Bootstrap must not mutate the held fixture")
 
-	manifestSum := sha256.Sum256(manifestBytes)
-	artifact := fastDiagPublicE32Artifact{
-		SchemaVersion: "fastdiag.public-e32.trace.v1", Timestamp: time.Now().UTC(), Profile: manifest.Profile,
-		Mode: "test-only-public-e32-fast", PrimaryCommit: manifest.PrimaryCommit,
-		PrimarySourceSHA256: manifest.PrimarySourceSHA256, ProductionFastCommit: manifest.BackendCommit,
-		DiagnosticHead: os.Getenv("FASTDIAG_DIAGNOSTIC_HEAD"), ConfigSHA256: manifest.ConfigSHA256,
-		QPSHA256: manifest.QPSHA256, InputSHA256: manifest.InputSHA256, WorkloadSHA256: manifest.WorkloadSHA256,
-		FixtureManifestSHA256: hex.EncodeToString(manifestSum[:]), CiphertextSHA256: manifest.CiphertextSHA256,
-		ExpectedInputSHA256: manifest.DecodedSHA256, CallBudget: 2, ActualCalls: callCount,
-		CPUProfileFile: filepath.Base(cpuProfilePath), CPUProfileSHA256: fastDiagSHA256(cpuProfileBytes),
-		HeapProfileFile: filepath.Base(heapProfilePath), HeapProfileSHA256: fastDiagSHA256(heapProfileBytes),
-		NumericalGate: manifest.NumericalGate, GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
-		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
-		GOGC: fastDiagEnvironmentSetting("GOGC"), GOMEMLIMIT: fastDiagEnvironmentSetting("GOMEMLIMIT"), GODEBUG: fastDiagEnvironmentSetting("GODEBUG"),
-		Runs: []fastDiagPublicE32Run{coldRun, warmRun}, Events: events,
-	}
-	artifactBytes, err := json.MarshalIndent(artifact, "", "  ")
+	artifact.CPUProfileSHA256 = fastDiagSHA256(cpuProfileBytes)
+	artifact.HeapProfileFile = filepath.Base(heapProfilePath)
+	artifact.HeapProfileSHA256 = fastDiagSHA256(heapProfileBytes)
+	artifact.TraceStatus = "TRACE_VALIDATED"
+	artifact.TraceValidationError = ""
+	artifact.RawEvidenceFile = filepath.Base(rawOutputPath)
+	artifact.RawEvidenceSHA256 = rawSHA256
+	artifact.Timestamp = time.Now().UTC()
+	_, err = fastDiagWriteExclusiveJSON(outputPath, artifact)
 	require.NoError(t, err)
-	file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	require.NoError(t, err)
-	_, writeErr := file.Write(append(artifactBytes, '\n'))
-	closeErr := file.Close()
-	require.NoError(t, writeErr)
-	require.NoError(t, closeErr)
 }
 
 func fastDiagEnvironmentSetting(name string) string {
@@ -377,6 +491,102 @@ func fastDiagEnvironmentSetting(name string) string {
 		return value
 	}
 	return "runtime-default"
+}
+
+func fastDiagWriteExclusiveJSON(path string, value any) (string, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return "", err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return "", err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return "", err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return "", err
+	}
+	if err := temp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Link(tempPath, path); err != nil {
+		return "", err
+	}
+	// The destination already has the synced bytes and is owner-only. Cleanup
+	// failure for the temporary hard link must not report failure after the
+	// exclusive destination has been successfully published.
+	_ = os.Remove(tempPath)
+	return fastDiagSHA256(data), nil
+}
+
+func fastDiagWritePublicE32Failure(path, rawPath, rawSHA256, phase, reason string, artifact fastDiagPublicE32Artifact) error {
+	if path == "" || rawPath == "" || rawSHA256 == "" || phase == "" || reason == "" {
+		return errors.New("E32 diagnostic failure artifact requires paths, phase, and reason")
+	}
+	failure := fastDiagPublicE32FailureArtifact{
+		SchemaVersion: "fastdiag.public-e32.failure.v1", Timestamp: time.Now().UTC(),
+		TraceStatus: "TRACE_UNVERIFIED", FailurePhase: phase, FailureReason: reason,
+		RawEvidenceFile: filepath.Base(rawPath), RawEvidenceSHA256: rawSHA256,
+		PrimaryCommit: artifact.PrimaryCommit, FixturePrimaryCommit: artifact.FixturePrimaryCommit, ProductionFastCommit: artifact.ProductionFastCommit,
+		DiagnosticHead: artifact.DiagnosticHead, CallBudget: artifact.CallBudget, ActualCalls: artifact.ActualCalls,
+	}
+	_, err := fastDiagWriteExclusiveJSON(path, failure)
+	return err
+}
+
+func TestFastDiagWriteExclusiveJSONIsOwnerOnlyAndDoesNotOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trace.json")
+	gotSHA, err := fastDiagWriteExclusiveJSON(path, map[string]string{"trace_status": "TRACE_UNVERIFIED"})
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, fastDiagSHA256(data), gotSHA)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	_, err = fastDiagWriteExclusiveJSON(path, map[string]string{"trace_status": "TRACE_VALIDATED"})
+	require.Error(t, err, "exclusive evidence writer must not replace an existing raw artifact")
+	dataAfter, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, data, dataAfter)
+}
+
+func TestFastDiagWritePublicE32FailureKeepsReasonSourceAndBudget(t *testing.T) {
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, "raw-trace-unverified.json")
+	rawSHA, err := fastDiagWriteExclusiveJSON(rawPath, map[string]string{"trace_status": "TRACE_UNVERIFIED"})
+	require.NoError(t, err)
+	failurePath := filepath.Join(dir, "trace-failure.json")
+	artifact := fastDiagPublicE32Artifact{
+		PrimaryCommit: "primary-head", FixturePrimaryCommit: "fixture-primary",
+		ProductionFastCommit: "production-fast", DiagnosticHead: "diagnostic-head",
+		CallBudget: 2, ActualCalls: 2,
+	}
+	require.NoError(t, fastDiagWritePublicE32Failure(failurePath, rawPath, rawSHA, "event_tree_validation", "missing materialization span", artifact))
+	data, err := os.ReadFile(failurePath)
+	require.NoError(t, err)
+	var failure fastDiagPublicE32FailureArtifact
+	require.NoError(t, json.Unmarshal(data, &failure))
+	require.Equal(t, "TRACE_UNVERIFIED", failure.TraceStatus)
+	require.Equal(t, "event_tree_validation", failure.FailurePhase)
+	require.Equal(t, "missing materialization span", failure.FailureReason)
+	require.Equal(t, filepath.Base(rawPath), failure.RawEvidenceFile)
+	require.Equal(t, rawSHA, failure.RawEvidenceSHA256)
+	require.Equal(t, "primary-head", failure.PrimaryCommit)
+	require.Equal(t, "fixture-primary", failure.FixturePrimaryCommit)
+	require.Equal(t, 2, failure.CallBudget)
+	require.Equal(t, 2, failure.ActualCalls)
 }
 
 func fastDiagValidatePublicE32Output(
@@ -426,20 +636,32 @@ func fastDiagValidatePublicE32Output(
 
 func fastDiagValidatePublicE32Events(t testing.TB, events []fastdiag.Event) {
 	t.Helper()
+	require.NoError(t, fastDiagPublicE32EventsValidationError(events))
+}
+
+func fastDiagPublicE32EventsValidationError(events []fastdiag.Event) error {
+	if len(events) == 0 {
+		return errors.New("traced warm call contains no fastdiag events")
+	}
 	rootSequence := uint64(0)
 	var stages []fastdiag.Event
 	generatedPowerParents := map[uint64]bool{}
 	children := map[uint64][]fastdiag.Event{}
 	sequences := map[uint64]bool{}
 	for _, event := range events {
-		require.NotZero(t, event.Sequence)
-		require.GreaterOrEqual(t, event.ElapsedNS, int64(0))
-		require.False(t, sequences[event.Sequence], "duplicate fastdiag event sequence %d", event.Sequence)
+		if event.Sequence == 0 || event.ElapsedNS < 0 {
+			return fmt.Errorf("fastdiag event %q/%q has zero sequence or negative elapsed time", event.Scope, event.Name)
+		}
+		if sequences[event.Sequence] {
+			return fmt.Errorf("duplicate fastdiag event sequence %d", event.Sequence)
+		}
 		sequences[event.Sequence] = true
 		children[event.ParentSequence] = append(children[event.ParentSequence], event)
 		if event.Scope == fastdiag.Stage {
 			if event.Name == "bootstrap" {
-				require.Zero(t, rootSequence, "exactly one Bootstrap root is expected")
+				if rootSequence != 0 || event.ParentSequence != 0 {
+					return errors.New("exactly one root Bootstrap event is expected")
+				}
 				rootSequence = event.Sequence
 			} else {
 				stages = append(stages, event)
@@ -449,15 +671,21 @@ func fastDiagValidatePublicE32Events(t testing.TB, events []fastdiag.Event) {
 			generatedPowerParents[event.Sequence] = true
 		}
 	}
-	require.NotZero(t, rootSequence)
+	if rootSequence == 0 {
+		return errors.New("missing Bootstrap root event")
+	}
 	for _, event := range events {
 		if event.ParentSequence != 0 {
-			require.True(t, sequences[event.ParentSequence], "event %d has missing parent %d", event.Sequence, event.ParentSequence)
+			if !sequences[event.ParentSequence] {
+				return fmt.Errorf("event %d references missing parent %d", event.Sequence, event.ParentSequence)
+			}
 		}
 	}
 	stageNames := make([]string, len(stages))
 	for index, stage := range stages {
-		require.Equal(t, rootSequence, stage.ParentSequence, "stage %s must be a child of bootstrap", stage.Name)
+		if stage.ParentSequence != rootSequence {
+			return fmt.Errorf("stage %s must be a direct child of Bootstrap", stage.Name)
+		}
 		stageNames[index] = stage.Name
 	}
 	wantStages := []string{"pack_n1_to_n2", "scale_down", "mod_up_trace", "coeffs_to_slots", "evalmod_real"}
@@ -471,7 +699,14 @@ func fastDiagValidatePublicE32Events(t testing.TB, events []fastdiag.Event) {
 		}
 	}
 	wantStages = append(wantStages, "slots_to_coeffs", "unpack_n2_to_n1", "public_finalization")
-	require.Equal(t, wantStages, stageNames)
+	if len(wantStages) != len(stageNames) {
+		return fmt.Errorf("stage sequence mismatch: got %v, want %v", stageNames, wantStages)
+	}
+	for index := range wantStages {
+		if stageNames[index] != wantStages[index] {
+			return fmt.Errorf("stage sequence mismatch: got %v, want %v", stageNames, wantStages)
+		}
+	}
 	powerEvents, rescaleParents := 0, 0
 	generatedPowers := map[int]bool{}
 	for _, event := range events {
@@ -479,39 +714,149 @@ func fastDiagValidatePublicE32Events(t testing.TB, events []fastdiag.Event) {
 		case fastdiag.Power:
 			if event.Name == "power" {
 				powerEvents++
-				require.True(t, generatedPowerParents[event.ParentSequence], "power event is not nested under generated_powers")
-				require.NotNil(t, event.Power)
-				require.NotNil(t, event.SplitA)
-				require.NotNil(t, event.SplitB)
+				if !generatedPowerParents[event.ParentSequence] {
+					return errors.New("power event is not nested under generated_powers")
+				}
+				if event.Power == nil || event.SplitA == nil || event.SplitB == nil {
+					return errors.New("generated power event is missing its power or recurrence split")
+				}
 				generatedPowers[*event.Power] = true
 			}
 		case fastdiag.Rescale:
 			if event.Name == "rescale" {
 				rescaleParents++
 				passChildren := children[event.Sequence]
-				require.Len(t, passChildren, 2, "Rescale must include preflight and materialization")
+				if len(passChildren) != 2 {
+					return fmt.Errorf("Rescale event %d must include exactly preflight and materialization children", event.Sequence)
+				}
 				passes := make(map[string]fastdiag.Event, 2)
 				for _, pass := range passChildren {
+					if pass.Scope != fastdiag.Rescale {
+						return fmt.Errorf("Rescale event %d has a non-Rescale direct child", event.Sequence)
+					}
+					if _, exists := passes[pass.Name]; exists {
+						return fmt.Errorf("Rescale event %d has duplicate child %q", event.Sequence, pass.Name)
+					}
 					passes[pass.Name] = pass
 				}
-				require.Len(t, passes, 2)
 				preflight, ok := passes["preflight"]
-				require.True(t, ok)
+				if !ok {
+					return fmt.Errorf("Rescale event %d is missing preflight child", event.Sequence)
+				}
 				materialization, ok := passes["materialization"]
-				require.True(t, ok)
-				fastDiagValidateRescalePass(t, preflight, children, false)
-				fastDiagValidateRescalePass(t, materialization, children, true)
+				if !ok {
+					return fmt.Errorf("Rescale event %d is missing materialization child", event.Sequence)
+				}
+				if err := fastDiagPublicE32RescalePassError(preflight, children, false); err != nil {
+					return err
+				}
+				if err := fastDiagPublicE32RescalePassError(materialization, children, true); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	require.Greater(t, powerEvents, 0)
-	require.Greater(t, rescaleParents, 0)
-	for _, power := range []int{2, 3, 4, 6, 8, 16} {
-		require.True(t, generatedPowers[power], "missing generated Chebyshev power T%d", power)
+	if powerEvents == 0 {
+		return errors.New("trace has no generated power events")
 	}
+	if rescaleParents == 0 {
+		return errors.New("trace has no Rescale parent events")
+	}
+	for _, power := range []int{2, 3, 4, 6, 8, 16} {
+		if !generatedPowers[power] {
+			return fmt.Errorf("missing generated Chebyshev power T%d", power)
+		}
+	}
+	return nil
+}
+
+func fastDiagPublicE32RescalePassError(pass fastdiag.Event, children map[uint64][]fastdiag.Event, materializing bool) error {
+	if pass.Count == nil {
+		return fmt.Errorf("Rescale %s pass is missing its component count", pass.Name)
+	}
+	expectedComponents := *pass.Count
+	passChildren := children[pass.Sequence]
+	prefixByComponent := map[string]int{}
+	restoreByComponent := map[string]int{}
+	loopsByComponent := map[string]fastdiag.Event{}
+	for _, child := range passChildren {
+		if child.Scope != fastdiag.Rescale {
+			return fmt.Errorf("Rescale %s has non-Rescale child %q", pass.Name, child.Name)
+		}
+		switch child.Name {
+		case "prefix_to_coefficient":
+			prefixByComponent[child.Component]++
+		case "coefficient_loop":
+			if _, exists := loopsByComponent[child.Component]; exists {
+				return fmt.Errorf("duplicate coefficient loop for %s/%s", pass.Name, child.Component)
+			}
+			loopsByComponent[child.Component] = child
+		case "ntt_montgomery_restore":
+			if !materializing {
+				return errors.New("preflight must not contain an NTT restore event")
+			}
+			restoreByComponent[child.Component]++
+		default:
+			return fmt.Errorf("unexpected direct child %q under Rescale %s", child.Name, pass.Name)
+		}
+	}
+	if materializing {
+		if len(prefixByComponent) != 0 || len(loopsByComponent) != 0 || len(restoreByComponent) != expectedComponents {
+			return fmt.Errorf("Rescale materialization must contain exactly %d per-component restore events", expectedComponents)
+		}
+		for component, count := range restoreByComponent {
+			if component == "" || count != 1 {
+				return fmt.Errorf("Rescale materialization has invalid restore count for component %q", component)
+			}
+		}
+	} else {
+		if len(prefixByComponent) != expectedComponents || len(loopsByComponent) != expectedComponents || len(restoreByComponent) != 0 {
+			return fmt.Errorf("Rescale preflight must contain prefix and coefficient-loop events for %d components only", expectedComponents)
+		}
+	}
+	for component, count := range prefixByComponent {
+		if count != 1 {
+			return fmt.Errorf("duplicate prefix conversion for %s/%s", pass.Name, component)
+		}
+		loop, ok := loopsByComponent[component]
+		if !ok {
+			return fmt.Errorf("Rescale %s component %s is missing its coefficient loop", pass.Name, component)
+		}
+		loopNames := map[string]int{}
+		for _, child := range children[loop.Sequence] {
+			loopNames[child.Name]++
+		}
+		if len(loopNames) != 2 || loopNames["reconstruct_center_round_capacity"] != 1 || loopNames["residue_materialization"] != 1 {
+			return fmt.Errorf("Rescale %s component %s has an invalid coefficient-loop child set", pass.Name, component)
+		}
+	}
+	return nil
 }
 
 func TestFastDiagPublicE32EventValidatorAcceptsSourceShapedTree(t *testing.T) {
+	require.NoError(t, fastDiagPublicE32EventsValidationError(fastDiagPublicE32SourceShapedTree()))
+}
+
+func TestFastDiagPublicE32EventValidatorReportsMissingMaterialization(t *testing.T) {
+	events := fastDiagPublicE32SourceShapedTree()
+	var materializationSequence uint64
+	for _, event := range events {
+		if event.Name == "materialization" {
+			materializationSequence = event.Sequence
+		}
+	}
+	require.NotZero(t, materializationSequence)
+	filtered := make([]fastdiag.Event, 0, len(events))
+	for _, event := range events {
+		if event.Sequence != materializationSequence && event.ParentSequence != materializationSequence {
+			filtered = append(filtered, event)
+		}
+	}
+	err := fastDiagPublicE32EventsValidationError(filtered)
+	require.ErrorContains(t, err, "must include exactly preflight and materialization children")
+}
+
+func fastDiagPublicE32SourceShapedTree() []fastdiag.Event {
 	stageNames := []string{"bootstrap", "pack_n1_to_n2", "scale_down", "mod_up_trace", "coeffs_to_slots", "evalmod_real", "evalmod_imag", "slots_to_coeffs", "unpack_n2_to_n1", "public_finalization"}
 	events := make([]fastdiag.Event, 0, 32)
 	sequence := uint64(1)
@@ -559,7 +904,7 @@ func TestFastDiagPublicE32EventValidatorAcceptsSourceShapedTree(t *testing.T) {
 		)
 		sequence += 3
 	}
-	fastDiagValidatePublicE32Events(t, events)
+	return events
 }
 
 func fastDiagDecodePairs(pairs []fastDiagPublicVector) []complex128 {
