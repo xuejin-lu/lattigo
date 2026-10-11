@@ -22,6 +22,7 @@ type Evaluator struct {
 	addSubCore       fastcore.AddSubCore
 	mulCore          fastcore.MulCore
 	rescaleCore      fastcore.RescaleCore
+	fastQPCompat     *fastQPCompatibilityState
 }
 
 // NewEvaluator creates a new [Evaluator], that can be used to do homomorphic
@@ -35,6 +36,7 @@ func NewEvaluator(parameters Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
 		pool:      rlwe.NewPool(parameters.RingQP()),
 	}
 	if eval.usesFastCKKSZeroSecretSimulation() {
+		eval.fastQPCompat = newFastQPCompatibilityState()
 		eval.automorphismCore = fastcore.NewAutomorphismWorkspace(parameters.N(), parameters.MaxLevel()+1)
 		eval.addSubCore = fastcore.NewAddSubWorkspace()
 		eval.mulCore = fastcore.NewMulWorkspace(parameters.RingQ(), fastcore.MaxQPrefixWidth)
@@ -567,6 +569,16 @@ func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
 	}
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return fmt.Errorf("cannot Rescale: op0.MetaData or opOut.MetaData is nil")
+	}
+	// The compatibility fallback is entered only after a high-level lazy-QP
+	// automorphism has validated and armed this evaluator, and only for a
+	// complete logical-Q ciphertext beyond the maintained prefix. Ordinary
+	// compact Fast ciphertexts remain on the shared Q-prefix Rescale core.
+	if eval.usesFastCKKSZeroSecretSimulation() && eval.fastQPCompat.isArmed() &&
+		len(op0.Value) == 2 && len(op0.Value[0].Coeffs) > fastcore.MaxQPrefixWidth &&
+		fullFastPolyRows(op0.Value[0], len(op0.Value[0].Coeffs)-1, eval.GetParameters().N()) &&
+		fullFastPolyRows(op0.Value[1], len(op0.Value[0].Coeffs)-1, eval.GetParameters().N()) {
+		return eval.fastQPRescale(op0, opOut)
 	}
 
 	params := eval.GetParameters()

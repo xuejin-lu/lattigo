@@ -13,14 +13,17 @@ import (
 // as well as a memory buffer for intermediate values.
 type KeyGenerator struct {
 	*Encryptor
-	pool *BufferPool
+	pool                         *BufferPool
+	fastCKKSZeroSecretSimulation bool
 }
 
 // NewKeyGenerator creates a new KeyGenerator, from which the secret and public keys, as well as [EvaluationKey].
 func NewKeyGenerator(params ParameterProvider) *KeyGenerator {
+	_, fastCKKSZeroSecretSimulation := params.(fastCKKSZeroSecretSimulationProvider)
 	return &KeyGenerator{
-		Encryptor: NewEncryptor(params, nil),
-		pool:      NewPool(params.GetRLWEParameters().RingQP()),
+		Encryptor:                    NewEncryptor(params, nil),
+		pool:                         NewPool(params.GetRLWEParameters().RingQP()),
+		fastCKKSZeroSecretSimulation: fastCKKSZeroSecretSimulation,
 	}
 }
 
@@ -98,6 +101,15 @@ func (kgen KeyGenerator) GenRelinearizationKeyNew(sk *SecretKey, evkParams ...Ev
 }
 
 func (kgen KeyGenerator) GenRelinearizationKey(sk *SecretKey, rlk *RelinearizationKey) {
+	if kgen.fastCKKSZeroSecretSimulation {
+		if rlk.IsCompressed() {
+			panic("Fast CKKS zero-secret simulation does not support compressed evaluation keys")
+		}
+		zero := fastCKKSZeroSecretKey(sk)
+		kgen.GenEvaluationKey(zero, zero, &rlk.EvaluationKey)
+		return
+	}
+
 	sk2 := kgen.pool.AtLevel(rlk.LevelQ()).GetBuffPoly()
 	defer kgen.pool.RecycleBuffPoly(sk2)
 
@@ -123,6 +135,13 @@ func (kgen KeyGenerator) GenGaloisKeyNew(galEl uint64, sk *SecretKey, evkParams 
 }
 
 func (kgen KeyGenerator) GenGaloisKey(galEl uint64, sk *SecretKey, gk *GaloisKey) {
+	if kgen.fastCKKSZeroSecretSimulation && gk.IsCompressed() {
+		panic("Fast CKKS zero-secret simulation does not support compressed evaluation keys")
+	}
+
+	if kgen.fastCKKSZeroSecretSimulation {
+		sk = fastCKKSZeroSecretKey(sk)
+	}
 
 	skIn := sk.Value
 
@@ -149,7 +168,11 @@ func (kgen KeyGenerator) GenGaloisKey(galEl uint64, sk *SecretKey, gk *GaloisKey
 		ringP.AutomorphismNTTWithIndex(skIn.P, index, skOut.P)
 	}
 
-	kgen.genEvaluationKey(skIn.Q, *skOut, &gk.EvaluationKey)
+	if kgen.fastCKKSZeroSecretSimulation {
+		kgen.GenEvaluationKey(sk, &SecretKey{Value: *skOut}, &gk.EvaluationKey)
+	} else {
+		kgen.genEvaluationKey(skIn.Q, *skOut, &gk.EvaluationKey)
+	}
 
 	gk.GaloisElement = galEl
 	gk.NthRoot = ringQ.NthRoot()
@@ -211,6 +234,22 @@ func (kgen KeyGenerator) GenEvaluationKeyNew(skInput, skOutput *SecretKey, evkPa
 }
 
 func (kgen KeyGenerator) GenEvaluationKey(skInput, skOutput *SecretKey, evk *EvaluationKey) {
+	if kgen.fastCKKSZeroSecretSimulation {
+		if evk.IsCompressed() {
+			panic("Fast CKKS zero-secret simulation does not support compressed evaluation keys")
+		}
+		skInput = fastCKKSZeroSecretKey(skInput)
+		skOutput = fastCKKSZeroSecretKey(skOutput)
+	}
+
+	kgen.genEvaluationKeyFromSecrets(skInput, skOutput, evk)
+
+	if kgen.fastCKKSZeroSecretSimulation {
+		markFastCKKSEvaluationKey(evk)
+	}
+}
+
+func (kgen KeyGenerator) genEvaluationKeyFromSecrets(skInput, skOutput *SecretKey, evk *EvaluationKey) {
 
 	ringQ := kgen.params.RingQ()
 	ringP := kgen.params.RingP()
@@ -232,6 +271,34 @@ func (kgen KeyGenerator) GenEvaluationKey(skInput, skOutput *SecretKey, evk *Eva
 	ExtendBasisSmallNormAndCenterNTTMontgomery(ringQ, ringQ.AtLevel(skOutput.Value.Q.Level()), *buffSkIn, *buffQ, *buffSkIn)
 
 	kgen.genEvaluationKey(*buffSkIn, *buffSkOut, evk)
+}
+
+// fastCKKSZeroSecretKey returns an independent zero-valued key with the same
+// Q/P shape. Fast evaluation keys retain only sampled error in c0 and must not
+// encode either source or destination secret material.
+func fastCKKSZeroSecretKey(sk *SecretKey) *SecretKey {
+	if sk == nil {
+		panic("Fast CKKS zero-secret key generation requires non-nil secret keys")
+	}
+	zero := sk.CopyNew()
+	zero.Value.Q.Zero()
+	if len(zero.Value.P.Coeffs) != 0 {
+		zero.Value.P.Zero()
+	}
+	return zero
+}
+
+func markFastCKKSEvaluationKey(evk *EvaluationKey) {
+	evk.Layout = KeyLayoutFast
+	evk.GadgetCiphertext.Layout = KeyLayoutFast
+	for i := range evk.Value {
+		for j := range evk.Value[i] {
+			evk.Value[i][j][1].Q.Zero()
+			if len(evk.Value[i][j][1].P.Coeffs) != 0 {
+				evk.Value[i][j][1].P.Zero()
+			}
+		}
+	}
 }
 
 func (kgen KeyGenerator) genEvaluationKey(skIn ring.Poly, skOut ringqp.Poly, evk *EvaluationKey) {

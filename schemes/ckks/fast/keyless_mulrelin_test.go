@@ -81,7 +81,9 @@ func TestPublicCKKSEvaluatorKeylessZeroSecretMulRelin(t *testing.T) {
 	eval := ckks.NewEvaluator(params, nil)
 	// The supported keyless branch remains available when a normal CKKS
 	// RelinearizationKey is present as well.
-	standardRelinKey := kgen.GenRelinearizationKeyNew(sk)
+	// Construct the negative-test key from unmarked RLWE parameters. Ordinary
+	// CKKS key generation on Fast parameters now intentionally yields Fast keys.
+	standardRelinKey := rlwe.NewKeyGenerator(params.GetRLWEParameters()).GenRelinearizationKeyNew(sk)
 	require.Equal(t, rlwe.KeyLayoutStandard, standardRelinKey.Layout)
 	evalWithStandardKey := ckks.NewEvaluator(params, rlwe.NewMemEvaluationKeySet(standardRelinKey))
 	valuesA := []complex128{0.125 + 0.0625i, -0.25 + 0.125i, 0.0625 - 0.1875i, 0.3125 + 0i, -0.125 - 0.0625i, 0.1875 + 0.25i, -0.0625 + 0i, 0.25 - 0.125i}
@@ -234,7 +236,9 @@ func TestPublicCKKSEvaluatorFastMulRelinFailsClosedWithStandardRelinKey(t *testi
 	params := testFastCKKSParameters(t)
 	kgen := ckks.NewKeyGenerator(params)
 	sk := kgen.GenSecretKeyNew()
-	relinKey := kgen.GenRelinearizationKeyNew(sk)
+	// Keep this test's key Standard-layout so it exercises the Fast evaluator's
+	// fail-closed behavior for mismatched key material.
+	relinKey := rlwe.NewKeyGenerator(params.GetRLWEParameters()).GenRelinearizationKeyNew(sk)
 	require.Equal(t, rlwe.KeyLayoutStandard, relinKey.Layout)
 	keySet := &trackingEvaluationKeySet{EvaluationKeySet: rlwe.NewMemEvaluationKeySet(relinKey)}
 	eval := ckks.NewEvaluator(params, keySet)
@@ -274,13 +278,13 @@ func TestPublicCKKSEvaluatorFastMulRelinFailsClosedWithStandardRelinKey(t *testi
 		out.Scale = rlwe.NewScale(19)
 		degreeTwoBefore, degreeOneBefore, outBefore := degreeTwo.CopyNew(), degreeOne.CopyNew(), out.CopyNew()
 		err := eval.MulRelin(degreeTwo, degreeOne, out)
-		require.ErrorContains(t, err, "ciphertext inputs must both have degree 1")
+		require.ErrorContains(t, err, "op0 must have exactly two components")
 		requireCiphertextByteIdentical(t, degreeTwo, degreeTwoBefore, "degree rejection modified op0")
 		requireCiphertextByteIdentical(t, degreeOne, degreeOneBefore, "degree rejection modified op1")
 		requireCiphertextByteIdentical(t, out, outBefore, "degree rejection modified output")
 
 		_, err = eval.MulRelinNew(degreeTwo, degreeOne)
-		require.ErrorContains(t, err, "ciphertext inputs must both have degree 1")
+		require.ErrorContains(t, err, "op0 must have exactly two components")
 		requireCiphertextByteIdentical(t, degreeTwo, degreeTwoBefore, "degree rejection through MulRelinNew modified op0")
 		requireCiphertextByteIdentical(t, degreeOne, degreeOneBefore, "degree rejection through MulRelinNew modified op1")
 		require.Zero(t, keySet.relinearizationKeyLookups, "rejected degree must not inspect the available native relin key")
@@ -289,7 +293,7 @@ func TestPublicCKKSEvaluatorFastMulRelinFailsClosedWithStandardRelinKey(t *testi
 	t.Run("nil ciphertexts return errors without panic", func(t *testing.T) {
 		a, b, out := newPair()
 		_, err := eval.MulRelinNew(nil, b)
-		require.ErrorContains(t, err, "ciphertexts cannot be nil")
+		require.ErrorContains(t, err, "op0 cannot be nil")
 
 		var nilCiphertext *rlwe.Ciphertext
 		_, err = eval.MulRelinNew(a, nilCiphertext)
