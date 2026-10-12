@@ -77,11 +77,11 @@ func (eval Evaluator) validateFastCKKSScalarPair(operation string, op0, opOut *r
 	if eval.GetParameters().RingType() != ring.Standard {
 		return fail("requires the Standard ring, got %s", eval.GetParameters().RingType())
 	}
-	level0, err := validateFastCKKSScalarCiphertext("input", op0, eval.GetParameters())
+	level0, err := validateFastCKKSScalarCiphertext("input", op0, eval.GetParameters(), true)
 	if err != nil {
 		return fail("%v", err)
 	}
-	levelOut, err := validateFastCKKSScalarCiphertext("output", opOut, eval.GetParameters())
+	levelOut, err := validateFastCKKSScalarCiphertext("output", opOut, eval.GetParameters(), true)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -95,9 +95,6 @@ func (eval Evaluator) validateFastCKKSScalarPair(operation string, op0, opOut *r
 		return fail("input/output Montgomery representations must match")
 	}
 	level = min(level0, levelOut)
-	if level < 1 {
-		return fail("Q-prefix scalar arithmetic requires q0 and q1")
-	}
 	rows, err = fastcore.QPrefixWidth(level)
 	if err != nil {
 		return fail("%v", err)
@@ -105,7 +102,7 @@ func (eval Evaluator) validateFastCKKSScalarPair(operation string, op0, opOut *r
 	return level, rows, nil
 }
 
-func validateFastCKKSScalarCiphertext(name string, ct *rlwe.Ciphertext, params *Parameters) (int, error) {
+func validateFastCKKSScalarCiphertext(name string, ct *rlwe.Ciphertext, params *Parameters, allowLevelZero bool) (int, error) {
 	if ct == nil {
 		return 0, fmt.Errorf("%s ciphertext cannot be nil", name)
 	}
@@ -119,7 +116,11 @@ func validateFastCKKSScalarCiphertext(name string, ct *rlwe.Ciphertext, params *
 		return 0, fmt.Errorf("%s ciphertext has empty c0 backing", name)
 	}
 	level := len(ct.Value[0].Coeffs) - 1
-	if params == nil || params.RingQ() == nil || ct.N() != params.N() || level < 1 || level > params.MaxLevel() {
+	minLevel := 1
+	if allowLevelZero {
+		minLevel = 0
+	}
+	if params == nil || params.RingQ() == nil || ct.N() != params.N() || level < minLevel || level > params.MaxLevel() {
 		return 0, fmt.Errorf("%s ciphertext has invalid dimensions or logical Level", name)
 	}
 	rows, err := fastcore.QPrefixWidth(level)
@@ -146,18 +147,18 @@ func (eval Evaluator) mulFastCKKSPrefix(op0, op1, opOut *rlwe.Ciphertext) error 
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: ciphertexts cannot be nil")
 	}
 	params := eval.GetParameters()
-	level0, err := validateFastCKKSScalarCiphertext("op0", op0, params)
+	level0, err := validateFastCKKSScalarCiphertext("op0", op0, params, false)
 	if err != nil {
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: %w", err)
 	}
-	level1, err := validateFastCKKSScalarCiphertext("op1", op1, params)
+	level1, err := validateFastCKKSScalarCiphertext("op1", op1, params, false)
 	if err != nil {
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: %w", err)
 	}
 	if op0.Degree() != 1 || op1.Degree() != 1 {
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: ciphertext inputs must both have degree 1")
 	}
-	levelOut, err := validateFastCKKSScalarCiphertext("output", opOut, params)
+	levelOut, err := validateFastCKKSScalarCiphertext("output", opOut, params, false)
 	if err != nil {
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: %w", err)
 	}

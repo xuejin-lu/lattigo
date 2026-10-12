@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -304,6 +305,31 @@ func TestPublicFastBTSLogN16ScalarAPIsUseSharedQPrefixAndPreserveCallChain(t *te
 	require.NoError(t, evaluator.Rescale(accumulator, accumulator))
 	require.Equal(t, levelBeforeRescale-params.LevelsConsumedPerRescaling(), accumulator.Level())
 	require.Equal(t, []scalarCoreCall{{name: "mul", rows: rows}, {name: "addsub", rows: rows}, {name: "addsub", rows: rows}, {name: "mul_then_add", rows: rows}}, recorder.calls)
+}
+
+func TestPublicFastBTSLogN16IntegerMulAtLevelZeroUsesQ0AndContinues(t *testing.T) {
+	params := btsCoverageLogN16Parameters(t)
+	evaluator := NewEvaluator(params, nil)
+	recorder := &recordingScalarCore{delegate: fastcore.NewScalarWorkspace(params.RingQ(), fastcore.MaxQPrefixWidth)}
+	evaluator.scalarCore = recorder
+	input := btsCoverageCiphertext(t, params, 0, 307, true)
+	originalScale := input.Scale
+	wantMul := btsCoverageScalarOracle(t, params, input, big.NewInt(17), rlwe.NewScale(1), "mul")
+	require.NoError(t, evaluator.Mul(input, big.NewInt(17), input))
+	requireBTSCoverageRows(t, params, input, wantMul)
+	require.Equal(t, 0, input.Level())
+	require.True(t, originalScale.Equal(input.Scale), "integer scalar Mul must not consume a level or change scale")
+	require.True(t, input.IsNTT)
+	require.False(t, input.IsMontgomery)
+	require.Equal(t, []scalarCoreCall{{name: "mul", rows: 1}}, recorder.calls)
+
+	// The q0-only result remains usable by the next ordinary scalar API.
+	wantAdd := btsCoverageScalarOracle(t, params, input, int64(3), input.Scale, "add")
+	require.NoError(t, evaluator.Add(input, int64(3), input))
+	requireBTSCoverageRows(t, params, input, wantAdd)
+	require.Equal(t, 0, input.Level())
+	require.True(t, originalScale.Equal(input.Scale))
+	require.Equal(t, []scalarCoreCall{{name: "mul", rows: 1}, {name: "addsub", rows: 1}}, recorder.calls)
 }
 
 func TestPublicFastBTSLogN16ComplexScalarMulPreservesMontgomeryRepresentation(t *testing.T) {
