@@ -188,7 +188,9 @@ func TestPublicFastZeroSecretT3DifferentScaleSubUsesQPrefixCores(t *testing.T) {
 	numerator := new(big.Int).Lsh(big.NewInt(1), 126)
 	highScale := rlwe.NewScale(numerator).Div(rlwe.NewScale(q26))
 	op0 := newFastBTSScaleAlignmentCiphertext(params, 2, level, highScale, 19)
-	op1 := newFastBTSScaleAlignmentCiphertext(params, 1, level, lowScale, 71)
+	// BTS T3 multiplies T1(L26) by T2(L25), so the subtraction's low-scale
+	// right operand remains at L26 while the in-place output is L25.
+	op1 := newFastBTSScaleAlignmentCiphertext(params, 1, level+1, lowScale, 71)
 	op0Before := op0.CopyNew()
 	op1Before := op1.CopyNew()
 
@@ -220,6 +222,7 @@ func TestPublicFastZeroSecretT3DifferentScaleSubUsesQPrefixCores(t *testing.T) {
 	requireFastBTSScaleAlignmentRowsUnchanged(t, op1Before, op1, fastcore.MaxQPrefixWidth)
 
 	require.Equal(t, level, op0.Level())
+	require.Equal(t, level+1, op1.Level())
 	require.Equal(t, 2, op0.Degree())
 	require.True(t, highScale.Equal(op0.Scale))
 	require.True(t, op0.IsNTT)
