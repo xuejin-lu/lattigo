@@ -7,6 +7,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
 	"github.com/tuneinsight/lattigo/v6/utils"
 	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
@@ -91,38 +92,10 @@ func (eval *Evaluator) addSubRows(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut 
 	if err != nil {
 		return err
 	}
-	level := utils.Min(op0.Level(), opOut.Level())
-	if err := eval.validateExplicitRows(level, rows); err != nil {
-		return err
+	if eval.scalarCore == nil {
+		return errors.New("Fast scalar core is not initialized")
 	}
-	for d := range op0.Value {
-		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
-			return fmt.Errorf("input component %d: %w", d, err)
-		}
-	}
-	Resize(opOut, op0.Degree(), level, eval.Parameters.N())
-	*opOut.MetaData = *op0.MetaData
-	if op0 != opOut {
-		for d := range op0.Value {
-			copyPrefixRowsUnchecked(rows, op0.Value[d], opOut.Value[d])
-		}
-	}
-	values, err := eval.scalarNTTRows(c, &op0.Scale.Value, op0.IsMontgomery, level, rows)
-	if err != nil {
-		return err
-	}
-	for limb := 0; limb < rows; limb++ {
-		s := eval.Parameters.RingQ().SubRings[limb]
-		half := eval.Parameters.N() >> 1
-		if sub {
-			s.SubScalar(opOut.Value[0].Coeffs[limb][:half], values[limb][0], opOut.Value[0].Coeffs[limb][:half])
-			s.SubScalar(opOut.Value[0].Coeffs[limb][half:], values[limb][1], opOut.Value[0].Coeffs[limb][half:])
-		} else {
-			s.AddScalar(opOut.Value[0].Coeffs[limb][:half], values[limb][0], opOut.Value[0].Coeffs[limb][:half])
-			s.AddScalar(opOut.Value[0].Coeffs[limb][half:], values[limb][1], opOut.Value[0].Coeffs[limb][half:])
-		}
-	}
-	return nil
+	return eval.scalarCore.AddSubRows(eval.Parameters.RingQ(), op0, opOut, rows, c, sub)
 }
 
 func (eval *Evaluator) addSubElement(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], opOut *rlwe.Ciphertext, sub bool) error {
@@ -302,81 +275,10 @@ func (eval *Evaluator) MulThenAddQPrefixRows(op0 *rlwe.Ciphertext, op1 rlwe.Oper
 	if err := eval.validateExplicitRows(level, rows); err != nil {
 		return err
 	}
-	for d := range op0.Value {
-		if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows, op0.Value[d]); err != nil {
-			return fmt.Errorf("input component %d: %w", d, err)
-		}
+	if eval.scalarCore == nil {
+		return errors.New("Fast scalar core is not initialized")
 	}
-	source := op0.Value
-	var scale rlwe.Scale
-	if cmp := op0.Scale.Cmp(opOut.Scale); cmp == 0 {
-		if c.IsInt() {
-			scale = rlwe.NewScale(1)
-		} else {
-			// Preserve op0 when the accumulator aliases it: scaling opOut below
-			// must not also change the multiplicand used by the fused add.
-			if op0 == opOut {
-				for d := range op0.Value {
-					copyPrefixRowsUnchecked(rows, op0.Value[d], eval.nttScratch[d])
-				}
-				source = eval.nttScratch[:len(op0.Value)]
-			}
-			scale, err = eval.coefficientScale(level)
-			if err != nil {
-				return err
-			}
-			if err = eval.mulScalarAtScaleRows(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut, rows); err != nil {
-				return err
-			}
-			opOut.Scale = opOut.Scale.Mul(scale)
-		}
-	} else if cmp < 0 {
-		scale = opOut.Scale.Div(op0.Scale)
-	} else {
-		// Promote the accumulator to the term scale before the fused add.
-		// Mod1's Standard target-scale schedule can produce a higher-scale
-		// power term; multiplying the maintained residues and updating the
-		// metadata preserves the represented value without a level transition.
-		ratio := op0.Scale.Div(opOut.Scale).BigInt()
-		if ratio.Sign() <= 0 {
-			return errors.New("invalid Fast MulThenAdd scale promotion ratio")
-		}
-		if err := eval.MulIntegerQPrefixRows(opOut, ratio, rows, opOut); err != nil {
-			return err
-		}
-		opOut.Scale = op0.Scale
-		if c.IsInt() {
-			scale = rlwe.NewScale(1)
-		} else {
-			if op0 == opOut {
-				for d := range op0.Value {
-					copyPrefixRowsUnchecked(rows, op0.Value[d], eval.nttScratch[d])
-				}
-				source = eval.nttScratch[:len(op0.Value)]
-			}
-			scale, err = eval.coefficientScale(level)
-			if err != nil {
-				return err
-			}
-			if err = eval.mulScalarAtScaleRows(opOut, bignum.ToComplex(scale.BigInt(), eval.Parameters.EncodingPrecision()), rlwe.NewScale(1), opOut, rows); err != nil {
-				return err
-			}
-			opOut.Scale = opOut.Scale.Mul(scale)
-		}
-	}
-	values, err := eval.scalarNTTRows(c, &scale.Value, false, level, rows)
-	if err != nil {
-		return err
-	}
-	for d := range source {
-		for limb := 0; limb < rows; limb++ {
-			s := eval.Parameters.RingQ().SubRings[limb]
-			half := eval.Parameters.N() >> 1
-			s.MulScalarMontgomeryThenAdd(source[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), opOut.Value[d].Coeffs[limb][:half])
-			s.MulScalarMontgomeryThenAdd(source[d].Coeffs[limb][half:], ring.MForm(values[limb][1], s.Modulus, s.BRedConstant), opOut.Value[d].Coeffs[limb][half:])
-		}
-	}
-	return nil
+	return eval.scalarCore.MulThenAddRows(eval.Parameters.RingQ(), op0, opOut, rows, eval.Parameters.LevelsConsumedPerRescaling(), c)
 }
 
 func (eval *Evaluator) mulElementThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly], out *rlwe.Ciphertext, rows int) error {
@@ -461,37 +363,10 @@ func (eval *Evaluator) mulScalarAtScale(op0 *rlwe.Ciphertext, c *bignum.Complex,
 }
 
 func (eval *Evaluator) mulScalarAtScaleRows(op0 *rlwe.Ciphertext, c *bignum.Complex, scale rlwe.Scale, out *rlwe.Ciphertext, rows int) error {
-	if eval == nil || op0 == nil || c == nil || out == nil {
-		return errors.New("Fast scalar multiplication evaluator and operands cannot be nil")
+	if eval == nil || eval.scalarCore == nil {
+		return errors.New("Fast scalar core is not initialized")
 	}
-	level := utils.Min(op0.Level(), out.Level())
-	ringQ := eval.Parameters.RingQ()
-	for d := range op0.Value {
-		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
-			return fmt.Errorf("input component %d: %w", d, err)
-		}
-	}
-	values, err := eval.scalarNTTRows(c, &scale.Value, false, level, rows)
-	if err != nil {
-		return err
-	}
-	Resize(out, op0.Degree(), level, eval.Parameters.N())
-	for d := range out.Value {
-		if err := validatePrefixRows(ringQ, level, rows, out.Value[d]); err != nil {
-			return fmt.Errorf("output component %d: %w", d, err)
-		}
-	}
-	for d := range op0.Value {
-		for limb := 0; limb < rows; limb++ {
-			s := ringQ.SubRings[limb]
-			half := eval.Parameters.N() >> 1
-			s.MulScalarMontgomery(op0.Value[d].Coeffs[limb][:half], ring.MForm(values[limb][0], s.Modulus, s.BRedConstant), out.Value[d].Coeffs[limb][:half])
-			s.MulScalarMontgomery(op0.Value[d].Coeffs[limb][half:], ring.MForm(values[limb][1], s.Modulus, s.BRedConstant), out.Value[d].Coeffs[limb][half:])
-		}
-	}
-	*out.MetaData = *op0.MetaData
-	out.Scale = op0.Scale.Mul(scale)
-	return nil
+	return eval.scalarCore.MulAtScaleRows(eval.Parameters.RingQ(), op0, out, rows, c, scale)
 }
 
 func (eval *Evaluator) pointMul(a, b, out ring.Poly, montgomery bool) error {
@@ -582,15 +457,7 @@ func (eval *Evaluator) scalar(value rlwe.Operand) (*bignum.Complex, error) {
 }
 
 func (eval *Evaluator) coefficientScale(level int) (rlwe.Scale, error) {
-	consumed := eval.Parameters.LevelsConsumedPerRescaling()
-	if level-consumed+1 < 0 {
-		return rlwe.Scale{}, errors.New("insufficient level for Fast scalar encoding scale")
-	}
-	scale := rlwe.NewScale(1)
-	for i := 0; i < consumed; i++ {
-		scale = scale.Mul(rlwe.NewScale(eval.Parameters.RingQ().SubRings[level-i].Modulus))
-	}
-	return scale, nil
+	return fastcore.CoefficientScale(eval.Parameters.RingQ(), level, eval.Parameters.LevelsConsumedPerRescaling())
 }
 
 func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery bool) [MaxQPrefixWidth][2]uint64 {
@@ -601,38 +468,8 @@ func (eval *Evaluator) scalarNTT(c *bignum.Complex, scale *big.Float, montgomery
 }
 
 func (eval *Evaluator) scalarNTTRows(c *bignum.Complex, scale *big.Float, montgomery bool, level, rows int) ([MaxQPrefixWidth][2]uint64, error) {
-	var out [MaxQPrefixWidth][2]uint64
-	if eval == nil || c == nil || scale == nil {
-		return out, errors.New("Fast scalar NTT evaluator, scalar and scale cannot be nil")
+	if eval == nil {
+		return [MaxQPrefixWidth][2]uint64{}, errors.New("Fast scalar NTT evaluator cannot be nil")
 	}
-	if err := validatePrefixRows(eval.Parameters.RingQ(), level, rows); err != nil {
-		return out, err
-	}
-	toInt := func(x *big.Float) *big.Int {
-		z := new(big.Int)
-		if x == nil {
-			return z
-		}
-		v := new(big.Float).Mul(x, scale)
-		if x.Sign() > 0 {
-			v.Add(v, new(big.Float).SetFloat64(0.5))
-		} else if x.Sign() < 0 {
-			v.Sub(v, new(big.Float).SetFloat64(0.5))
-		}
-		v.Int(z)
-		return z
-	}
-	real, imag := toInt(c[0]), toInt(c[1])
-	for limb := 0; limb < rows; limb++ {
-		s := eval.Parameters.RingQ().SubRings[limb]
-		r := new(big.Int).Mod(new(big.Int).Set(real), new(big.Int).SetUint64(s.Modulus)).Uint64()
-		i := new(big.Int).Mod(new(big.Int).Set(imag), new(big.Int).SetUint64(s.Modulus)).Uint64()
-		i = ring.MRed(i, s.RootsForward[1], s.Modulus, s.MRedConstant)
-		out[limb][0], out[limb][1] = ring.CRed(r+i, s.Modulus), ring.CRed(r+s.Modulus-i, s.Modulus)
-		if montgomery {
-			out[limb][0] = ring.MForm(out[limb][0], s.Modulus, s.BRedConstant)
-			out[limb][1] = ring.MForm(out[limb][1], s.Modulus, s.BRedConstant)
-		}
-	}
-	return out, nil
+	return fastcore.ScalarNTTRows(eval.Parameters.RingQ(), c, scale, montgomery, level, rows)
 }

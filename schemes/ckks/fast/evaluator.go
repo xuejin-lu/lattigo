@@ -24,6 +24,7 @@ type Evaluator struct {
 	automorphismCore        fastcore.AutomorphismCore
 	addSubCore              fastcore.AddSubCore
 	mulCore                 fastcore.MulCore
+	scalarCore              fastcore.ScalarCore
 	rescaleCore             fastcore.RescaleCore
 	lastBSGSBabyRotations   int
 	qPrefixCapacityObserver func(QPrefixCapacitySnapshot) error
@@ -41,6 +42,7 @@ func NewEvaluator(params ckks.Parameters) *Evaluator {
 		automorphismCore:       fastcore.NewAutomorphismWorkspace(params.N(), prefixWidth),
 		addSubCore:             fastcore.NewAddSubWorkspace(),
 		mulCore:                fastcore.NewMulWorkspace(params.RingQ(), prefixWidth),
+		scalarCore:             fastcore.NewScalarWorkspace(params.RingQ(), prefixWidth),
 		rescaleCore:            fastcore.NewRescaleWorkspace(params.RingQ(), prefixWidth),
 	}
 	for i := range eval.nttScratch {
@@ -188,54 +190,10 @@ func (eval *Evaluator) mulIntegerRowsPreservingHigherRows(op0 *rlwe.Ciphertext, 
 }
 
 func (eval *Evaluator) mulIntegerRowsWithPolicy(op0 *rlwe.Ciphertext, scalar *big.Int, opOut *rlwe.Ciphertext, rows int, preserveHigherRows bool) error {
-	if eval == nil || op0 == nil || opOut == nil || scalar == nil {
-		return errors.New("Fast integer multiplication evaluator, operands and scalar cannot be nil")
+	if eval == nil {
+		return errors.New("Fast integer multiplication evaluator cannot be nil")
 	}
-	if op0.MetaData == nil || opOut.MetaData == nil {
-		return errors.New("Fast integer multiplication metadata cannot be nil")
-	}
-	if op0.N() != eval.Parameters.N() || opOut.N() != eval.Parameters.N() {
-		return errors.New("Fast integer multiplication dimensions do not match parameters")
-	}
-	if !op0.IsNTT || !opOut.IsNTT {
-		return errors.New("Fast integer multiplication requires NTT-domain operands")
-	}
-	if op0.IsMontgomery != opOut.IsMontgomery {
-		return errors.New("Fast integer multiplication requires matching Montgomery representations")
-	}
-
-	level := op0.Level()
-	if opOut.Level() < level {
-		level = opOut.Level()
-	}
-	ringQ := eval.Parameters.RingQ()
-	for d := range op0.Value {
-		if err := validatePrefixRows(ringQ, level, rows, op0.Value[d]); err != nil {
-			return fmt.Errorf("input component %d: %w", d, err)
-		}
-	}
-	if !preserveHigherRows {
-		Resize(opOut, op0.Degree(), level, eval.Parameters.N())
-	}
-	for d := range opOut.Value {
-		if err := validatePrefixRows(ringQ, level, rows, opOut.Value[d]); err != nil {
-			return fmt.Errorf("output component %d: %w", d, err)
-		}
-	}
-	var scalarMontgomery [MaxQPrefixWidth]uint64
-	for limb := 0; limb < rows; limb++ {
-		subring := ringQ.SubRings[limb]
-		scalarMod := new(big.Int).Mod(scalar, new(big.Int).SetUint64(subring.Modulus)).Uint64()
-		scalarMontgomery[limb] = ring.MForm(scalarMod, subring.Modulus, subring.BRedConstant)
-	}
-	for d := range op0.Value {
-		for limb := 0; limb < rows; limb++ {
-			subring := ringQ.SubRings[limb]
-			subring.MulScalarMontgomery(op0.Value[d].Coeffs[limb], scalarMontgomery[limb], opOut.Value[d].Coeffs[limb])
-		}
-	}
-	*opOut.MetaData = *op0.MetaData
-	return nil
+	return fastcore.MulIntegerRows(eval.Parameters.RingQ(), op0, opOut, rows, scalar, preserveHigherRows)
 }
 
 // Automorphism applies a Fast automorphism to a degree-one ciphertext. It

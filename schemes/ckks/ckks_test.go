@@ -378,7 +378,11 @@ func testEvaluatorAdd(tc *TestContext, t *testing.T) {
 
 		require.NoError(t, tc.Evl.Add(ciphertext, constant, ciphertext))
 
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, ciphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		verifyCiphertext := ciphertext
+		if tc.Evl.usesFastCKKSZeroSecretSimulation() {
+			verifyCiphertext = fastCKKSQPrefixDecodeView(t, tc.Params, ciphertext)
+		}
+		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, verifyCiphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
 	})
 
 	t.Run(name("Evaluator/Add/Vector", tc), func(t *testing.T) {
@@ -460,7 +464,11 @@ func testEvaluatorSub(tc *TestContext, t *testing.T) {
 
 		require.NoError(t, tc.Evl.Sub(ciphertext, constant, ciphertext))
 
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, ciphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		verifyCiphertext := ciphertext
+		if tc.Evl.usesFastCKKSZeroSecretSimulation() {
+			verifyCiphertext = fastCKKSQPrefixDecodeView(t, tc.Params, ciphertext)
+		}
+		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, verifyCiphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
 	})
 
 	t.Run(name("Evaluator/Sub/Vector", tc), func(t *testing.T) {
@@ -564,8 +572,11 @@ func testEvaluatorMul(tc *TestContext, t *testing.T) {
 		}
 
 		require.NoError(t, tc.Evl.Mul(ciphertext, constant, ciphertext))
-
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, ciphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		verifyCiphertext := ciphertext
+		if tc.Evl.usesFastCKKSZeroSecretSimulation() {
+			verifyCiphertext = fastCKKSQPrefixDecodeView(t, tc.Params, ciphertext)
+		}
+		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values, verifyCiphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
 	})
 
 	t.Run(name("Evaluator/Mul/Ct/Vector", tc), func(t *testing.T) {
@@ -663,7 +674,11 @@ func testEvaluatorMulThenAdd(tc *TestContext, t *testing.T) {
 
 		require.NoError(t, tc.Evl.MulThenAdd(ciphertext1, constant, ciphertext2))
 
-		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values2, ciphertext2, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
+		verifyCiphertext := ciphertext2
+		if tc.Evl.usesFastCKKSZeroSecretSimulation() {
+			verifyCiphertext = fastCKKSQPrefixDecodeView(t, tc.Params, ciphertext2)
+		}
+		VerifyTestVectors(tc.Params, tc.Ecd, tc.Dec, values2, verifyCiphertext, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
 	})
 
 	t.Run(name("Evaluator/MulThenAdd/Vector", tc), func(t *testing.T) {

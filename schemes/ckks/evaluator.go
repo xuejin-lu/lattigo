@@ -21,6 +21,7 @@ type Evaluator struct {
 	automorphismCore fastcore.AutomorphismCore
 	addSubCore       fastcore.AddSubCore
 	mulCore          fastcore.MulCore
+	scalarCore       fastcore.ScalarCore
 	rescaleCore      fastcore.RescaleCore
 	fastQPCompat     *fastQPCompatibilityState
 }
@@ -40,6 +41,7 @@ func NewEvaluator(parameters Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
 		eval.automorphismCore = fastcore.NewAutomorphismWorkspace(parameters.N(), parameters.MaxLevel()+1)
 		eval.addSubCore = fastcore.NewAddSubWorkspace()
 		eval.mulCore = fastcore.NewMulWorkspace(parameters.RingQ(), fastcore.MaxQPrefixWidth)
+		eval.scalarCore = fastcore.NewScalarWorkspace(parameters.RingQ(), fastcore.MaxQPrefixWidth)
 		prefixWidth, _ := fastcore.QPrefixWidth(parameters.MaxLevel())
 		eval.rescaleCore = fastcore.NewRescaleWorkspace(parameters.RingQ(), prefixWidth)
 	}
@@ -65,6 +67,9 @@ func (eval Evaluator) GetRLWEParameters() *rlwe.Parameters {
 // Passing an invalid type will return an error.
 func (eval Evaluator) Add(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
 	if eval.usesFastCKKSZeroSecretSimulation() {
+		if eval.GetParameters().RingType() == ring.Standard && isFastCKKSScalarOperand(op1) {
+			return eval.addSubFastCKKSZeroSecretScalar("Add", op0, op1, opOut, false)
+		}
 		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
 			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
 				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, false)
@@ -187,6 +192,9 @@ func (eval Evaluator) AddNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlw
 // Passing an invalid type will return an error.
 func (eval Evaluator) Sub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
 	if eval.usesFastCKKSZeroSecretSimulation() {
+		if eval.GetParameters().RingType() == ring.Standard && isFastCKKSScalarOperand(op1) {
+			return eval.addSubFastCKKSZeroSecretScalar("Sub", op0, op1, opOut, true)
+		}
 		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
 			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
 				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, true)
@@ -751,6 +759,45 @@ func (eval Evaluator) MulNew(op0 *rlwe.Ciphertext, op1 rlwe.Operand) (opOut *rlw
 //   - The procedure will return an error if either op0 or op1 are have a degree higher than 1.
 //   - The procedure will return an error if opOut.Degree != op0.Degree + op1.Degree.
 func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if eval.GetParameters().RingType() == ring.Standard {
+			if element, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+				if ciphertext, ok := element.(*rlwe.Ciphertext); ok {
+					return eval.mulFastCKKSPrefix(op0, ciphertext, opOut)
+				}
+				if err := eval.requireFastCKKSFullActiveRows("Mul", op0); err != nil {
+					return err
+				}
+				if err := eval.requireFastCKKSFullActiveElementRows("Mul operand", element.El()); err != nil {
+					return err
+				}
+				if err := eval.requireFastCKKSFullActiveRows("Mul output", opOut); err != nil {
+					return err
+				}
+			} else if isFastCKKSScalarOperand(op1) {
+				return eval.mulScalarFastCKKSZeroSecret(op0, op1, opOut)
+			} else {
+				if err := eval.requireFastCKKSFullActiveRows("Mul", op0); err != nil {
+					return err
+				}
+				if err := eval.requireFastCKKSFullActiveRows("Mul output", opOut); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := eval.requireFastCKKSFullActiveRows("Mul", op0); err != nil {
+				return err
+			}
+			if element, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+				if err := eval.requireFastCKKSFullActiveElementRows("Mul operand", element.El()); err != nil {
+					return err
+				}
+			}
+			if err := eval.requireFastCKKSFullActiveRows("Mul output", opOut); err != nil {
+				return err
+			}
+		}
+	}
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
 
@@ -767,43 +814,7 @@ func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 		}
 
 	case complex128, float64, int, int64, uint, uint64, *big.Int, *big.Float, *bignum.Complex:
-
-		_, level, err := eval.InitOutputUnaryOp(op0.El(), opOut.El())
-		if err != nil {
-			return fmt.Errorf("cannot Mul: %w", err)
-		}
-
-		opOut.Resize(op0.Degree(), level)
-
-		// Convertes the scalar to a *bignum.Complex
-		cmplxBig := bignum.ToComplex(op1, eval.GetParameters().EncodingPrecision())
-
-		// Gets the ring at the target level
-		ringQ := eval.GetParameters().RingQ().AtLevel(level)
-
-		var scale rlwe.Scale
-		if cmplxBig.IsInt() {
-			scale = rlwe.NewScale(1) // Scalar is a GaussianInteger, thus no scaling required
-		} else {
-			scale = rlwe.NewScale(ringQ.SubRings[level].Modulus) // Current modulus scaling factor
-
-			// If DefaultScalingFactor > 2^60, then multiple moduli are used per single rescale
-			// thus continues multiplying the scale with the appropriate number of moduli
-			for i := 1; i < eval.GetParameters().LevelsConsumedPerRescaling(); i++ {
-				scale = scale.Mul(rlwe.NewScale(ringQ.SubRings[level-i].Modulus))
-			}
-		}
-
-		// Convertes the *bignum.Complex to a complex RNS scalar
-		RNSReal, RNSImag := bigComplexToRNSScalar(ringQ, &scale.Value, cmplxBig)
-
-		// Generic in place evaluation
-		eval.evaluateWithScalar(level, op0.Value, RNSReal, RNSImag, opOut.Value, ringQ.MulDoubleRNSScalar)
-
-		// Copies the metadata on the output
-		opOut.Scale = op0.Scale.Mul(scale) // updates the scaling factor
-
-		return nil
+		return eval.mulScalarFullQ(op0, op1, opOut)
 
 	case []complex128, []float64, []*big.Float, []*bignum.Complex:
 
@@ -843,6 +854,30 @@ func (eval Evaluator) Mul(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 		return fmt.Errorf("op1.(type) must be rlwe.ElementInterface[ring.Poly], complex128, float64, int, int64, uint, uint64, *big.Int, *big.Float, *bignum.Complex, []complex128, []float64, []*big.Float or []*bignum.Complex, but is %T", op1)
 	}
 	return
+}
+
+// mulScalarFullQ preserves the generic full-RNS scalar operation for callers
+// that have already selected a complete-Q CKKS path. Fast Q-prefix scalar API
+// dispatch is performed at the public Mul boundary before reaching this helper.
+func (eval Evaluator) mulScalarFullQ(op0 *rlwe.Ciphertext, scalar rlwe.Operand, opOut *rlwe.Ciphertext) error {
+	_, level, err := eval.InitOutputUnaryOp(op0.El(), opOut.El())
+	if err != nil {
+		return fmt.Errorf("cannot Mul: %w", err)
+	}
+	opOut.Resize(op0.Degree(), level)
+	cmplxBig := bignum.ToComplex(scalar, eval.GetParameters().EncodingPrecision())
+	ringQ := eval.GetParameters().RingQ().AtLevel(level)
+	scale := rlwe.NewScale(1)
+	if !cmplxBig.IsInt() {
+		scale = rlwe.NewScale(ringQ.SubRings[level].Modulus)
+		for i := 1; i < eval.GetParameters().LevelsConsumedPerRescaling(); i++ {
+			scale = scale.Mul(rlwe.NewScale(ringQ.SubRings[level-i].Modulus))
+		}
+	}
+	rnsReal, rnsImag := bigComplexToRNSScalar(ringQ, &scale.Value, cmplxBig)
+	eval.evaluateWithScalar(level, op0.Value, rnsReal, rnsImag, opOut.Value, ringQ.MulDoubleRNSScalar)
+	opOut.Scale = op0.Scale.Mul(scale)
+	return nil
 }
 
 // MulRelinNew multiplies op0 with op1 with relinearization and returns the result in a newly created element.
@@ -1087,6 +1122,22 @@ func (eval Evaluator) mulRelin(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ring.Poly
 //   - opOut.Degree != op0.Degree + op1.Degree.
 //   - opOut = op0 or op1.
 func (eval Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
+	if eval.usesFastCKKSZeroSecretSimulation() && eval.GetParameters().RingType() == ring.Standard && isFastCKKSScalarOperand(op1) {
+		return eval.mulThenAddScalarFastCKKSZeroSecret(op0, op1, opOut)
+	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if err := eval.requireFastCKKSFullActiveRows("MulThenAdd", op0); err != nil {
+			return err
+		}
+		if err := eval.requireFastCKKSFullActiveRows("MulThenAdd output", opOut); err != nil {
+			return err
+		}
+		if element, ok := op1.(rlwe.ElementInterface[ring.Poly]); ok {
+			if err := eval.requireFastCKKSFullActiveElementRows("MulThenAdd operand", element.El()); err != nil {
+				return err
+			}
+		}
+	}
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
 
@@ -1138,7 +1189,7 @@ func (eval Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *
 
 				scaleInt := new(big.Int)
 				scaleRLWE.Value.Int(scaleInt)
-				if err = eval.Mul(opOut, scaleInt, opOut); err != nil {
+				if err = eval.mulScalarFullQ(opOut, scaleInt, opOut); err != nil {
 					return fmt.Errorf("cannot MulThenAdd: %w", err)
 				}
 				opOut.Scale = opOut.Scale.Mul(scaleRLWE)
@@ -1178,7 +1229,7 @@ func (eval Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *
 
 			scaleInt := new(big.Int)
 			scaleRLWE.Value.Int(scaleInt)
-			if err = eval.Mul(opOut, scaleInt, opOut); err != nil {
+			if err = eval.mulScalarFullQ(opOut, scaleInt, opOut); err != nil {
 				return fmt.Errorf("cannot MulThenAdd: %w", err)
 			}
 			opOut.Scale = opOut.Scale.Mul(scaleRLWE)
@@ -1267,7 +1318,7 @@ func (eval Evaluator) mulRelinThenAdd(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ri
 		ratio := resScale.Div(opOut.Scale)
 		// Only scales up if int(ratio) >= 2
 		if ratio.Float64() >= 2.0 {
-			if err = eval.Mul(opOut, &ratio.Value, opOut); err != nil {
+			if err = eval.mulScalarFullQ(opOut, &ratio.Value, opOut); err != nil {
 				return fmt.Errorf("cannot MulRelinThenAdd: %w", err)
 			}
 			opOut.Scale = resScale
