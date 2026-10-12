@@ -68,11 +68,14 @@ func (switcher DomainSwitcher) ComplexToReal(eval *Evaluator, ctIn, opOut *rlwe.
 		return fmt.Errorf("cannot ComplexToReal: ctIn ring degree must be twice opOut ring degree")
 	}
 
-	opOut.Resize(1, level)
-
 	if switcher.stdToci == nil {
 		return fmt.Errorf("cannot ComplexToReal: no realToComplexEvk provided to this DomainSwitcher")
 	}
+	if switcher.stdToci.GadgetCiphertext.Layout == rlwe.KeyLayoutFast {
+		return fmt.Errorf("cannot ComplexToReal: Fast evaluation keys are unsupported by the Standard ring-switch path")
+	}
+
+	opOut.Resize(1, level)
 
 	poolQ := switcher.poolQ.AtLevel(level)
 	buffQ1 := poolQ.GetBuffPoly()
@@ -115,11 +118,14 @@ func (switcher DomainSwitcher) RealToComplex(eval *Evaluator, ctIn, opOut *rlwe.
 		return fmt.Errorf("cannot RealToComplex: opOut ring degree must be twice ctIn ring degree")
 	}
 
-	opOut.Resize(1, level)
-
 	if switcher.ciToStd == nil {
 		return fmt.Errorf("cannot RealToComplex: no realToComplexEvk provided to this DomainSwitcher")
 	}
+	if switcher.ciToStd.GadgetCiphertext.Layout == rlwe.KeyLayoutFast {
+		return fmt.Errorf("cannot RealToComplex: Fast evaluation keys are unsupported by the Standard ring-switch path")
+	}
+
+	opOut.Resize(1, level)
 
 	stdRingQ := switcher.stdRingQ.AtLevel(level)
 	stdRingQ.UnfoldConjugateInvariantToStandard(ctIn.Value[0], opOut.Value[0])

@@ -233,7 +233,7 @@ func TestPublicFastZeroSecretRotateDoesNotAccessAvailableGaloisKey(t *testing.T)
 	sk := NewKeyGenerator(params).GenSecretKeyNew()
 	galEl := params.GaloisElementForRotation(1)
 	galoisKey := NewKeyGenerator(params).GenGaloisKeyNew(galEl, sk)
-	require.Equal(t, rlwe.KeyLayoutStandard, galoisKey.Layout)
+	require.Equal(t, rlwe.KeyLayoutFast, galoisKey.Layout)
 	keys := &rotateTrackingEvaluationKeySet{EvaluationKeySet: rlwe.NewMemEvaluationKeySet(nil, galoisKey)}
 	eval := NewEvaluator(params, keys)
 	keys.galoisKeyGets = 0 // Ignore constructor key-list enumeration.
@@ -255,7 +255,7 @@ func TestPublicFastZeroSecretRotateRejectsInvalidInputsTransactionally(t *testin
 	galEl := params.GaloisElementForRotation(1)
 	galoisKey := NewKeyGenerator(params).GenGaloisKeyNew(galEl, sk)
 	keys := &rotateTrackingEvaluationKeySet{EvaluationKeySet: rlwe.NewMemEvaluationKeySet(nil, galoisKey)}
-	require.Equal(t, rlwe.KeyLayoutStandard, galoisKey.Layout)
+	require.Equal(t, rlwe.KeyLayoutFast, galoisKey.Layout)
 	eval := NewEvaluator(params, keys)
 	keys.galoisKeyGets = 0 // Ignore constructor key-list enumeration.
 	encryptor := rlwe.NewEncryptor(params, sk)

@@ -570,6 +570,11 @@ func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
 	if op0.MetaData == nil || opOut.MetaData == nil {
 		return fmt.Errorf("cannot Rescale: op0.MetaData or opOut.MetaData is nil")
 	}
+	if eval.usesFastCKKSZeroSecretSimulation() {
+		if err := eval.fastQPCompat.take(); err != nil {
+			return fmt.Errorf("cannot Fast CKKS Rescale: previous compatibility operation failed: %w", err)
+		}
+	}
 	// The compatibility fallback is entered only after a high-level lazy-QP
 	// automorphism has validated and armed this evaluator, and only for a
 	// complete logical-Q ciphertext beyond the maintained prefix. Ordinary
@@ -1224,7 +1229,6 @@ func (eval Evaluator) MulThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *
 // The procedure will return an error if the evaluator was not created with an relinearization key.
 // The procedure will return an error if opOut = op0 or op1.
 func (eval Evaluator) MulRelinThenAdd(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ciphertext) (err error) {
-
 	switch op1 := op1.(type) {
 	case rlwe.ElementInterface[ring.Poly]:
 		if op1.Degree() == 0 {

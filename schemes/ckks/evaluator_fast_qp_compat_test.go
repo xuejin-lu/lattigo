@@ -164,6 +164,141 @@ func TestPublicFastAutomorphismUsesPrefixCoreAndVerifiedFullQPath(t *testing.T) 
 		require.True(t, bad.Equal(badBefore))
 		require.True(t, output.Equal(outputBefore), "failed full-Q verification must not modify output")
 	})
+
+	t.Run("BTS-high-Level-NTT-full-Q-Conjugate-preserves-state", func(t *testing.T) {
+		level := params.MaxLevel()
+		require.Greater(t, level+1, fastcore.MaxQPrefixWidth)
+		eval := NewEvaluator(params, nil)
+		input := rlwe.NewCiphertext(params, 1, level)
+		input.Scale = rlwe.NewScale(1 << fastRotateTestLogScale)
+		for row := 0; row <= level; row++ {
+			input.Value[0].Coeffs[row][1] = 7
+			input.Value[0].Coeffs[row][2] = 3
+			for _, coefficient := range input.Value[1].Coeffs[row] {
+				require.Zero(t, coefficient, "BTS-shaped input c1 is zero at q%d", row)
+			}
+		}
+		ringQ := params.RingQ().AtLevel(level)
+		nttC0 := ringQ.NewPoly()
+		ringQ.NTT(input.Value[0], nttC0)
+		input.Value[0] = nttC0
+		input.IsNTT = true
+
+		output := rlwe.NewCiphertext(params, 1, level)
+		output.IsNTT = true
+		galEl := params.GaloisElementForComplexConjugation()
+		want := ringQ.NewPoly()
+		ringQ.AutomorphismNTT(input.Value[0], galEl, want)
+
+		require.NoError(t, eval.Conjugate(input, output))
+		require.Equal(t, level, output.Level())
+		require.True(t, output.IsNTT)
+		require.False(t, output.IsMontgomery)
+		require.True(t, fullFastPolyRows(output.Value[0], level, params.N()), "all complete-Q c0 rows must remain materialized")
+		require.True(t, fullFastPolyRows(output.Value[1], level, params.N()), "all complete-Q c1 rows must remain materialized")
+		for row := 0; row <= level; row++ {
+			require.Equal(t, want.Coeffs[row], output.Value[0].Coeffs[row], "Galois automorphism q%d", row)
+			require.True(t, fastQPolyIsZero(ring.Poly{Coeffs: [][]uint64{output.Value[1].Coeffs[row]}}, 1), "output c1 q%d", row)
+		}
+		require.Equal(t, input.Scale, output.Scale)
+		require.Equal(t, *input.MetaData, *output.MetaData)
+		require.Equal(t, uint64(1), eval.fastQPCompat.counterSnapshot().automorphisms)
+	})
+}
+
+func TestFastQPCompatibilityDeferredModDownErrorStopsCompactRescale(t *testing.T) {
+	params := fastRotateTestParameters(t, ring.Standard)
+	kgen := rlwe.NewKeyGenerator(params)
+	sk := kgen.GenSecretKeyNew()
+	galEl := params.GaloisElementForRotation(1)
+	gk := kgen.GenGaloisKeyNew(galEl, sk)
+	eval := NewEvaluator(params, rlwe.NewMemEvaluationKeySet(nil, gk))
+	encoder := NewEncoder(params)
+	input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), fastRotateTestValues(4), 4, params.MaxLevel(), true)
+
+	// A verified complete-Q public automorphism arms the narrowly scoped BTS
+	// compatibility lane. The later Rescale input is explicitly compact.
+	fullQOutput := rlwe.NewCiphertext(params, 1, input.Level())
+	fullQOutput.IsNTT = true
+	require.NoError(t, eval.Conjugate(input, fullQOutput))
+	require.True(t, eval.fastQPCompat.isArmed())
+
+	compactInput := input.CopyNew()
+	for row := fastcore.MaxQPrefixWidth; row <= compactInput.Level(); row++ {
+		compactInput.Value[0].Coeffs[row] = nil
+		compactInput.Value[1].Coeffs[row] = nil
+	}
+	compactInputBefore := compactInput.CopyNew()
+	rescaleOutput := rlwe.NewCiphertext(params, 1, compactInput.Level()-1)
+	rescaleOutputBefore := rescaleOutput.CopyNew()
+
+	qpZero := rlwe.NewElementExtended(params, 1, input.Level(), gk.LevelP())
+	badP := qpZero.Value[0].P.CopyNew()
+	badP.Coeffs[0][0] = 1
+	modDownOutput := params.RingQ().AtLevel(input.Level()).NewPoly()
+	modDownOutputBefore := modDownOutput.CopyNew()
+	eval.ModDownQPtoQNTT(input.Level(), gk.LevelP(), qpZero.Value[0].Q, *badP, modDownOutput)
+	require.Equal(t, *modDownOutputBefore, modDownOutput, "rejected ModDown must leave its output unchanged")
+
+	err := eval.Rescale(compactInput, rescaleOutput)
+	require.ErrorContains(t, err, "previous compatibility operation failed")
+	require.ErrorContains(t, err, "P input is nonzero")
+	require.True(t, compactInput.Equal(compactInputBefore), "deferred ModDown error must not mutate compact input")
+	require.True(t, rescaleOutput.Equal(rescaleOutputBefore), "deferred ModDown error must stop before output mutation")
+	require.NoError(t, eval.fastQPCompat.peek(), "the error-returning boundary must consume the deferred error")
+}
+
+func TestFastQPCompatibilityRelinearizeElidesOnlyVerifiedZeroComponents(t *testing.T) {
+	params := fastRotateTestParameters(t, ring.Standard)
+	eval := NewEvaluator(params, nil)
+	level := params.MaxLevel()
+	input := rlwe.NewCiphertext(params, 2, level)
+	input.Scale = rlwe.NewScale(1 << fastRotateTestLogScale)
+	for row := 0; row <= level; row++ {
+		input.Value[0].Coeffs[row][1] = 7
+		input.Value[0].Coeffs[row][2] = 3
+	}
+	ringQ := params.RingQ().AtLevel(level)
+	nttC0 := ringQ.NewPoly()
+	ringQ.NTT(input.Value[0], nttC0)
+	input.Value[0] = nttC0
+	input.IsNTT = true
+
+	output := rlwe.NewCiphertext(params, 1, level)
+	output.IsNTT = true
+	require.NoError(t, eval.Relinearize(input, output))
+	require.Equal(t, 1, output.Degree())
+	require.Equal(t, level, output.Level())
+	require.True(t, fullFastPolyRows(output.Value[0], level, params.N()))
+	require.True(t, fullFastPolyRows(output.Value[1], level, params.N()))
+	for row := 0; row <= level; row++ {
+		require.Equal(t, input.Value[0].Coeffs[row], output.Value[0].Coeffs[row])
+		for _, coefficient := range output.Value[1].Coeffs[row] {
+			require.Zero(t, coefficient)
+		}
+	}
+	require.Equal(t, *input.MetaData, *output.MetaData)
+	require.Equal(t, input.IsNTT, output.IsNTT)
+	require.Equal(t, input.IsMontgomery, output.IsMontgomery)
+	require.Equal(t, uint64(1), eval.fastQPCompat.counterSnapshot().keySwitchElisions)
+
+	for _, component := range []int{1, 2} {
+		bad := input.CopyNew()
+		bad.Value[component].Coeffs[0][0] = 1
+		badBefore := bad.CopyNew()
+		outputBefore := output.CopyNew()
+		name := []string{"", "input c1 is nonzero", "input c2 is nonzero"}[component]
+		require.ErrorContains(t, eval.Relinearize(bad, output), name)
+		require.True(t, bad.Equal(badBefore), "rejected nonzero component must remain unchanged")
+		require.True(t, output.Equal(outputBefore), "rejected input must not modify existing output")
+	}
+
+	inPlace := input.CopyNew()
+	require.NoError(t, eval.Relinearize(inPlace, inPlace))
+	require.Equal(t, 1, inPlace.Degree())
+	require.Equal(t, level, inPlace.Level())
+	require.True(t, fullFastPolyRows(inPlace.Value[0], level, params.N()))
+	require.Equal(t, uint64(2), eval.fastQPCompat.counterSnapshot().keySwitchElisions)
 }
 
 func TestFastQPCompatibilityRejectsNonzeroInputsTransactionally(t *testing.T) {

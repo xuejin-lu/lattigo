@@ -734,6 +734,16 @@ func testEvaluatorMulThenAdd(tc *TestContext, t *testing.T) {
 		require.NoError(t, tc.Evl.MulThenAdd(ciphertext1, ciphertext2, ciphertext3))
 
 		require.Equal(t, ciphertext3.Degree(), 2)
+		if _, fast := any(tc.Params).(fastCKKSZeroSecretSimulationProvider); fast {
+			// This shared CKKS test encrypts with the public key, while Fast
+			// evaluation keys intentionally model the zero-secret BTS workload.
+			// Nonzero-c1 public-key ciphertexts must therefore fail closed here.
+			before := ciphertext3.CopyNew()
+			err := tc.Evl.Relinearize(ciphertext3, ciphertext3)
+			require.ErrorContains(t, err, "input c1 is nonzero")
+			require.True(t, ciphertext3.Equal(before), "Fast zero-secret relinearization must reject public-key ciphertexts transactionally")
+			return
+		}
 
 		require.NoError(t, tc.Evl.Relinearize(ciphertext3, ciphertext3))
 
@@ -800,8 +810,21 @@ func testBridge(tc *TestContext, t *testing.T) {
 		values, _, ctCI := tc.NewTestVector(-1-1i, 1+1i)
 
 		stdCTHave := NewCiphertext(stdParams, ctCI.Degree(), ctCI.Level())
+		if _, fast := any(tc.Params).(fastCKKSZeroSecretSimulationProvider); fast {
+			stdBefore := stdCTHave.CopyNew()
+			err := switcher.RealToComplex(evalStandar, ctCI, stdCTHave)
+			require.ErrorContains(t, err, "Fast evaluation keys are unsupported")
+			require.True(t, stdCTHave.Equal(stdBefore), "rejected Fast ring-switch keys must not mutate the output")
 
-		switcher.RealToComplex(evalStandar, ctCI, stdCTHave)
+			ciCTHave := NewCiphertext(ciParams, 1, stdCTHave.Level())
+			ciBefore := ciCTHave.CopyNew()
+			err = switcher.ComplexToReal(evalStandar, stdCTHave, ciCTHave)
+			require.ErrorContains(t, err, "Fast evaluation keys are unsupported")
+			require.True(t, ciCTHave.Equal(ciBefore), "rejected Fast ring-switch keys must not mutate the output")
+			return
+		}
+
+		require.NoError(t, switcher.RealToComplex(evalStandar, ctCI, stdCTHave))
 
 		VerifyTestVectors(stdParams, stdEncoder, stdDecryptor, values, stdCTHave, tc.Params.LogDefaultScale(), 0, *printPrecisionStats, t)
 

@@ -254,6 +254,81 @@ func (eval Evaluator) ApplyEvaluationKey(ctIn *rlwe.Ciphertext, evk *rlwe.Evalua
 	return nil
 }
 
+// Relinearize preserves the ordinary CKKS API for Fast zero-secret
+// ciphertexts. The key switch is omitted only when both c1 and the degree-two
+// component are verified zero on the active representation. Complete-Q rows
+// are preserved as supplied; compact inputs remain on the fixed Q-prefix.
+func (eval Evaluator) Relinearize(ctIn, opOut *rlwe.Ciphertext) error {
+	if !eval.usesFastCKKSZeroSecretSimulation() {
+		return eval.Evaluator.Relinearize(ctIn, opOut)
+	}
+	if err := eval.fastQPCompat.take(); err != nil {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: previous compatibility operation failed: %w", err)
+	}
+	levelIn, err := validateFastCKKSZeroSecretMulBacking("input", ctIn, eval.GetParameters())
+	if err != nil {
+		return err
+	}
+	if len(ctIn.Value) != 3 {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: input must have degree two")
+	}
+	levelOut, err := validateFastCKKSZeroSecretMulBacking("output", opOut, eval.GetParameters())
+	if err != nil {
+		return err
+	}
+	if len(opOut.Value) < 2 {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: output must have degree-one storage")
+	}
+	if ctIn.N() != eval.GetParameters().N() || opOut.N() != eval.GetParameters().N() {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: input and output ring degrees must match parameters")
+	}
+	if ctIn.IsMontgomery && !ctIn.IsNTT {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: Montgomery representation requires NTT domain")
+	}
+	level := min(levelIn, levelOut)
+	rows, err := fastcore.QPrefixWidth(level)
+	if err != nil {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: %w", err)
+	}
+	ringQ := eval.GetParameters().RingQ()
+	if err = fastcore.ValidatePrefixRows(ringQ, level, rows, ctIn.Value[:3]...); err != nil {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: %w", err)
+	}
+	if !fastQPolyIsZero(ctIn.Value[1], rows) {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: input c1 is nonzero on the authoritative Q-prefix")
+	}
+	if !fastQPolyIsZero(ctIn.Value[2], rows) {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: input c2 is nonzero on the authoritative Q-prefix")
+	}
+
+	fullQ := true
+	for component := range ctIn.Value {
+		if !fullFastPolyRows(ctIn.Value[component], levelIn, ctIn.N()) {
+			fullQ = false
+			break
+		}
+	}
+	if fullQ && (!fastQPolyIsZero(ctIn.Value[1], levelIn+1) || !fastQPolyIsZero(ctIn.Value[2], levelIn+1)) {
+		return fmt.Errorf("cannot Fast CKKS Relinearize: complete-Q c1 and c2 must be zero")
+	}
+
+	var staged *rlwe.Ciphertext
+	if fullQ {
+		staged = rlwe.NewCiphertext(eval.GetParameters(), 1, level)
+	} else {
+		staged = fastcore.NewCompactCiphertext(*eval.GetParameters(), 1, level)
+	}
+	staged.IsNTT = ctIn.IsNTT
+	staged.IsMontgomery = ctIn.IsMontgomery
+	for row := range staged.Value[0].Coeffs {
+		copy(staged.Value[0].Coeffs[row], ctIn.Value[0].Coeffs[row])
+	}
+	*staged.MetaData = *ctIn.MetaData
+	*opOut = *staged.CopyNew()
+	eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.keySwitchElisions++ })
+	return nil
+}
+
 // CheckAndGetGaloisKey is the Fast CKKS boundary for the in-memory key set.
 // RLWE's generic getter intentionally rejects Fast keys; this method exposes
 // one only to the CKKS zero-secret compatibility methods, which still verify
@@ -664,13 +739,15 @@ func (eval Evaluator) verifyFastFullQPoly(poly ring.Poly, level int, isNTT, isMo
 	} else {
 		coefficients.CopyLvl(level, normal)
 	}
-	return eval.verifyFastFullQCoefficients(coefficients, level)
+	return eval.verifyFastFullQRepresentationConsistency(coefficients, level)
 }
 
-// verifyFastPScaledFullQPoly checks a BTS lazy-QP Q component without
-// incorrectly requiring P*x itself to fit in the Q-prefix. It removes the
-// known P factor modulo each q_i, then proves that x's dormant rows match its
-// centered Q-prefix representative (2B < S_Q). No dormant row is reconstructed.
+// verifyFastPScaledFullQPoly checks representation consistency for a BTS
+// lazy-QP Q component without incorrectly requiring P*x itself to fit in the
+// Q-prefix. It removes the known P factor modulo each q_i, then compares the
+// supplied complete rows with the centered representative of the authoritative
+// prefix. This consistency check is not an independent proof of an operation's
+// prior integer bound or absence of wrap; it does not reconstruct dormant rows.
 func (eval Evaluator) verifyFastPScaledFullQPoly(poly ring.Poly, levelQ, levelP int) error {
 	params := eval.GetParameters()
 	if levelP < 0 || levelP > params.MaxLevelP() {
@@ -691,10 +768,15 @@ func (eval Evaluator) verifyFastPScaledFullQPoly(poly ring.Poly, levelQ, levelP 
 	}
 	recovered := ring.NewPoly(params.N(), levelQ)
 	ringQ.AtLevel(levelQ).MulScalarBigint(coefficients, pInverse, recovered)
-	return eval.verifyFastFullQCoefficients(recovered, levelQ)
+	return eval.verifyFastFullQRepresentationConsistency(recovered, levelQ)
 }
 
-func (eval Evaluator) verifyFastFullQCoefficients(coefficients ring.Poly, level int) error {
+// verifyFastFullQRepresentationConsistency validates canonical full-Q
+// residues and confirms that supplied dormant rows agree with the centered
+// representative determined by the authoritative Q-prefix. The centered
+// representative's range is true by construction; this check must not be
+// described as the separate operation-capacity upper-bound proof.
+func (eval Evaluator) verifyFastFullQRepresentationConsistency(coefficients ring.Poly, level int) error {
 	rows, err := fastcore.QPrefixWidth(level)
 	if err != nil {
 		return err
@@ -720,21 +802,16 @@ func (eval Evaluator) verifyFastFullQCoefficients(coefficients ring.Poly, level 
 		centered[i] = new(big.Int)
 	}
 	prefixRing.PolyToBigintCentered(coefficients, 1, centered)
-	capacity := new(big.Int).Set(ringQ.ModulusAtLevel[rows-1])
-	capacityHalf := new(big.Int).Rsh(new(big.Int).Set(capacity), 1)
 	moduli := make([]*big.Int, level+1)
 	for row := rows; row <= level; row++ {
 		moduli[row] = new(big.Int).SetUint64(ringQ.SubRings[row].Modulus)
 	}
-	tmp, abs := new(big.Int), new(big.Int)
+	tmp := new(big.Int)
 	for i, value := range centered {
-		if abs.Abs(value).Cmp(capacityHalf) > 0 {
-			return fmt.Errorf("Q-prefix CRT representative exceeds S_Q/2 at coefficient %d", i)
-		}
 		for row := rows; row <= level; row++ {
 			tmp.Mod(value, moduli[row])
 			if coefficients.Coeffs[row][i] != tmp.Uint64() {
-				return fmt.Errorf("dormant q%d row disagrees with the bounded Q-prefix CRT representative at coefficient %d", row, i)
+				return fmt.Errorf("dormant q%d row is inconsistent with the centered Q-prefix representative at coefficient %d", row, i)
 			}
 		}
 	}
@@ -780,7 +857,7 @@ func (eval Evaluator) fastQPRescale(op0, opOut *rlwe.Ciphertext) error {
 		ringQ.DivRoundByLastModulusManyNTT(nbRescales, op0.Value[component], buffer, stage.Value[component])
 	}
 	if err = eval.verifyFastFullQPoly(stage.Value[0], targetLevel, stage.IsNTT, stage.IsMontgomery); err != nil {
-		return fmt.Errorf("cannot Fast CKKS Rescale: output Q rows failed the bounded-prefix check: %w", err)
+		return fmt.Errorf("cannot Fast CKKS Rescale: output Q rows failed representation-consistency validation: %w", err)
 	}
 	if !fastQPolyIsZero(stage.Value[1], targetLevel+1) {
 		return fmt.Errorf("cannot Fast CKKS Rescale: output c1 is nonzero")
