@@ -48,6 +48,76 @@ func newFastQPCompatibilityState() *fastQPCompatibilityState {
 	return &fastQPCompatibilityState{trusted: make(map[*rlwe.Ciphertext]fastQPFingerprint)}
 }
 
+// Automorphism is the ordinary CKKS public-API boundary for Fast zero-secret
+// ciphertexts. The maintained Q-prefix path reuses the shared Fast
+// automorphism core. When a caller (such as BTS C2S) supplies a complete
+// high-level Q representation, the full-Q compatibility path is allowed only
+// after proving its rows are the centered lift of the authoritative prefix;
+// it performs the Galois permutation but never a key switch because c1 was
+// checked zero. Standard execution keeps the embedded RLWE implementation.
+func (eval Evaluator) Automorphism(ctIn *rlwe.Ciphertext, galEl uint64, opOut *rlwe.Ciphertext) error {
+	if !eval.usesFastCKKSZeroSecretSimulation() {
+		return eval.Evaluator.Automorphism(ctIn, galEl, opOut)
+	}
+	if err := eval.fastQPCompat.take(); err != nil {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: previous compatibility operation failed: %w", err)
+	}
+	level, _, err := eval.validateFastQPCompatCiphertext("input", ctIn, false)
+	if err != nil {
+		return err
+	}
+	outLevel, err := fastCKKSZeroSecretCiphertextLevel(opOut)
+	if err != nil {
+		return err
+	}
+	if opOut.MetaData == nil {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: output metadata cannot be nil")
+	}
+	if level != outLevel {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: input level %d and output level %d must match", level, outLevel)
+	}
+	if ctIn.IsNTT != opOut.IsNTT || ctIn.IsMontgomery != opOut.IsMontgomery {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: input and output domains/representations must match")
+	}
+	if ctIn.IsMontgomery && !ctIn.IsNTT {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: Montgomery representation requires NTT domain")
+	}
+
+	// Full-Q rows are used only when both sides have complete storage. Otherwise
+	// the shared Fast core consumes and writes only the maintained prefix.
+	if level+1 > fastcore.MaxQPrefixWidth &&
+		fullFastPolyRows(ctIn.Value[0], level, ctIn.N()) &&
+		fullFastPolyRows(opOut.Value[0], level, opOut.N()) &&
+		fullFastPolyRows(opOut.Value[1], level, opOut.N()) {
+		if err = eval.verifyFastFullQCiphertext(ctIn); err != nil {
+			return fmt.Errorf("cannot Fast CKKS Automorphism: complete Q input is not authorized: %w", err)
+		}
+		params := eval.GetParameters()
+		ringQ := params.RingQ().AtLevel(level)
+		staged := NewCiphertext(*params, 1, level)
+		staged.IsNTT = ctIn.IsNTT
+		staged.IsMontgomery = ctIn.IsMontgomery
+		if ctIn.IsNTT {
+			ringQ.AutomorphismNTT(ctIn.Value[0], galEl, staged.Value[0])
+		} else {
+			ringQ.Automorphism(ctIn.Value[0], galEl, staged.Value[0])
+		}
+		staged.Value[1].Zero()
+		*staged.MetaData = *ctIn.MetaData
+		opOut.Copy(staged)
+		fingerprint := fastQFingerprint(opOut, level)
+		eval.fastQPCompat.trust(opOut, fingerprint)
+		eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.automorphisms++ })
+		return nil
+	}
+
+	if err = eval.rotateFastCKKSZeroSecret(ctIn, galEl, opOut); err != nil {
+		return fmt.Errorf("cannot Fast CKKS Automorphism: %w", err)
+	}
+	eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.automorphisms++ })
+	return nil
+}
+
 func (state *fastQPCompatibilityState) record(err error) {
 	if state == nil || err == nil {
 		return

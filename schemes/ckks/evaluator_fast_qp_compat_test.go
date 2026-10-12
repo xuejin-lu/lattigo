@@ -96,6 +96,76 @@ func TestFastQPCompatibilityDecomposeAutomorphismAndModDown(t *testing.T) {
 	require.True(t, fastQPolyIsZero(got.Value[1], level+1))
 }
 
+func TestPublicFastAutomorphismUsesPrefixCoreAndVerifiedFullQPath(t *testing.T) {
+	params := fastRotateTestParameters(t, ring.Standard)
+	encoder := NewEncoder(params)
+	sk := rlwe.NewKeyGenerator(params).GenSecretKeyNew()
+
+	t.Run("ordinary-Conjugate-uses-shared-prefix-core", func(t *testing.T) {
+		eval := NewEvaluator(params, nil)
+		recorder := &recordingPublicAutomorphismCore{AutomorphismCore: eval.automorphismCore}
+		eval.automorphismCore = recorder
+		input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), fastRotateTestValues(4), 4, 3, true)
+		output := rlwe.NewCiphertext(params, 1, input.Level())
+		output.IsNTT = input.IsNTT
+
+		require.NoError(t, eval.Conjugate(input, output))
+		require.Equal(t, []int{4}, recorder.rows, "ordinary Conjugate must dispatch through the maintained Q-prefix core")
+		require.Equal(t, []int{2}, recorder.pairCount)
+		ringQ := params.RingQ().AtLevel(input.Level())
+		want := ringQ.NewPoly()
+		ringQ.AutomorphismNTT(input.Value[0], params.GaloisElementForComplexConjugation(), want)
+		for row := 0; row <= input.Level(); row++ {
+			require.Equal(t, want.Coeffs[row], output.Value[0].Coeffs[row])
+			for _, coefficient := range output.Value[1].Coeffs[row] {
+				require.Zero(t, coefficient)
+			}
+		}
+		require.Equal(t, *input.MetaData, *output.MetaData)
+	})
+
+	t.Run("verified-full-Q-preserves-rows-and-rejects-incoherent-dormant-row", func(t *testing.T) {
+		const level = 5
+		eval := NewEvaluator(params, nil)
+		input := rlwe.NewCiphertext(params, 1, level)
+		input.IsNTT = false
+		input.Scale = rlwe.NewScale(1 << fastRotateTestLogScale)
+		// A small coefficient-domain polynomial has an unambiguous centered lift
+		// into every Q row and is enough to exercise the actual Galois permutation.
+		for row := 0; row <= level; row++ {
+			input.Value[0].Coeffs[row][1] = 7
+			input.Value[0].Coeffs[row][2] = 3
+		}
+		output := rlwe.NewCiphertext(params, 1, level)
+		output.IsNTT = false
+		galEl := params.GaloisElementForComplexConjugation()
+		ringQ := params.RingQ().AtLevel(level)
+		want := ringQ.NewPoly()
+		ringQ.Automorphism(input.Value[0], galEl, want)
+
+		require.NoError(t, eval.Conjugate(input, output))
+		require.Equal(t, level, output.Level())
+		require.False(t, output.IsNTT)
+		require.True(t, fullFastPolyRows(output.Value[0], level, params.N()), "verified full-Q rows must remain materialized for BTS callers")
+		for row := 0; row <= level; row++ {
+			require.Equal(t, want.Coeffs[row], output.Value[0].Coeffs[row], "q%d", row)
+			for _, coefficient := range output.Value[1].Coeffs[row] {
+				require.Zero(t, coefficient)
+			}
+		}
+		require.Equal(t, *input.MetaData, *output.MetaData)
+		require.Equal(t, uint64(1), eval.fastQPCompat.counterSnapshot().automorphisms)
+
+		bad := input.CopyNew()
+		bad.Value[0].Coeffs[4][1]++
+		badBefore := bad.CopyNew()
+		outputBefore := output.CopyNew()
+		require.ErrorContains(t, eval.Conjugate(bad, output), "complete Q input is not authorized")
+		require.True(t, bad.Equal(badBefore))
+		require.True(t, output.Equal(outputBefore), "failed full-Q verification must not modify output")
+	})
+}
+
 func TestFastQPCompatibilityRejectsNonzeroInputsTransactionally(t *testing.T) {
 	params := fastRotateTestParameters(t, ring.Standard)
 	kgen := rlwe.NewKeyGenerator(params)
