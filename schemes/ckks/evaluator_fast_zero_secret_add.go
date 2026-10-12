@@ -6,6 +6,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks/internal/fastcore"
+	"github.com/tuneinsight/lattigo/v6/utils/bignum"
 )
 
 // addSubFastCKKSZeroSecret dispatches public ciphertext/ciphertext Add/Sub to
@@ -50,6 +51,97 @@ func (eval Evaluator) addSubFastCKKSZeroSecret(op0, op1, opOut *rlwe.Ciphertext,
 		return fmt.Errorf("cannot Fast CKKS zero-secret %s: %w", operation, err)
 	}
 	return eval.addSubCore.ApplyRows(params.RingQ(), op0, op1, opOut, rows, sub)
+}
+
+// subFastCKKSZeroSecretScaleAligned handles only the BTS T3 shape: an
+// in-place subtraction with a higher-scale degree-2 left operand and a
+// lower-scale degree-1 right operand at the same logical Level. It returns
+// handled=false for all other shapes so the existing full-Q path or its
+// compact-row guard remains authoritative.
+func (eval Evaluator) subFastCKKSZeroSecretScaleAligned(op0, op1, opOut *rlwe.Ciphertext) (handled bool, err error) {
+	if op0 == nil || op1 == nil || opOut == nil || opOut != op0 || op0.Degree() != 2 || op1.Degree() != 1 || op0.Level() != op1.Level() {
+		return false, nil
+	}
+	if op0.Scale.Cmp(op1.Scale) <= 0 {
+		return false, nil
+	}
+
+	const operation = "Sub scale alignment"
+	fail := func(format string, args ...any) (bool, error) {
+		return true, fmt.Errorf("cannot Fast CKKS zero-secret %s: %s", operation, fmt.Sprintf(format, args...))
+	}
+	params := eval.GetParameters()
+	if params == nil || params.RingType() != ring.Standard || params.RingQ() == nil {
+		return false, nil
+	}
+	if eval.scalarCore == nil || eval.addSubCore == nil {
+		return false, nil
+	}
+	level := op0.Level()
+	if level < 1 || level > params.MaxLevel() || opOut.Level() != level {
+		return false, nil
+	}
+	if len(op0.Value) != op0.Degree()+1 || len(op1.Value) != op1.Degree()+1 {
+		return fail("ciphertext component counts do not match their Degrees")
+	}
+	if op0.MetaData == nil || op1.MetaData == nil || opOut.MetaData == nil {
+		return fail("ciphertext metadata cannot be nil")
+	}
+	if op0.IsNTT != op1.IsNTT || op0.IsNTT != eval.GetRLWEParameters().NTTFlag() {
+		return false, nil
+	}
+	if op0.IsMontgomery != op1.IsMontgomery || op0.IsBatched != op1.IsBatched {
+		return false, nil
+	}
+	if op0.Scale.Mod != nil || op1.Scale.Mod != nil {
+		return false, nil
+	}
+	if op0.Scale.Value.Sign() <= 0 || op1.Scale.Value.Sign() <= 0 || op0.Scale.Value.IsInf() || op1.Scale.Value.IsInf() {
+		return fail("scale alignment requires finite, positive, non-modular scales")
+	}
+	rows, err := fastcore.QPrefixWidth(level)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if !fastCKKSZeroSecretAddBackingValid(op0, params.N(), params.RingQ(), level, rows) {
+		return fail("op0 compact Q-prefix backing is invalid")
+	}
+	if !fastCKKSZeroSecretAddBackingValid(op1, params.N(), params.RingQ(), level, rows) {
+		return fail("op1 compact Q-prefix backing is invalid")
+	}
+	// Preserve the existing legal full-Q path for nonzero ciphertext
+	// components. The caller's full-active-row preflight will reject compact
+	// inputs before any Standard full-RNS operation can read dormant rows.
+	if !fastCKKSZeroSecretComponentsAreZero(op0, rows) || !fastCKKSZeroSecretComponentsAreZero(op1, rows) {
+		return false, nil
+	}
+	if err := validateFastCKKSZeroSecretAddOperand("op0", op0, params.N(), params.RingQ(), level, rows); err != nil {
+		return fail("%v", err)
+	}
+	if err := validateFastCKKSZeroSecretAddOperand("op1", op1, params.N(), params.RingQ(), level, rows); err != nil {
+		return fail("%v", err)
+	}
+
+	// Match Standard evaluateInPlace: divide the higher scale by the lower
+	// scale and truncate the positive ratio toward zero to an integer.
+	ratio := op0.Scale.Div(op1.Scale).Value
+	k, _ := ratio.Int(nil)
+	if k.Sign() <= 0 {
+		return fail("integer scale-alignment ratio must be positive")
+	}
+
+	// The scalar kernel performs the real coefficient multiplication into a
+	// compact temporary. Only after it succeeds is the temporary's Scale
+	// metadata aligned so the existing Add/Sub kernel can run.
+	tmp := fastcore.NewCompactCiphertext(params, op1.Degree(), level)
+	if err := eval.scalarCore.MulRows(params.RingQ(), op1, tmp, rows, params.LevelsConsumedPerRescaling(), bignum.ToComplex(k, params.EncodingPrecision())); err != nil {
+		return fail("integer scale multiplication failed: %v", err)
+	}
+	tmp.Scale = op0.Scale
+	if err := eval.addSubCore.ApplyRows(params.RingQ(), op0, tmp, opOut, rows, true); err != nil {
+		return fail("shared Fast subtraction failed: %v", err)
+	}
+	return true, nil
 }
 
 // fastCKKSZeroSecretAddSubEligible decides whether the ordinary public

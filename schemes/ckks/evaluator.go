@@ -196,6 +196,9 @@ func (eval Evaluator) Sub(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 			return eval.addSubFastCKKSZeroSecretScalar("Sub", op0, op1, opOut, true)
 		}
 		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
+			if handled, err := eval.subFastCKKSZeroSecretScaleAligned(op0, op1Ciphertext, opOut); handled {
+				return err
+			}
 			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
 				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, true)
 			}
