@@ -251,6 +251,61 @@ func TestPublicFastZeroSecretT3DifferentScaleSubUsesQPrefixCores(t *testing.T) {
 	}
 }
 
+func TestPublicFastZeroSecretT3RelinDegreeOneDifferentScaleSubUsesQPrefixCores(t *testing.T) {
+	params := btsCoverageLogN16Parameters(t)
+	const level = 25
+	q26 := params.Q()[26]
+	lowScale := rlwe.NewScale(uint64(1) << 42)
+	highScale := rlwe.NewScale(new(big.Int).Lsh(big.NewInt(1), 126)).Div(rlwe.NewScale(q26))
+	op0 := newFastBTSScaleAlignmentCiphertext(params, 1, level, highScale, 23)
+	op1 := newFastBTSScaleAlignmentCiphertext(params, 1, level+1, lowScale, 79)
+	op0Before, op1Before := op0.CopyNew(), op1.CopyNew()
+
+	evaluator := NewEvaluator(params, nil)
+	scalarRecorder := &recordingT3ScalarCore{ScalarCore: fastcore.NewScalarWorkspace(params.RingQ(), fastcore.MaxQPrefixWidth)}
+	addSubRecorder := &recordingT3AddSubCore{AddSubCore: fastcore.NewAddSubWorkspace()}
+	evaluator.scalarCore, evaluator.addSubCore = scalarRecorder, addSubRecorder
+
+	ratio := highScale.Div(lowScale).Value
+	k, _ := ratio.Int(nil)
+	require.True(t, k.Sign() > 0)
+	require.NoError(t, evaluator.Sub(op0, op1, op0))
+	require.Len(t, scalarRecorder.calls, 1)
+	require.Equal(t, fastcore.MaxQPrefixWidth, scalarRecorder.calls[0].rows)
+	require.Equal(t, k.String(), scalarRecorder.calls[0].real)
+	require.Equal(t, "0", scalarRecorder.calls[0].imag)
+	require.Equal(t, []t3AddSubCoreCall{{rows: fastcore.MaxQPrefixWidth, sub: true, op0Scale: highScale.Value.Text('f', 0), op1Scale: highScale.Value.Text('f', 0), opOutScale: highScale.Value.Text('f', 0)}}, addSubRecorder.calls)
+	require.Equal(t, level, op0.Level())
+	require.Equal(t, level+1, op1.Level())
+	require.Equal(t, 1, op0.Degree())
+	require.True(t, highScale.Equal(op0.Scale))
+	require.True(t, op0.IsNTT)
+	require.False(t, op0.IsMontgomery)
+	require.True(t, op0.IsBatched)
+	require.Equal(t, ring.Dimensions{Cols: 15}, op0.LogDimensions)
+	requireFastBTSScaleAlignmentRowsUnchanged(t, op1Before, op1, fastcore.MaxQPrefixWidth)
+
+	for row := 0; row < fastcore.MaxQPrefixWidth; row++ {
+		q := params.RingQ().SubRings[row].Modulus
+		kModQ := new(big.Int).Mod(new(big.Int).Set(k), new(big.Int).SetUint64(q)).Uint64()
+		for i, got := range op0.Value[0].Coeffs[row] {
+			product := (kModQ * op1Before.Value[0].Coeffs[row][i]) % q
+			want := (op0Before.Value[0].Coeffs[row][i] + q - product) % q
+			require.Equal(t, want, got, "q%d coefficient %d", row, i)
+		}
+		for _, coefficient := range op0.Value[1].Coeffs[row] {
+			require.Zero(t, coefficient, "zero-secret c1 q%d", row)
+		}
+	}
+	for _, ct := range []*rlwe.Ciphertext{op0, op1} {
+		for component := range ct.Value {
+			for row := fastcore.MaxQPrefixWidth; row <= ct.Level(); row++ {
+				require.Nil(t, ct.Value[component].Coeffs[row], "dormant q%d must remain unallocated", row)
+			}
+		}
+	}
+}
+
 func TestPublicFastZeroSecretT3DifferentScaleSubRejectsMalformedOrUnsupportedInputs(t *testing.T) {
 	params := btsCoverageLogN16Parameters(t)
 	const level = 25

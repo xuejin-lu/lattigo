@@ -54,14 +54,15 @@ func (eval Evaluator) addSubFastCKKSZeroSecret(op0, op1, opOut *rlwe.Ciphertext,
 }
 
 // subFastCKKSZeroSecretScaleAligned handles the BTS T3 shape: an in-place
-// subtraction with a higher-scale degree-2 left operand and a lower-scale
-// degree-1 right operand. The right operand may be at a higher logical Level;
-// arithmetic is restricted to the left/output Level, matching
-// InitOutputBinaryOp's min-Level behavior. It returns handled=false for other
-// shapes so the existing full-Q path or its compact-row guard remains
-// authoritative.
+// subtraction with a higher-scale degree-1 or degree-2 left operand and a
+// lower-scale degree-1 right operand. Degree 1 is the actual zero-secret
+// MulRelinNew result; degree 2 remains covered for the non-relinearized T3
+// shape. The right operand may be at a higher logical Level; arithmetic is
+// restricted to the left/output Level, matching InitOutputBinaryOp's
+// min-Level behavior. It returns handled=false for other shapes so the
+// existing full-Q path or its compact-row guard remains authoritative.
 func (eval Evaluator) subFastCKKSZeroSecretScaleAligned(op0, op1, opOut *rlwe.Ciphertext) (handled bool, err error) {
-	if op0 == nil || op1 == nil || opOut == nil || opOut != op0 || op0.Degree() != 2 || op1.Degree() != 1 || op0.Level() > op1.Level() {
+	if op0 == nil || op1 == nil || opOut == nil || opOut != op0 || (op0.Degree() != 1 && op0.Degree() != 2) || op1.Degree() != 1 || op0.Level() > op1.Level() {
 		return false, nil
 	}
 	if op0.Scale.Cmp(op1.Scale) <= 0 {
