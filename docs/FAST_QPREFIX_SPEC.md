@@ -134,6 +134,14 @@ Bound tracking is therefore retained as a correctness tool even though the indep
 
 If an operation cannot prove its required intermediate/result bound fits the current Q-prefix capacity, that operation is not valid under this Q-prefix policy. Do not silently read dormant q rows or fall back to Standard full-RNS.
 
+## Task-scoped experimental zero-secret capacity waiver — BTS Batch 006
+
+For the explicitly authorized `BTS-FAST-E2E-FIRST-006` research experiment only, the user has chosen to prioritize completing the original BTS on this branch's intentionally insecure zero-secret simulation over first obtaining a trusted centered-coefficient-bound certificate. This task-scoped exception permits the bounded Fast zero-secret API repair, its local regression tests, and at most the task-journaled end-to-end calls even when the generic lifted-integer capacity proof is unavailable.
+
+This is an **experimental policy waiver, not a change to the mathematical meaning of the capacity theorem above**. An operation without a valid bound certificate must be labeled `CAPACITY_UNPROVEN_EXPERIMENTAL`; it is not a proven centered lift, a general correctness guarantee, or evidence of Standard equivalence. Numerical output and its risk must be reported as observed. The waiver is limited to this Fast zero-secret mode and checked boundaries where all non-`c0` ciphertext components are zero and the required maintained Q-prefix rows have valid backing. It does not apply to genuine Standard, secure CKKS, nonzero-secret/nonzero-component execution, or another task without its own explicit authorization.
+
+The fixed Q-prefix policy, logical Level, row authority, and exact row-wise modular operations remain unchanged. The waiver never authorizes reading or materializing dormant rows, reconstructing a centered integer from untrusted residues, or passing compact/stale storage into Standard full-RNS code. Any operation that requires such an unproven reconstruction remains unsupported. Treat a successful experiment as evidence for that observed run only, not as a capacity proof.
+
 ---
 
 # 5. Capacity profile for the current LogN13 parameter family
