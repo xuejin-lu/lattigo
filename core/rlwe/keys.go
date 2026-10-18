@@ -414,6 +414,10 @@ func (evk EvaluationKey) Expand(params ParameterProvider, buffer *GadgetCipherte
 		for j := range value[i] {
 			// Sample 'a' and create the full evaluation key (-a*sk + w*P*s' + e, a).
 			uniformRingQPSampler.Read(buffer.Value[i][j][0])
+			// Preserve the seed-based uniform draw and PRNG sequence, but do not
+			// restore a non-zero RLWE a when expanding this experimental key.
+			buffer.Value[i][j][0].Q.Zero()
+			buffer.Value[i][j][0].P.Zero()
 			evk.Value[i][j] = VectorQP{evk.Value[i][j][0], buffer.Value[i][j][0]}
 		}
 	}

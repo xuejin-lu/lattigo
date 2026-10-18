@@ -359,6 +359,9 @@ func (enc Encryptor) encryptZeroSk(sk *SecretKey, ct interface{}) (err error) {
 		}
 
 		enc.uniformSampler.AtLevel(ct.Level(), -1).Read(ringqp.Poly{Q: c1})
+		// This experimental branch preserves the uniform draw and its PRNG use,
+		// but sets the sampled RLWE a polynomial to zero before encryption.
+		c1.Zero()
 
 		if !ct.IsNTT {
 			enc.params.RingQ().AtLevel(ct.Level()).NTT(c1, c1)
@@ -381,6 +384,10 @@ func (enc Encryptor) encryptZeroSk(sk *SecretKey, ct interface{}) (err error) {
 
 		// ct = (e, a)
 		enc.uniformSampler.AtLevel(levelQ, levelP).Read(c1)
+		// Preserve the original QP uniform draw and PRNG use, then zero only
+		// this sampled RLWE a polynomial. The error sampler below is unchanged.
+		c1.Q.Zero()
+		c1.P.Zero()
 
 		if !ct.IsNTT {
 			enc.params.RingQP().AtLevel(levelQ, levelP).NTT(c1, c1)
