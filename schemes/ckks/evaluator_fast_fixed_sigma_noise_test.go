@@ -59,6 +59,7 @@ func TestFixedSigmaCoefficientNoiseZeroIsStrictNoOp(t *testing.T) {
 	evidence, err := evaluator.InjectFixedSigmaCoefficientNoiseDiagnostic(output, 0, 17)
 	require.NoError(t, err)
 	require.True(t, evidence.NoOp)
+	require.Empty(t, evidence.Phases)
 	require.Zero(t, evidence.SampleCount)
 	require.Empty(t, evidence.CoefficientSHA256)
 	require.Equal(t, before, snapshotCiphertextValue(output))
@@ -82,7 +83,16 @@ func TestFixedSigmaCoefficientNoiseIsDeterministicAndMapsOnePolynomialToEveryRow
 			require.NoError(t, err)
 			evidenceSecond, err := evaluator.InjectFixedSigmaCoefficientNoiseDiagnostic(second, sigma, seed)
 			require.NoError(t, err)
-			require.Equal(t, evidenceFirst, evidenceSecond)
+			firstEvidenceWithoutTiming, secondEvidenceWithoutTiming := evidenceFirst, evidenceSecond
+			firstEvidenceWithoutTiming.Phases, secondEvidenceWithoutTiming.Phases = nil, nil
+			require.Equal(t, firstEvidenceWithoutTiming, secondEvidenceWithoutTiming)
+			require.Equal(t, []string{
+				"sampling_hash_moments", "coefficient_to_qprefix_ntt", "candidate_c0_add",
+				"qprefix_centered_capacity_check", "commit_c0",
+			}, fixedSigmaCoefficientNoisePhaseNames(evidenceFirst.Phases))
+			for _, phase := range evidenceFirst.Phases {
+				require.GreaterOrEqual(t, phase.ElapsedNS, int64(0))
+			}
 			require.Equal(t, first.Value[0], second.Value[0])
 			require.Equal(t, evidenceFirst.SampleCount, params.N())
 			require.Equal(t, 4, evidenceFirst.Capacity.Rows)
@@ -135,6 +145,14 @@ func TestFixedSigmaCoefficientNoiseIsDeterministicAndMapsOnePolynomialToEveryRow
 			}
 		})
 	}
+}
+
+func fixedSigmaCoefficientNoisePhaseNames(phases []FixedSigmaCoefficientNoisePhase) []string {
+	names := make([]string, len(phases))
+	for index, phase := range phases {
+		names[index] = phase.Name
+	}
+	return names
 }
 
 func TestFixedSigmaCoefficientNoiseRejectsNonzeroC1WithoutMutation(t *testing.T) {
