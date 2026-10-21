@@ -33,8 +33,9 @@ type FixedSigmaCoefficientNoiseEvidence struct {
 
 // InjectFixedSigmaCoefficientNoiseDiagnostic explicitly adds one sampled
 // coefficient-domain polynomial to a Fast zero-secret ciphertext's c0. It is
-// diagnostic-only, supports the isolated LogN13 task boundary (Level 4,
-// four-row Q-prefix), and is never called by ordinary CKKS operations.
+// diagnostic-only, supports the isolated LogN13 task boundary at Level 4 or
+// Level 3 with a four-row Q-prefix, and is never called by ordinary CKKS
+// operations.
 func (eval Evaluator) InjectFixedSigmaCoefficientNoiseDiagnostic(ct *rlwe.Ciphertext, sigma float64, seed int64) (FixedSigmaCoefficientNoiseEvidence, error) {
 	evidence := FixedSigmaCoefficientNoiseEvidence{Sigma: sigma, Seed: seed}
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma < 0 {
@@ -58,9 +59,9 @@ func (eval Evaluator) InjectFixedSigmaCoefficientNoiseDiagnostic(ct *rlwe.Cipher
 	if _, err := validateFastCKKSZeroSecretMulShape("fixed-sigma target", ct, params); err != nil {
 		return evidence, fmt.Errorf("fixed-sigma diagnostic target: %w", err)
 	}
-	if params.LogN() != 13 || params.N() != 1<<13 || ct.Level() != 4 || !ct.Scale.Equal(rlwe.NewScale(math.Exp2(45))) ||
+	if params.LogN() != 13 || params.N() != 1<<13 || (ct.Level() != 4 && ct.Level() != 3) || !ct.Scale.Equal(rlwe.NewScale(math.Exp2(45))) ||
 		!ct.IsNTT || ct.IsMontgomery || !eval.GetRLWEParameters().NTTFlag() {
-		return evidence, fmt.Errorf("fixed-sigma diagnostic requires the LogN13, Level4, Scale2^45 NTT non-Montgomery output profile")
+		return evidence, fmt.Errorf("fixed-sigma diagnostic requires the LogN13, Level4 or Level3, Scale2^45 NTT non-Montgomery output profile")
 	}
 	rows, err := fastcore.QPrefixWidth(ct.Level())
 	if err != nil || rows != 4 {
