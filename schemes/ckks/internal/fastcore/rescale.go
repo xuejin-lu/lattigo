@@ -24,6 +24,19 @@ type QPrefixCapacityError struct {
 	PrefixProduct *big.Int
 }
 
+// QPrefixCapacityEvidence summarizes the centered-lift capacity check for an
+// already materialized Q-prefix polynomial. Bounds and products are decimal
+// strings so callers can persist the exact integers without introducing a
+// second CRT or capacity implementation.
+type QPrefixCapacityEvidence struct {
+	Rows                int    `json:"rows"`
+	CheckedCoefficients int    `json:"checked_coefficients"`
+	MaxCoefficientIndex int    `json:"max_coefficient_index"`
+	MaxAbs              string `json:"max_abs"`
+	PrefixProduct       string `json:"prefix_product"`
+	StrictFit           bool   `json:"strict_fit"`
+}
+
 func (err *QPrefixCapacityError) Error() string {
 	if err == nil {
 		return "Q-prefix capacity exceeded"
@@ -126,6 +139,117 @@ func (w *RescaleWorkspace) validateWidth(rows int) error {
 		return fmt.Errorf("invalid Fast Rescale Q-prefix width %d", rows)
 	}
 	return w.widthErr[rows-1]
+}
+
+// CheckQPrefixAdditionCapacity proves that adding signedNoise to the centered
+// c0 coefficients represented by before remains strictly inside the existing
+// Q-prefix capacity, and verifies that after stores exactly those sums modulo
+// each active q_i. The caller must supply a before value whose centered lift
+// was already validated at the operation boundary. Only rows in the declared
+// prefix are read.
+func (w *RescaleWorkspace) CheckQPrefixAdditionCapacity(ringQ *ring.Ring, before, after *rlwe.Ciphertext, signedNoise []int64, rows int) (QPrefixCapacityEvidence, error) {
+	if w == nil || ringQ == nil || before == nil || after == nil || before.MetaData == nil || after.MetaData == nil {
+		return QPrefixCapacityEvidence{}, errors.New("Fast Q-prefix addition capacity check requires workspace, ring and ciphertext metadata")
+	}
+	if len(before.Value) == 0 || len(after.Value) == 0 || before.N() != w.n || after.N() != w.n || ringQ.N() != w.n ||
+		before.Level() != after.Level() || before.IsNTT != after.IsNTT || before.IsMontgomery != after.IsMontgomery {
+		return QPrefixCapacityEvidence{}, errors.New("Fast Q-prefix addition capacity check has incompatible ciphertext dimensions or domains")
+	}
+	if len(signedNoise) != w.n {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity noise has %d coefficients, want %d", len(signedNoise), w.n)
+	}
+	maxRows, err := QPrefixWidth(before.Level())
+	if err != nil {
+		return QPrefixCapacityEvidence{}, err
+	}
+	if rows < 1 || rows > maxRows || rows > w.maxRows {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity rows %d are outside [1,%d] at Level %d", rows, min(maxRows, w.maxRows), before.Level())
+	}
+	if err := w.validateWidth(rows); err != nil {
+		return QPrefixCapacityEvidence{}, err
+	}
+	if err := ValidatePrefixRows(ringQ, before.Level(), rows, before.Value[0], after.Value[0]); err != nil {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity c0 backing: %w", err)
+	}
+	for _, ct := range []*rlwe.Ciphertext{before, after} {
+		for row := 0; row < rows; row++ {
+			modulus := ringQ.SubRings[row].Modulus
+			for coefficient, value := range ct.Value[0].Coeffs[row] {
+				if value >= modulus {
+					return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity c0 q%d coefficient %d residue %d is not canonical", row, coefficient, value)
+				}
+			}
+		}
+	}
+	if rows > len(w.coeff.Coeffs) {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity workspace has %d rows, needs %d", len(w.coeff.Coeffs), rows)
+	}
+	if err := prefixToCoefficientRows(ringQ, before.Value[0], rows, before.IsNTT, before.IsMontgomery, w.coeff); err != nil {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity input conversion: %w", err)
+	}
+	afterCoefficients := ring.NewPoly(w.n, rows-1)
+	if err := prefixToCoefficientRows(ringQ, after.Value[0], rows, after.IsNTT, after.IsMontgomery, afterCoefficients); err != nil {
+		return QPrefixCapacityEvidence{}, fmt.Errorf("Fast Q-prefix addition capacity output conversion: %w", err)
+	}
+
+	product := uint192ToBigInt(w.modulus[rows-1])
+	evidence := QPrefixCapacityEvidence{
+		Rows: rows, CheckedCoefficients: w.n, MaxCoefficientIndex: 0,
+		MaxAbs: "0", PrefixProduct: product.String(), StrictFit: true,
+	}
+	var maxMagnitude Uint192
+	for coefficient, noise := range signedNoise {
+		var residues [MaxQPrefixWidth]uint64
+		for row := 0; row < rows; row++ {
+			residues[row] = w.coeff.Coeffs[row][coefficient]
+		}
+		baseValue := reconstructQPrefix(rows, residues, w.q, w.inverse, w.modulus)
+		baseMagnitude, baseNegative := centeredQPrefix(baseValue, w.modulus[rows-1], w.half[rows-1])
+		noiseMagnitude := uint64(noise)
+		noiseNegative := noise < 0
+		if noiseNegative {
+			noiseMagnitude = uint64(-(noise + 1)) + 1
+		}
+		sumMagnitude, sumNegative, overflow := addSigned192(baseMagnitude, baseNegative, Uint192{Lo: noiseMagnitude}, noiseNegative)
+		if overflow {
+			return evidence, fmt.Errorf("Fast Q-prefix addition capacity overflow at coefficient %d", coefficient)
+		}
+		if cmp192(sumMagnitude, maxMagnitude) > 0 {
+			maxMagnitude = sumMagnitude
+			evidence.MaxCoefficientIndex = coefficient
+		}
+		if cmp192(sumMagnitude, w.half[rows-1]) > 0 {
+			evidence.StrictFit = false
+			evidence.CheckedCoefficients = coefficient + 1
+			evidence.MaxAbs = uint192ToBigInt(sumMagnitude).String()
+			return evidence, &QPrefixCapacityError{
+				Level: before.Level(), Component: 0, Bound: uint192ToBigInt(sumMagnitude), PrefixProduct: product,
+			}
+		}
+		for row := 0; row < rows; row++ {
+			wantResidue := signedResidue192(sumMagnitude, sumNegative, w.q[row])
+			if afterCoefficients.Coeffs[row][coefficient] != wantResidue {
+				return evidence, fmt.Errorf("Fast Q-prefix addition result disagrees with signed coefficient sum at q%d coefficient %d", row, coefficient)
+			}
+		}
+	}
+	evidence.MaxAbs = uint192ToBigInt(maxMagnitude).String()
+	return evidence, nil
+}
+
+func addSigned192(left Uint192, leftNegative bool, right Uint192, rightNegative bool) (Uint192, bool, bool) {
+	if leftNegative == rightNegative {
+		sum, overflow := add192(left, right)
+		return sum, leftNegative, overflow
+	}
+	switch cmp := cmp192(left, right); {
+	case cmp == 0:
+		return Uint192{}, false, false
+	case cmp > 0:
+		return sub192(left, right), leftNegative, false
+	default:
+		return sub192(right, left), rightNegative, false
+	}
 }
 
 func (w *RescaleWorkspace) ensureStaged(ringQ *ring.Ring, components int) error {
