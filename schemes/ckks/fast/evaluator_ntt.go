@@ -212,6 +212,9 @@ func (eval *Evaluator) mulElementRows(op0 *rlwe.Ciphertext, op1 *rlwe.Element[ri
 	if eval == nil || eval.mulCore == nil {
 		return errors.New("Fast Mul core is not initialized")
 	}
+	if eval.fixedSigmaBootstrapNoise != nil && op0 != nil && op1 != nil && op0.Degree() == 1 && op1.Degree() == 1 {
+		return eval.applyFixedSigmaBootstrapNoise(op0, op1, opOut, rows, relin)
+	}
 	return eval.mulCore.ApplyRows(eval.Parameters.RingQ(), op0, op1, opOut, rows, relin)
 }
 

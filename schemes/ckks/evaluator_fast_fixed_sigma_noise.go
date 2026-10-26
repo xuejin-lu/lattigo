@@ -21,6 +21,8 @@ import (
 type FixedSigmaCoefficientNoiseEvidence struct {
 	Sigma               float64                           `json:"sigma_coefficient"`
 	Seed                int64                             `json:"sampling_seed"`
+	Level               int                               `json:"level"`
+	Scale               string                            `json:"scale"`
 	NoOp                bool                              `json:"no_op"`
 	SampleCount         int                               `json:"coefficient_sample_count"`
 	CoefficientMean     float64                           `json:"coefficient_mean"`
@@ -96,6 +98,64 @@ func (eval Evaluator) InjectFixedSigmaCoefficientNoiseDiagnostic(ct *rlwe.Cipher
 		}
 	}
 
+	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows)
+}
+
+// InjectFixedSigmaBootstrapMulNoiseDiagnostic injects the same coefficient-
+// domain diagnostic noise as InjectFixedSigmaCoefficientNoiseDiagnostic, but
+// accepts every active Q-prefix level and positive Scale used by the bounded
+// LogN13 Bootstrap multiplication path. It remains explicit and is never
+// called by ordinary CKKS operations. The historical post-Mul/Rescale helper
+// above retains its Level3/4 and Scale2^45 contract.
+func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphertext, sigma float64, seed int64) (FixedSigmaCoefficientNoiseEvidence, error) {
+	evidence := FixedSigmaCoefficientNoiseEvidence{Sigma: sigma, Seed: seed}
+	if math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma <= 0 {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic requires finite sigma > 0")
+	}
+	if eval.Encoder == nil || eval.Evaluator == nil {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic requires an initialized CKKS evaluator")
+	}
+	if !eval.usesFastCKKSZeroSecretSimulation() {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic is available only for the Fast zero-secret CKKS capability")
+	}
+	params := eval.GetParameters()
+	if params.LogN() != 13 || params.N() != 1<<13 {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic requires the frozen LogN13 profile")
+	}
+	if _, err := validateFastCKKSZeroSecretMulShape("Bootstrap Mul target", ct, params); err != nil {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target: %w", err)
+	}
+	if ct.Scale.Value.Sign() <= 0 || !ct.IsNTT || ct.IsMontgomery || !eval.GetRLWEParameters().NTTFlag() {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target requires a positive Scale and NTT non-Montgomery representation")
+	}
+	rows, err := fastcore.QPrefixWidth(ct.Level())
+	if err != nil {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul Q-prefix width: %w", err)
+	}
+	ringQ := params.RingQ()
+	if err := fastcore.ValidatePrefixRows(ringQ, ct.Level(), rows, ct.Value...); err != nil {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul Q-prefix backing: %w", err)
+	}
+	for row := 0; row < rows; row++ {
+		modulus := ringQ.SubRings[row].Modulus
+		for coefficient, value := range ct.Value[0].Coeffs[row] {
+			if value >= modulus {
+				return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul c0 q%d coefficient %d is not a canonical residue", row, coefficient)
+			}
+		}
+		for coefficient, value := range ct.Value[1].Coeffs[row] {
+			if value != 0 {
+				return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic requires c1=0; q%d coefficient %d is nonzero", row, coefficient)
+			}
+		}
+	}
+	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows)
+}
+
+func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigma float64, seed int64, rows int) (FixedSigmaCoefficientNoiseEvidence, error) {
+	params := eval.GetParameters()
+	ringQ := params.RingQ()
+	evidence := FixedSigmaCoefficientNoiseEvidence{Sigma: sigma, Seed: seed, Level: ct.Level(), Scale: ct.Scale.Value.Text('g', -1)}
 	n := params.N()
 	evidence.SamplingAlgorithm = "Go math/rand.NewSource(seed).NormFloat64(), rounded to nearest integer with math.Round (ties away from zero)"
 	var coefficients []int64

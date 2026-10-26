@@ -17,17 +17,18 @@ import (
 // and are intended for one execution stream at a time; use separate instances
 // for concurrent evaluation.
 type Evaluator struct {
-	Parameters              ckks.Parameters
-	rescaleScratch          fastRescaleScratch
-	nttScratch              [3]ring.Poly
-	linearTransformScratch  fastLinearTransformScratch
-	automorphismCore        fastcore.AutomorphismCore
-	addSubCore              fastcore.AddSubCore
-	mulCore                 fastcore.MulCore
-	scalarCore              fastcore.ScalarCore
-	rescaleCore             fastcore.RescaleCore
-	lastBSGSBabyRotations   int
-	qPrefixCapacityObserver func(QPrefixCapacitySnapshot) error
+	Parameters               ckks.Parameters
+	rescaleScratch           fastRescaleScratch
+	nttScratch               [3]ring.Poly
+	linearTransformScratch   fastLinearTransformScratch
+	automorphismCore         fastcore.AutomorphismCore
+	addSubCore               fastcore.AddSubCore
+	mulCore                  fastcore.MulCore
+	scalarCore               fastcore.ScalarCore
+	rescaleCore              fastcore.RescaleCore
+	lastBSGSBabyRotations    int
+	qPrefixCapacityObserver  func(QPrefixCapacitySnapshot) error
+	fixedSigmaBootstrapNoise *fixedSigmaBootstrapNoiseRuntime
 }
 
 // NewEvaluator creates an explicit Fast Q-prefix evaluator. Individual

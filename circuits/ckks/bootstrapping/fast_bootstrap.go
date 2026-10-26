@@ -283,6 +283,32 @@ func (eval *FastEvaluator) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, err
 	return &cts[0], nil
 }
 
+// EnableFixedSigmaBootstrapNoiseDiagnostic configures the explicit research
+// hook on the single Fast CKKS evaluator shared by Polynomial and Mod1.
+func (eval *FastEvaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, rootSeed int64) error {
+	if eval == nil || eval.FastCKKS == nil {
+		return errors.New("fixed-sigma Bootstrap noise requires an initialized Fast CKKS evaluator")
+	}
+	return eval.FastCKKS.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, rootSeed)
+}
+
+// DisableFixedSigmaBootstrapNoiseDiagnostic leaves the Fast Bootstrap path in
+// its strict default-off state.
+func (eval *FastEvaluator) DisableFixedSigmaBootstrapNoiseDiagnostic() {
+	if eval != nil && eval.FastCKKS != nil {
+		eval.FastCKKS.DisableFixedSigmaBootstrapNoiseDiagnostic()
+	}
+}
+
+// FixedSigmaBootstrapNoiseDiagnosticSnapshot returns the instrumentation
+// evidence accumulated by the Fast multiplication boundary.
+func (eval *FastEvaluator) FixedSigmaBootstrapNoiseDiagnosticSnapshot() any {
+	if eval == nil || eval.FastCKKS == nil {
+		return nil
+	}
+	return eval.FastCKKS.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+}
+
 // BootstrapMany applies the public packing boundary, one Fast circuit per
 // packed ciphertext, and the public Montgomery/scale restoration boundary.
 func (eval *FastEvaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {

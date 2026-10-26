@@ -179,6 +179,66 @@ func TestFixedSigmaCoefficientNoiseRejectsLevelsOutsideBoundedProfile(t *testing
 	}
 }
 
+func TestFixedSigmaBootstrapMulNoiseSupportsActiveLevelsAndScales(t *testing.T) {
+	params, err := NewParametersFromLiteral(ParametersLiteral{
+		LogN: 13, LogQ: []int{55, 39, 40, 39, 40, 60, 60}, LogP: []int{61},
+		LogDefaultScale: 45, RingType: ring.Standard,
+	})
+	require.NoError(t, err)
+	evaluator := NewEvaluator(params, nil)
+	for _, level := range []int{0, 1, 2, 3, 4} {
+		for _, scale := range []float64{math.Exp2(30), math.Exp2(45), math.Exp2(60)} {
+			t.Run(fmt.Sprintf("level_%d_scale_%.0f", level, math.Log2(scale)), func(t *testing.T) {
+				ct := NewCiphertext(params, 1, level)
+				ct.Scale, ct.IsNTT = rlwe.NewScale(scale), true
+				before := ct.CopyNew()
+				evidence, err := evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, 4.004280012097432, int64(level)+17)
+				require.NoError(t, err)
+				require.Equal(t, level, evidence.Level)
+				require.Equal(t, ct.Scale.Value.Text('g', -1), evidence.Scale)
+				require.Equal(t, min(level+1, 4), evidence.Capacity.Rows)
+				require.True(t, evidence.Capacity.StrictFit)
+				require.Equal(t, before.Level(), ct.Level())
+				require.Equal(t, *before.MetaData, *ct.MetaData)
+				require.True(t, before.Scale.Equal(ct.Scale))
+				require.Equal(t, before.Value[1], ct.Value[1])
+				require.NotEqual(t, before.Value[0], ct.Value[0])
+			})
+		}
+	}
+}
+
+func TestFixedSigmaBootstrapMulNoiseCapacityFailureDoesNotMutateTarget(t *testing.T) {
+	params, err := NewParametersFromLiteral(ParametersLiteral{
+		LogN: 13, LogQ: []int{55, 39, 40, 39, 40, 60, 60}, LogP: []int{61},
+		LogDefaultScale: 45, RingType: ring.Standard,
+	})
+	require.NoError(t, err)
+	evaluator := NewEvaluator(params, nil)
+	ct := NewCiphertext(params, 1, 0)
+	ct.Scale, ct.IsNTT = rlwe.NewScale(math.Exp2(37)), true
+	q := params.RingQ().SubRings[0].Modulus
+	var firstNoise int64
+	var seed int64
+	for candidateSeed := int64(0); candidateSeed < 1000; candidateSeed++ {
+		firstNoise = int64(math.Round(rand.New(rand.NewSource(candidateSeed)).NormFloat64() * 4.004280012097432))
+		if firstNoise > 1 {
+			seed = candidateSeed
+			break
+		}
+	}
+	require.Greater(t, firstNoise, int64(1))
+	coefficient := make([]uint64, params.N())
+	coefficient[0] = q/2 - 1
+	params.RingQ().SubRings[0].NTT(coefficient, ct.Value[0].Coeffs[0])
+	before := snapshotCiphertextValue(ct)
+	meta := *ct.MetaData
+	_, err = evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, 4.004280012097432, seed)
+	require.ErrorContains(t, err, "exceeds or cannot prove Q-prefix capacity")
+	require.Equal(t, before, snapshotCiphertextValue(ct))
+	require.Equal(t, meta, *ct.MetaData)
+}
+
 func snapshotCiphertextValue(ct *rlwe.Ciphertext) [][][]uint64 {
 	values := make([][][]uint64, len(ct.Value))
 	for component := range ct.Value {

@@ -192,6 +192,33 @@ func (eval Evaluator) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
 	return &cts[0], nil
 }
 
+// EnableFixedSigmaBootstrapNoiseDiagnostic configures the optional Fast-only
+// research hook through the ordinary public Bootstrap evaluator. Genuine
+// Standard evaluators reject the request; normal Fast use remains off unless
+// this method is explicitly called by a diagnostic harness.
+func (eval *Evaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, rootSeed int64) error {
+	if eval == nil || eval.fast == nil {
+		return fmt.Errorf("fixed-sigma Bootstrap noise is available only on the Fast evaluator")
+	}
+	return eval.fast.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, rootSeed)
+}
+
+// DisableFixedSigmaBootstrapNoiseDiagnostic restores the Fast hook to off.
+func (eval *Evaluator) DisableFixedSigmaBootstrapNoiseDiagnostic() {
+	if eval != nil && eval.fast != nil {
+		eval.fast.DisableFixedSigmaBootstrapNoiseDiagnostic()
+	}
+}
+
+// FixedSigmaBootstrapNoiseDiagnosticSnapshot returns Fast hook evidence or nil
+// for a genuine Standard evaluator.
+func (eval *Evaluator) FixedSigmaBootstrapNoiseDiagnosticSnapshot() any {
+	if eval == nil || eval.fast == nil {
+		return nil
+	}
+	return eval.fast.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+}
+
 // BootstrapMany bootstraps a list of ciphertexts and returns the list of bootstrapped ciphertexts.
 func (eval Evaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {
 	if eval.fast != nil {
