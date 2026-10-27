@@ -288,6 +288,198 @@ func TestFixedSigmaBootstrapMulNoiseMontgomeryLevel12Scale60PreservesSignedCoeff
 	require.Contains(t, evidence.DispatchEvidence, "MForm-mapped")
 }
 
+// These are the exact Q/P primes used by the original external/BTS profile,
+// captured by BTS-NOTRACE-WARM-AND-NUMERICAL-008. Keep the fixture here only
+// for a focused public-evaluator hook regression; experiment-profile pins stay
+// in the Primary measurement layer.
+func fixedSigmaBTS009TestParameters(t *testing.T) Parameters {
+	t.Helper()
+	params, err := NewParametersFromLiteral(ParametersLiteral{
+		LogN: 16,
+		Q: []uint64{
+			4398044938241, 4293918721, 4296540161, 4291952641, 4298506241,
+			4299685889, 4300210177, 4300865537, 4289462273, 4301651969,
+			4288806913, 4302176257, 4302569473, 4286709761, 4304535553,
+			4286054401, 4284874753, 4306894849, 4284088321, 4398043496449,
+			4398042972161, 4398042185729, 4398052147201, 4398052540417,
+			4398053588993, 4398054506497, 4398054899713, 4398055555073,
+			4398058045441, 4398034845697,
+		},
+		P: []uint64{
+			4398063157249, 4398029340673, 4398065909761, 4398028029953,
+			4398070628353,
+		},
+		LogDefaultScale: 32,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1<<16, params.N())
+	require.Equal(t, 29, params.MaxLevel())
+	require.Len(t, params.Q(), 30)
+	require.Len(t, params.P(), 5)
+	return params
+}
+
+func fixedSigmaBTS009TestCiphertext(params Parameters, level int) *rlwe.Ciphertext {
+	ct := NewCiphertext(params, 1, level)
+	ct.Scale = rlwe.NewScale(math.Exp2(42))
+	ct.IsNTT = true
+	return ct
+}
+
+func TestFixedSigmaBootstrapNoisePublicEvaluatorHooksBTSCTCTMethodsOnce(t *testing.T) {
+	params := fixedSigmaBTS009TestParameters(t)
+	const (
+		level = 26
+		sigma = 4.004280012097432
+		seed  = int64(20261027)
+	)
+	inputScale := rlwe.NewScale(math.Exp2(42))
+	methods := []struct {
+		name        string
+		relinearize bool
+		invoke      func(*Evaluator, *rlwe.Ciphertext, *rlwe.Ciphertext) (*rlwe.Ciphertext, error)
+	}{
+		{
+			name: "Mul",
+			invoke: func(eval *Evaluator, left, right *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				out := NewCiphertext(params, 2, level)
+				return out, eval.Mul(left, right, out)
+			},
+		},
+		{
+			name: "MulNew",
+			invoke: func(eval *Evaluator, left, right *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.MulNew(left, right)
+			},
+		},
+		{
+			name:        "MulRelin",
+			relinearize: true,
+			invoke: func(eval *Evaluator, left, right *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				out := NewCiphertext(params, 1, level)
+				return out, eval.MulRelin(left, right, out)
+			},
+		},
+		{
+			name:        "MulRelinNew",
+			relinearize: true,
+			invoke: func(eval *Evaluator, left, right *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+				return eval.MulRelinNew(left, right)
+			},
+		},
+	}
+
+	for _, method := range methods {
+		t.Run(method.name, func(t *testing.T) {
+			eval := NewEvaluator(params, nil)
+			require.NoError(t, eval.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, seed))
+			left, right := fixedSigmaBTS009TestCiphertext(params, level), fixedSigmaBTS009TestCiphertext(params, level)
+			leftBefore, rightBefore := snapshotCiphertextValue(left), snapshotCiphertextValue(right)
+			out, err := method.invoke(eval, left, right)
+			require.NoError(t, err)
+			expectedDegree := 2
+			if method.relinearize {
+				expectedDegree = 1
+			}
+			require.Equal(t, expectedDegree, out.Degree())
+			require.Equal(t, level, out.Level())
+			require.True(t, out.Scale.Equal(rlwe.NewScale(math.Exp2(84))))
+			require.Equal(t, leftBefore, snapshotCiphertextValue(left), "the original left operand must remain untouched")
+			require.Equal(t, rightBefore, snapshotCiphertextValue(right), "the original right operand must remain untouched")
+
+			snapshot := eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+			require.True(t, snapshot.Enabled)
+			require.Equal(t, uint64(1), snapshot.CtCtMultiplyCalls, "delegating public wrappers must inject once")
+			require.Equal(t, uint64(2), snapshot.InjectedPolynomials)
+			require.Len(t, snapshot.Events, 1)
+			event := snapshot.Events[0]
+			require.True(t, event.MultiplyCompleted)
+			require.Empty(t, event.Failure)
+			require.Equal(t, level, event.Level)
+			require.Equal(t, inputScale.Value.Text('g', -1), event.Scale)
+			require.Equal(t, 4, event.Left.Capacity.Rows)
+			require.Equal(t, 4, event.Right.Capacity.Rows)
+			require.True(t, event.Left.Capacity.StrictFit)
+			require.True(t, event.Right.Capacity.StrictFit)
+			require.Equal(t, params.N(), event.Left.SampleCount)
+			require.Equal(t, params.N(), event.Right.SampleCount)
+		})
+	}
+}
+
+func TestFixedSigmaBootstrapNoisePublicEvaluatorSquareAndNonCTCTRemainScoped(t *testing.T) {
+	params := fixedSigmaBTS009TestParameters(t)
+	const level = 26
+	ct := fixedSigmaBTS009TestCiphertext(params, level)
+	eval := NewEvaluator(params, nil)
+	require.NoError(t, eval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+	before := snapshotCiphertextValue(ct)
+
+	// Squaring through the public wrapper must draw distinct left/right streams
+	// even though both operands alias the same original ciphertext.
+	_, err := eval.MulRelinNew(ct, ct)
+	require.NoError(t, err)
+	snapshot := eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+	require.Equal(t, uint64(1), snapshot.CtCtMultiplyCalls)
+	require.NotEqual(t, snapshot.Events[0].Left.Seed, snapshot.Events[0].Right.Seed)
+	require.NotEqual(t, snapshot.Events[0].Left.CoefficientSHA256, snapshot.Events[0].Right.CoefficientSHA256)
+	require.Equal(t, before, snapshotCiphertextValue(ct))
+
+	// Noise is an explicitly scoped ct×ct operation hook; plaintext, scalar and
+	// automorphism paths must neither consume operation indices nor emit events.
+	plain := NewPlaintext(params, level)
+	plain.Scale = rlwe.NewScale(math.Exp2(42))
+	plain.IsNTT = true
+	ptOut := NewCiphertext(params, 1, level)
+	require.NoError(t, eval.Mul(ct, plain, ptOut))
+	scalarOut := NewCiphertext(params, 1, level)
+	require.NoError(t, eval.Mul(ct, 2, scalarOut))
+	_, err = eval.RotateNew(ct, 1)
+	require.NoError(t, err)
+	snapshot = eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+	require.Equal(t, uint64(1), snapshot.CtCtMultiplyCalls)
+	require.Len(t, snapshot.Events, 1)
+}
+
+func TestFixedSigmaBootstrapNoisePublicEvaluatorRelinOutputAliasMatchesCopiedOperands(t *testing.T) {
+	params := fixedSigmaBTS009TestParameters(t)
+	const level = 26
+	input0 := fixedSigmaBTS009TestCiphertext(params, level)
+	for row := 0; row < 4; row++ {
+		// A small nonzero NTT-domain polynomial makes this a nontrivial public
+		// multiplication while retaining a valid c1=0 Fast simulation input.
+		input0.Value[0].Coeffs[row][0] = uint64(row + 1)
+	}
+	input1 := input0.CopyNew()
+	input0Before, input1Before := input0.CopyNew(), input1.CopyNew()
+
+	separateEvaluator, aliasEvaluator := NewEvaluator(params, nil), NewEvaluator(params, nil)
+	require.NoError(t, separateEvaluator.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+	require.NoError(t, aliasEvaluator.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+	separateOutput := NewCiphertext(params, 1, level)
+	require.NoError(t, separateEvaluator.MulRelin(input0, input1, separateOutput))
+	aliasOutput := input0.CopyNew()
+	require.NoError(t, aliasEvaluator.MulRelin(aliasOutput, input1, aliasOutput))
+	require.Equal(t, snapshotCiphertextValue(separateOutput), snapshotCiphertextValue(aliasOutput))
+	require.Equal(t, snapshotCiphertextValue(input0Before), snapshotCiphertextValue(input0))
+	require.Equal(t, snapshotCiphertextValue(input1Before), snapshotCiphertextValue(input1))
+	require.Equal(t, uint64(1), aliasEvaluator.FixedSigmaBootstrapNoiseDiagnosticSnapshot().CtCtMultiplyCalls)
+}
+
+func TestFixedSigmaBootstrapNoisePublicEvaluatorDefaultOffIsRepeatable(t *testing.T) {
+	params := fixedSigmaBTS009TestParameters(t)
+	const level = 26
+	left, right := fixedSigmaBTS009TestCiphertext(params, level), fixedSigmaBTS009TestCiphertext(params, level)
+	eval0, eval1 := NewEvaluator(params, nil), NewEvaluator(params, nil)
+	out0, err := eval0.MulRelinNew(left, right)
+	require.NoError(t, err)
+	out1, err := eval1.MulRelinNew(left, right)
+	require.NoError(t, err)
+	require.Equal(t, snapshotCiphertextValue(out0), snapshotCiphertextValue(out1))
+	require.False(t, eval0.FixedSigmaBootstrapNoiseDiagnosticSnapshot().Enabled)
+	require.Empty(t, eval0.FixedSigmaBootstrapNoiseDiagnosticSnapshot().Events)
+}
+
 func fixedSigmaBootstrapMulNoiseLogN16Parameters(t *testing.T) Parameters {
 	return fixedSigmaBootstrapMulNoiseParametersForLogN(t, 16)
 }

@@ -17,13 +17,14 @@ import (
 type Evaluator struct {
 	*Encoder
 	*rlwe.Evaluator
-	pool             *rlwe.BufferPool
-	automorphismCore fastcore.AutomorphismCore
-	addSubCore       fastcore.AddSubCore
-	mulCore          fastcore.MulCore
-	scalarCore       fastcore.ScalarCore
-	rescaleCore      fastcore.RescaleCore
-	fastQPCompat     *fastQPCompatibilityState
+	pool                     *rlwe.BufferPool
+	automorphismCore         fastcore.AutomorphismCore
+	addSubCore               fastcore.AddSubCore
+	mulCore                  fastcore.MulCore
+	scalarCore               fastcore.ScalarCore
+	rescaleCore              fastcore.RescaleCore
+	fastQPCompat             *fastQPCompatibilityState
+	fixedSigmaBootstrapNoise *FixedSigmaBootstrapNoiseRuntime
 }
 
 // NewEvaluator creates a new [Evaluator], that can be used to do homomorphic

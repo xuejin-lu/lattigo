@@ -176,5 +176,10 @@ func (eval Evaluator) mulFastCKKSPrefix(op0, op1, opOut *rlwe.Ciphertext) error 
 	if eval.mulCore == nil {
 		return fmt.Errorf("cannot Fast CKKS Q-prefix Mul: shared Fast Mul core is unavailable")
 	}
+	if eval.fixedSigmaBootstrapNoise != nil {
+		return eval.fixedSigmaBootstrapNoise.Apply(op0, op1.El(), "Fast public CKKS Mul", func(left *rlwe.Ciphertext, right *rlwe.Element[ring.Poly]) error {
+			return eval.mulCore.ApplyRows(params.RingQ(), left, right, opOut, rows, false)
+		})
+	}
 	return eval.mulCore.ApplyRows(params.RingQ(), op0, op1.El(), opOut, rows, false)
 }

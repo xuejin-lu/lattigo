@@ -109,6 +109,12 @@ func (eval Evaluator) mulRelinFastCKKSZeroSecret(op0, op1, opOut *rlwe.Ciphertex
 		return fmt.Errorf("cannot Fast CKKS zero-secret MulRelin: shared Fast Mul core is unavailable")
 	}
 
+	if eval.fixedSigmaBootstrapNoise != nil {
+		return eval.fixedSigmaBootstrapNoise.Apply(op0, op1.El(), "Fast public CKKS MulRelin", func(left *rlwe.Ciphertext, right *rlwe.Element[ring.Poly]) error {
+			return eval.mulCore.ApplyRows(ringQ, left, right, opOut, rows, true)
+		})
+	}
+
 	// The core computes into evaluator-owned scratch before committing output,
 	// so valid in-place aliases remain safe and errors leave caller storage intact.
 	return eval.mulCore.ApplyRows(ringQ, op0, op1.El(), opOut, rows, true)
