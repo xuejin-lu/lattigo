@@ -310,6 +310,74 @@ func TestFastMod1FormalDegree30PolynomialRegression(t *testing.T) {
 	}
 }
 
+func TestFastMod1LogN16Degree30FixedSigmaNoBootstrap(t *testing.T) {
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN: 16,
+		Q: []uint64{
+			36028797019488257, 549754109953, 549753978881, 549753716737, 549753192449,
+			1152921504606584833, 1152921504614055937, 1152921504598720513, 1152921504615628801,
+			1152921504616808449, 1152921504597016577, 1152921504595968001, 1152921504618381313,
+			72057594038321153, 72057594036879361, 72057594035306497, 72057594040680449,
+		},
+		P:               []uint64{2305843009211596801, 2305843009210023937, 2305843009218281473, 2305843009208713217, 2305843009218936833},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 65536, params.N())
+	require.Len(t, params.Q(), 17)
+	require.Len(t, params.P(), 5)
+	mod1Params, err := NewParametersFromLiteral(params, ParametersLiteral{
+		LevelQ: 12, LogScale: 60, Mod1Type: CosDiscrete, LogMessageRatio: 10, K: 16, Mod1Degree: 30, DoubleAngle: 3,
+	})
+	require.NoError(t, err)
+	values := make([]complex128, params.MaxSlots())
+	for i := range values {
+		values[i] = complex(float64((i%7)-3)*1e-5, float64((i%5)-2)*1e-5)
+	}
+	input := newFastMod1EncodedInput(t, params, mod1Params.LevelQ, rlwe.NewScale(math.Exp2(60)), values)
+	inputBefore := input.CopyNew()
+	fastEval := fastckks.NewEvaluator(params)
+	require.NoError(t, fastEval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+	var capacityCheckpoints []fastckks.QPrefixCapacitySnapshot
+	fastEval.SetQPrefixCapacityObserver(func(snapshot fastckks.QPrefixCapacitySnapshot) error {
+		capacityCheckpoints = append(capacityCheckpoints, snapshot)
+		return nil
+	})
+	polynomialEval := ckkspolynomial.NewFastEvaluator(params, fastEval)
+	output, err := NewFastEvaluator(fastEval, polynomialEval, mod1Params).EvaluateNewQPrefixRows(input, fastckks.MaxQPrefixWidth)
+	require.NoError(t, err)
+	require.Equal(t, 4, output.Level())
+	require.Equal(t, 1, output.Degree())
+	require.True(t, output.IsNTT)
+	require.True(t, output.IsMontgomery)
+	require.Equal(t, inputBefore, input, "Mod1 must not mutate the original input")
+	require.NotEmpty(t, capacityCheckpoints)
+	for _, checkpoint := range capacityCheckpoints {
+		require.True(t, checkpoint.StrictFit, "%s must preserve strict capacity", checkpoint.Name)
+		require.Equal(t, 4, checkpoint.Rows)
+	}
+	snapshot := fastEval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+	require.True(t, snapshot.Enabled)
+	require.Greater(t, snapshot.CtCtMultiplyCalls, uint64(0))
+	require.Equal(t, 2*snapshot.CtCtMultiplyCalls, snapshot.InjectedPolynomials)
+	require.Len(t, snapshot.Events, int(snapshot.CtCtMultiplyCalls))
+	for _, event := range snapshot.Events {
+		require.True(t, event.MultiplyCompleted, "level=%d scale=%s failure=%s", event.Level, event.Scale, event.Failure)
+		require.True(t, event.Left.Capacity.StrictFit)
+		require.True(t, event.Right.Capacity.StrictFit)
+		require.Equal(t, 4, event.Left.Capacity.Rows)
+		require.Equal(t, 4, event.Right.Capacity.Rows)
+	}
+	decoded := decodeFastMod1MaintainedPlaintext(t, params, output)
+	require.Len(t, decoded, 1<<15)
+	for slot, got := range decoded {
+		require.False(t, math.IsNaN(real(got)) || math.IsInf(real(got), 0), "real slot %d must be finite", slot)
+		require.False(t, math.IsNaN(imag(got)) || math.IsInf(imag(got), 0), "imaginary slot %d must be finite", slot)
+		require.InDelta(t, real(values[slot]), real(got), 1e-2, "real slot %d", slot)
+		require.InDelta(t, imag(values[slot]), imag(got), 1e-2, "imaginary slot %d", slot)
+	}
+}
+
 func decodeFastMod1MaintainedPlaintext(t *testing.T, params ckks.Parameters, ct *rlwe.Ciphertext) []complex128 {
 	t.Helper()
 	level := 1

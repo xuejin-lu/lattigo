@@ -78,6 +78,23 @@ func fastPolynomialBootstrapNoiseTestParameters(t *testing.T) ckks.Parameters {
 	return params
 }
 
+func fastPolynomialBootstrapNoiseTestParametersLogN16(t *testing.T) ckks.Parameters {
+	t.Helper()
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN: 16,
+		Q: []uint64{
+			36028797019488257, 549754109953, 549753978881, 549753716737, 549753192449,
+			1152921504606584833, 1152921504614055937, 1152921504598720513, 1152921504615628801,
+			1152921504616808449, 1152921504597016577, 1152921504595968001, 1152921504618381313,
+			72057594038321153, 72057594036879361, 72057594035306497, 72057594040680449,
+		},
+		P:               []uint64{2305843009211596801, 2305843009210023937, 2305843009218281473, 2305843009208713217, 2305843009218936833},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	return params
+}
+
 func fastPolynomialBootstrapNoiseTestInput(t *testing.T, params ckks.Parameters) *rlwe.Ciphertext {
 	t.Helper()
 	const level = 12
@@ -100,46 +117,52 @@ func fastPolynomialBootstrapNoiseTestInput(t *testing.T, params ckks.Parameters)
 }
 
 func TestFastChebyshevPower2AndPower4WithMontgomeryFixedSigmaNoise(t *testing.T) {
-	for _, power := range []int{2, 4} {
-		t.Run(fmt.Sprintf("power_%d", power), func(t *testing.T) {
-			params := fastPolynomialBootstrapNoiseTestParameters(t)
-			eval := NewFastEvaluator(params, nil)
-			require.NoError(t, eval.Evaluator.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
-			input := fastPolynomialBootstrapNoiseTestInput(t, params)
-			inputBefore := input.CopyNew()
-			rows, err := fastckks.QPrefixWidth(input.Level())
-			require.NoError(t, err)
-			require.Equal(t, 4, rows)
-			eval.workspace.reset(params, input, rows)
-			pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
-			require.NoError(t, pb.genPower(power, false))
+	for _, logN := range []int{13, 16} {
+		for _, power := range []int{2, 4, 16} {
+			t.Run(fmt.Sprintf("logn_%d_power_%d", logN, power), func(t *testing.T) {
+				params := fastPolynomialBootstrapNoiseTestParameters(t)
+				if logN == 16 {
+					params = fastPolynomialBootstrapNoiseTestParametersLogN16(t)
+				}
+				eval := NewFastEvaluator(params, nil)
+				require.NoError(t, eval.Evaluator.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+				input := fastPolynomialBootstrapNoiseTestInput(t, params)
+				inputBefore := input.CopyNew()
+				rows, err := fastckks.QPrefixWidth(input.Level())
+				require.NoError(t, err)
+				require.Equal(t, 4, rows)
+				eval.workspace.reset(params, input, rows)
+				pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+				require.NoError(t, pb.genPower(power, false))
 
-			got := eval.workspace.powers[power]
-			require.NotNil(t, got)
-			require.Equal(t, 12-power/2, got.Level())
-			require.Equal(t, 1, got.Degree())
-			require.True(t, got.IsNTT)
-			require.True(t, got.IsMontgomery)
-			require.Greater(t, got.Scale.Value.Sign(), 0)
-			require.Equal(t, inputBefore, input, "power generation must not mutate the original ciphertext")
+				got := eval.workspace.powers[power]
+				require.NotNil(t, got)
+				depth := bits.Len(uint(power)) - 1
+				require.Equal(t, 12-depth, got.Level())
+				require.Equal(t, 1, got.Degree())
+				require.True(t, got.IsNTT)
+				require.True(t, got.IsMontgomery)
+				require.Greater(t, got.Scale.Value.Sign(), 0)
+				require.Equal(t, inputBefore, input, "power generation must not mutate the original ciphertext")
 
-			snapshot := eval.Evaluator.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
-			wantCalls := uint64(power / 2)
-			require.Equal(t, wantCalls, snapshot.CtCtMultiplyCalls)
-			require.Equal(t, 2*wantCalls, snapshot.InjectedPolynomials)
-			require.Len(t, snapshot.Events, int(wantCalls))
-			for _, event := range snapshot.Events {
-				require.True(t, event.MultiplyCompleted, "level=%d scale=%s failure=%s", event.Level, event.Scale, event.Failure)
-				require.True(t, event.Left.Capacity.StrictFit)
-				require.True(t, event.Right.Capacity.StrictFit)
-				require.Contains(t, event.Left.DispatchEvidence, "MForm-mapped")
-				require.Contains(t, event.Right.DispatchEvidence, "MForm-mapped")
-			}
-			require.Equal(t, 12, snapshot.Events[0].Level)
-			if power == 4 {
-				require.Equal(t, 11, snapshot.Events[1].Level)
-			}
-		})
+				snapshot := eval.Evaluator.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+				wantCalls := uint64(depth)
+				require.Equal(t, wantCalls, snapshot.CtCtMultiplyCalls)
+				require.Equal(t, 2*wantCalls, snapshot.InjectedPolynomials)
+				require.Len(t, snapshot.Events, int(wantCalls))
+				for _, event := range snapshot.Events {
+					require.True(t, event.MultiplyCompleted, "level=%d scale=%s failure=%s", event.Level, event.Scale, event.Failure)
+					require.True(t, event.Left.Capacity.StrictFit)
+					require.True(t, event.Right.Capacity.StrictFit)
+					require.Contains(t, event.Left.DispatchEvidence, "MForm-mapped")
+					require.Contains(t, event.Right.DispatchEvidence, "MForm-mapped")
+				}
+				require.Equal(t, 12, snapshot.Events[0].Level)
+				for i, event := range snapshot.Events {
+					require.Equal(t, 12-i, event.Level)
+				}
+			})
+		}
 	}
 }
 

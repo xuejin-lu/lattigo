@@ -286,6 +286,126 @@ func TestFixedSigmaBootstrapMulNoiseMontgomeryLevel12Scale60PreservesSignedCoeff
 	require.Contains(t, evidence.DispatchEvidence, "MForm-mapped")
 }
 
+func fixedSigmaBootstrapMulNoiseLogN16Parameters(t *testing.T) Parameters {
+	t.Helper()
+	params, err := NewParametersFromLiteral(ParametersLiteral{
+		LogN: 16,
+		Q: []uint64{
+			36028797019488257, 549754109953, 549753978881, 549753716737, 549753192449,
+			1152921504606584833, 1152921504614055937, 1152921504598720513, 1152921504615628801,
+			1152921504616808449, 1152921504597016577, 1152921504595968001, 1152921504618381313,
+			72057594038321153, 72057594036879361, 72057594035306497, 72057594040680449,
+		},
+		P:               []uint64{2305843009211596801, 2305843009210023937, 2305843009218281473, 2305843009208713217, 2305843009218936833},
+		LogDefaultScale: 45, RingType: ring.Standard,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 65536, params.N())
+	require.Len(t, params.Q(), 17)
+	require.Len(t, params.P(), 5)
+	return params
+}
+
+func TestFixedSigmaBootstrapMulNoiseLogN16MontgomeryLevel12Scale60PreservesSignedCoefficients(t *testing.T) {
+	params := fixedSigmaBootstrapMulNoiseLogN16Parameters(t)
+	evaluator := NewEvaluator(params, nil)
+	const (
+		level = 12
+		sigma = 4.004280012097432
+		seed  = int64(20261027)
+	)
+	scale := rlwe.NewScale(math.Exp2(60))
+	ct := NewCiphertext(params, 1, level)
+	ct.Scale, ct.IsNTT, ct.IsMontgomery = scale, true, true
+	ringQ := params.RingQ()
+	const rows = 4
+	for row := 0; row < rows; row++ {
+		for i := range ct.Value[0].Coeffs[row] {
+			ct.Value[0].Coeffs[row][i] = signedCoefficientResidue(int64(i%7-3), ringQ.SubRings[row].Modulus)
+		}
+		ringQ.SubRings[row].NTT(ct.Value[0].Coeffs[row], ct.Value[0].Coeffs[row])
+		ringQ.SubRings[row].MForm(ct.Value[0].Coeffs[row], ct.Value[0].Coeffs[row])
+	}
+	before := ct.CopyNew()
+	beforeMeta := *ct.MetaData
+
+	evidence, err := evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, sigma, seed)
+	require.NoError(t, err)
+	require.Equal(t, level, evidence.Level)
+	require.Equal(t, scale.Value.Text('g', -1), evidence.Scale)
+	require.True(t, evidence.Capacity.StrictFit)
+	require.Equal(t, rows, evidence.Capacity.Rows)
+	require.Equal(t, params.N(), evidence.Capacity.CheckedCoefficients)
+	require.Equal(t, beforeMeta, *ct.MetaData)
+	require.True(t, ct.Scale.Equal(scale))
+	require.True(t, ct.IsNTT)
+	require.True(t, ct.IsMontgomery)
+	require.Equal(t, before.Value[1], ct.Value[1])
+	for row := rows; row <= level; row++ {
+		require.Equal(t, before.Value[0].Coeffs[row], ct.Value[0].Coeffs[row], "dormant q%d must be unchanged", row)
+	}
+
+	got := ct.Value[0].CopyNew()
+	prior := before.Value[0].CopyNew()
+	for row := 0; row < rows; row++ {
+		ringQ.SubRings[row].INTT(got.Coeffs[row], got.Coeffs[row])
+		ringQ.SubRings[row].IMForm(got.Coeffs[row], got.Coeffs[row])
+		ringQ.SubRings[row].INTT(prior.Coeffs[row], prior.Coeffs[row])
+		ringQ.SubRings[row].IMForm(prior.Coeffs[row], prior.Coeffs[row])
+	}
+	rng := rand.New(rand.NewSource(seed))
+	for coefficient := 0; coefficient < params.N(); coefficient++ {
+		noise := int64(math.Round(rng.NormFloat64() * sigma))
+		for row := 0; row < rows; row++ {
+			modulus := ringQ.SubRings[row].Modulus
+			want := (prior.Coeffs[row][coefficient] + signedCoefficientResidue(noise, modulus)) % modulus
+			require.Equalf(t, want, got.Coeffs[row][coefficient], "q%d coefficient %d", row, coefficient)
+		}
+	}
+}
+
+func TestFixedSigmaBootstrapMulNoiseLogN16CapacityFailureDoesNotMutateTarget(t *testing.T) {
+	params := fixedSigmaBootstrapMulNoiseLogN16Parameters(t)
+	evaluator := NewEvaluator(params, nil)
+	ct := NewCiphertext(params, 1, 0)
+	ct.Scale, ct.IsNTT = rlwe.NewScale(math.Exp2(45)), true
+	q := params.RingQ().SubRings[0].Modulus
+	seed := int64(-1)
+	for candidateSeed := int64(0); candidateSeed < 1000; candidateSeed++ {
+		firstNoise := int64(math.Round(rand.New(rand.NewSource(candidateSeed)).NormFloat64() * 4.004280012097432))
+		if firstNoise > 1 {
+			seed = candidateSeed
+			break
+		}
+	}
+	require.GreaterOrEqual(t, seed, int64(0))
+	coefficient := make([]uint64, params.N())
+	coefficient[0] = q/2 - 1
+	params.RingQ().SubRings[0].NTT(coefficient, ct.Value[0].Coeffs[0])
+	before := snapshotCiphertextValue(ct)
+	metadata := *ct.MetaData
+	_, err := evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, 4.004280012097432, seed)
+	require.ErrorContains(t, err, "exceeds or cannot prove Q-prefix capacity")
+	require.Equal(t, before, snapshotCiphertextValue(ct))
+	require.Equal(t, metadata, *ct.MetaData)
+}
+
+func TestFixedSigmaBootstrapMulNoiseRejectsUnapprovedLogNDomains(t *testing.T) {
+	for _, logN := range []int{14, 15} {
+		t.Run(fmt.Sprintf("logn%d", logN), func(t *testing.T) {
+			params, err := NewParametersFromLiteral(ParametersLiteral{
+				LogN: logN, LogQ: []int{55, 39, 39, 39, 40}, LogDefaultScale: 45, RingType: ring.Standard,
+			})
+			require.NoError(t, err)
+			evaluator := NewEvaluator(params, nil)
+			ct := NewCiphertext(params, 1, 3)
+			ct.Scale, ct.IsNTT = rlwe.NewScale(math.Exp2(45)), true
+			_, err = evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, 4.004280012097432, 7)
+			require.ErrorContains(t, err, "supports only the frozen LogN13 and LogN16 profiles")
+		})
+	}
+}
+
 func TestFixedSigmaBootstrapMulNoiseCapacityFailureDoesNotMutateTarget(t *testing.T) {
 	params, err := NewParametersFromLiteral(ParametersLiteral{
 		LogN: 13, LogQ: []int{55, 39, 40, 39, 40, 60, 60}, LogP: []int{61},

@@ -120,8 +120,8 @@ func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphe
 		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic is available only for the Fast zero-secret CKKS capability")
 	}
 	params := eval.GetParameters()
-	if params.LogN() != 13 || params.N() != 1<<13 {
-		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic requires the frozen LogN13 profile")
+	if (params.LogN() != 13 || params.N() != 1<<13) && (params.LogN() != 16 || params.N() != 1<<16) {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic supports only the frozen LogN13 and LogN16 profiles (got LogN=%d N=%d)", params.LogN(), params.N())
 	}
 	if _, err := validateFastCKKSZeroSecretMulShape("Bootstrap Mul target", ct, params); err != nil {
 		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target: %w", err)

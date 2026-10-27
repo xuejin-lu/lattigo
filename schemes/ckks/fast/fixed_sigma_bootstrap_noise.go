@@ -54,8 +54,8 @@ func (eval *Evaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, r
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma <= 0 {
 		return fmt.Errorf("fixed-sigma Bootstrap noise requires finite sigma > 0")
 	}
-	if eval.Parameters.LogN() != 13 || eval.Parameters.N() != 1<<13 {
-		return fmt.Errorf("fixed-sigma Bootstrap noise supports only the frozen LogN13 profile")
+	if !supportsFixedSigmaBootstrapNoiseProfile(eval.Parameters.LogN(), eval.Parameters.N()) {
+		return fmt.Errorf("fixed-sigma Bootstrap noise supports only the frozen LogN13 and LogN16 profiles (got LogN=%d N=%d)", eval.Parameters.LogN(), eval.Parameters.N())
 	}
 	// The existing coefficient-noise helper lives in the parent ckks package.
 	// Fast already depends on that package for Parameters, so this reuses the
@@ -66,6 +66,13 @@ func (eval *Evaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, r
 		sigma: sigma, rootSeed: rootSeed, helper: help,
 	}
 	return nil
+}
+
+// supportsFixedSigmaBootstrapNoiseProfile is an explicit research-profile
+// allowlist. The dimension-generic sampler and Q-prefix checker are verified
+// only at these two ring sizes; unknown LogN values remain unsupported.
+func supportsFixedSigmaBootstrapNoiseProfile(logN, n int) bool {
+	return (logN == 13 && n == 1<<13) || (logN == 16 && n == 1<<16)
 }
 
 // DisableFixedSigmaBootstrapNoiseDiagnostic restores the exact default-off

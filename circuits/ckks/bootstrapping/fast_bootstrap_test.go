@@ -64,6 +64,10 @@ func fastBootstrapParametersProfileAt(t testing.TB, logN, logSlots int, factorTw
 }
 
 func actualLogN16BootstrapParameters(t testing.TB) (Parameters, ckks.Parameters) {
+	return actualLogN16BootstrapParametersWithE(t, 0)
+}
+
+func actualLogN16BootstrapParametersWithE(t testing.TB, ephemeralSecretWeight int) (Parameters, ckks.Parameters) {
 	t.Helper()
 	residual, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
 		LogN:            16,
@@ -80,7 +84,6 @@ func actualLogN16BootstrapParameters(t testing.TB) (Parameters, ckks.Parameters)
 	k := 16
 	logMessageRatio := 10
 	invDegree := 0
-	zero := 0
 	params, err := NewParametersFromLiteral(residual, ParametersLiteral{
 		LogN:     &logN,
 		LogP:     []int{61, 61, 61, 61, 61},
@@ -89,7 +92,7 @@ func actualLogN16BootstrapParameters(t testing.TB) (Parameters, ckks.Parameters)
 		CoeffsToSlotsFactorizationDepthAndLogScales: [][]int{{56}, {56}, {56}, {56}},
 		SlotsToCoeffsFactorizationDepthAndLogScales: [][]int{{39}, {39}, {39}},
 		EvalModLogScale:       &evalModScale,
-		EphemeralSecretWeight: &zero,
+		EphemeralSecretWeight: &ephemeralSecretWeight,
 		Mod1Type:              mod1.CosDiscrete,
 		LogMessageRatio:       &logMessageRatio,
 		K:                     &k,
@@ -100,6 +103,56 @@ func actualLogN16BootstrapParameters(t testing.TB) (Parameters, ckks.Parameters)
 	require.NoError(t, err)
 	params.CircuitOrder = ModUpThenEncode
 	return params, residual
+}
+
+func TestFastBootstrapNoiseHookLogN16E32ActualParametersNoBootstrap(t *testing.T) {
+	params, residual := actualLogN16BootstrapParametersWithE(t, 32)
+	require.Equal(t, 32, params.EphemeralSecretWeight)
+	require.Equal(t, 16, params.BootstrappingParameters.LogN())
+	require.Equal(t, 65536, params.BootstrappingParameters.N())
+	require.Equal(t, residual.N(), params.BootstrappingParameters.N())
+	require.Equal(t, 15, params.LogMaxSlots())
+	require.Equal(t, 32768, residual.MaxSlots())
+	require.Equal(t, 17, params.BootstrappingParameters.QCount())
+	require.Equal(t, 5, params.BootstrappingParameters.PCount())
+	require.Equal(t, 16, params.BootstrappingParameters.MaxLevel())
+
+	eval := fastckks.NewEvaluator(params.BootstrappingParameters)
+	require.NoError(t, eval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+	const level = 12
+	input := ckks.NewCiphertext(params.BootstrappingParameters, 1, level)
+	input.Scale = rlwe.NewScale(1 << 60)
+	input.IsNTT, input.IsMontgomery, input.IsBatched = true, true, true
+	for row := 0; row < 4; row++ {
+		subring := params.BootstrappingParameters.RingQ().SubRings[row]
+		for i := range input.Value[0].Coeffs[row] {
+			value := int64(i%5 - 2)
+			if value < 0 {
+				input.Value[0].Coeffs[row][i] = subring.Modulus - uint64(-value)
+			} else {
+				input.Value[0].Coeffs[row][i] = uint64(value)
+			}
+		}
+		subring.NTT(input.Value[0].Coeffs[row], input.Value[0].Coeffs[row])
+		subring.MForm(input.Value[0].Coeffs[row], input.Value[0].Coeffs[row])
+	}
+	before := input.CopyNew()
+	output := ckks.NewCiphertext(params.BootstrappingParameters, 1, level)
+	output.IsNTT, output.IsMontgomery, output.IsBatched = true, true, true
+	require.NoError(t, eval.MulRelinElementQPrefixRows(input, input.El(), 4, output))
+	require.Equal(t, before, input, "the square operation must not modify its original input")
+	snapshot := eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+	require.True(t, snapshot.Enabled)
+	require.Equal(t, uint64(1), snapshot.CtCtMultiplyCalls)
+	require.Equal(t, uint64(2), snapshot.InjectedPolynomials)
+	require.Len(t, snapshot.Events, 1)
+	event := snapshot.Events[0]
+	require.True(t, event.MultiplyCompleted)
+	require.Equal(t, level, event.Level)
+	require.Equal(t, 4, event.Left.Capacity.Rows)
+	require.Equal(t, 4, event.Right.Capacity.Rows)
+	require.True(t, event.Left.Capacity.StrictFit)
+	require.True(t, event.Right.Capacity.StrictFit)
 }
 
 func fastBootstrapPlainCiphertext(t testing.TB, params ckks.Parameters, level, logSlots int) *rlwe.Ciphertext {
