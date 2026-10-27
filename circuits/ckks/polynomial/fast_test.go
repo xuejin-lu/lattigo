@@ -1,6 +1,7 @@
 package polynomial
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"math/bits"
@@ -63,6 +64,83 @@ func fastPolynomialTestPoly(degree int) bignum.Polynomial {
 	}
 	poly := bignum.NewPolynomial(bignum.Chebyshev, coeffs, nil)
 	return poly
+}
+
+func fastPolynomialBootstrapNoiseTestParameters(t *testing.T) ckks.Parameters {
+	t.Helper()
+	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
+		LogN:            13,
+		LogQ:            []int{55, 39, 40, 39, 40, 60, 60, 60, 60, 60, 60, 60, 60, 56, 57, 56, 56},
+		LogP:            []int{61, 61, 61, 61, 61},
+		LogDefaultScale: 45,
+	})
+	require.NoError(t, err)
+	return params
+}
+
+func fastPolynomialBootstrapNoiseTestInput(t *testing.T, params ckks.Parameters) *rlwe.Ciphertext {
+	t.Helper()
+	const level = 12
+	encoder := ckks.NewEncoder(params)
+	plaintext := ckks.NewPlaintext(params, level)
+	plaintext.Scale = rlwe.NewScale(math.Exp2(60))
+	plaintext.IsNTT, plaintext.IsMontgomery = true, true
+	values := make([]complex128, plaintext.Slots())
+	for i := range values {
+		values[i] = complex(float64(i%5-2)*1e-5, float64(i%3-1)*1e-5)
+	}
+	require.NoError(t, encoder.Encode(values, plaintext))
+
+	input := ckks.NewCiphertext(params, 1, level)
+	*input.MetaData = *plaintext.MetaData
+	input.Value[0].Copy(plaintext.Value)
+	input.Value[1].Zero()
+	input.IsNTT, input.IsMontgomery = plaintext.IsNTT, plaintext.IsMontgomery
+	return input
+}
+
+func TestFastChebyshevPower2AndPower4WithMontgomeryFixedSigmaNoise(t *testing.T) {
+	for _, power := range []int{2, 4} {
+		t.Run(fmt.Sprintf("power_%d", power), func(t *testing.T) {
+			params := fastPolynomialBootstrapNoiseTestParameters(t)
+			eval := NewFastEvaluator(params, nil)
+			require.NoError(t, eval.Evaluator.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 20261027))
+			input := fastPolynomialBootstrapNoiseTestInput(t, params)
+			inputBefore := input.CopyNew()
+			rows, err := fastckks.QPrefixWidth(input.Level())
+			require.NoError(t, err)
+			require.Equal(t, 4, rows)
+			eval.workspace.reset(params, input, rows)
+			pb := fastPowerBasis{basis: bignum.Chebyshev, values: eval.workspace.powers, workspace: &eval.workspace, params: params, eval: eval.Evaluator}
+			require.NoError(t, pb.genPower(power, false))
+
+			got := eval.workspace.powers[power]
+			require.NotNil(t, got)
+			require.Equal(t, 12-power/2, got.Level())
+			require.Equal(t, 1, got.Degree())
+			require.True(t, got.IsNTT)
+			require.True(t, got.IsMontgomery)
+			require.Greater(t, got.Scale.Value.Sign(), 0)
+			require.Equal(t, inputBefore, input, "power generation must not mutate the original ciphertext")
+
+			snapshot := eval.Evaluator.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+			wantCalls := uint64(power / 2)
+			require.Equal(t, wantCalls, snapshot.CtCtMultiplyCalls)
+			require.Equal(t, 2*wantCalls, snapshot.InjectedPolynomials)
+			require.Len(t, snapshot.Events, int(wantCalls))
+			for _, event := range snapshot.Events {
+				require.True(t, event.MultiplyCompleted, "level=%d scale=%s failure=%s", event.Level, event.Scale, event.Failure)
+				require.True(t, event.Left.Capacity.StrictFit)
+				require.True(t, event.Right.Capacity.StrictFit)
+				require.Contains(t, event.Left.DispatchEvidence, "MForm-mapped")
+				require.Contains(t, event.Right.DispatchEvidence, "MForm-mapped")
+			}
+			require.Equal(t, 12, snapshot.Events[0].Level)
+			if power == 4 {
+				require.Equal(t, 11, snapshot.Events[1].Level)
+			}
+		})
+	}
 }
 
 func TestFastPolynomialEvaluatorSmokeAndReuse(t *testing.T) {

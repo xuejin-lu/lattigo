@@ -126,8 +126,8 @@ func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphe
 	if _, err := validateFastCKKSZeroSecretMulShape("Bootstrap Mul target", ct, params); err != nil {
 		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target: %w", err)
 	}
-	if ct.Scale.Value.Sign() <= 0 || !ct.IsNTT || ct.IsMontgomery || !eval.GetRLWEParameters().NTTFlag() {
-		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target requires a positive Scale and NTT non-Montgomery representation")
+	if ct.Scale.Value.Sign() <= 0 || !ct.IsNTT || !eval.GetRLWEParameters().NTTFlag() {
+		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target requires a positive Scale and NTT representation")
 	}
 	rows, err := fastcore.QPrefixWidth(ct.Level())
 	if err != nil {
@@ -211,6 +211,9 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 				noiseNTT.Coeffs[row][coefficient] = signedCoefficientResidue(value, modulus)
 			}
 			ringQ.SubRings[row].NTT(noiseNTT.Coeffs[row], noiseNTT.Coeffs[row])
+			if ct.IsMontgomery {
+				ringQ.SubRings[row].MForm(noiseNTT.Coeffs[row], noiseNTT.Coeffs[row])
+			}
 		}
 		return nil
 	})
@@ -260,7 +263,7 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 	if phaseErr != nil {
 		return evidence, phaseErr
 	}
-	evidence.DispatchEvidence = "explicit Fast ckks.Evaluator helper; q0..q3 coefficient residues transformed per NTT subring; existing fastcore centered-Q-prefix addition-capacity check; c1/dormant limbs untouched"
+	evidence.DispatchEvidence = "explicit Fast ckks.Evaluator helper; q-prefix signed coefficients transformed per NTT subring and MForm-mapped when target is Montgomery; existing fastcore centered-Q-prefix addition-capacity check; c1/dormant limbs untouched"
 	return evidence, nil
 }
 

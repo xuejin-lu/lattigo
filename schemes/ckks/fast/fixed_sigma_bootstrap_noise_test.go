@@ -214,22 +214,30 @@ func TestFixedSigmaBootstrapNoiseUsesActiveRowsAcrossLevels(t *testing.T) {
 	}
 }
 
-func TestFixedSigmaBootstrapNoiseRejectsMontgomeryWithoutMutatingOperands(t *testing.T) {
+func TestFixedSigmaBootstrapNoiseSupportsMontgomeryWithoutMutatingOperands(t *testing.T) {
 	params := fixedSigmaBootstrapNoiseTestParameters(t)
 	eval := NewEvaluator(params)
 	require.NoError(t, eval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 4))
 	left, right := fixedSigmaBootstrapNoiseTestCiphertext(params, 3), fixedSigmaBootstrapNoiseTestCiphertext(params, 3)
-	for d := range left.Value {
-		for row := 0; row < 4; row++ {
-			params.RingQ().SubRings[row].MForm(left.Value[d].Coeffs[row], left.Value[d].Coeffs[row])
+	for _, ct := range []*rlwe.Ciphertext{left, right} {
+		for d := range ct.Value {
+			for row := 0; row < 4; row++ {
+				params.RingQ().SubRings[row].MForm(ct.Value[d].Coeffs[row], ct.Value[d].Coeffs[row])
+			}
 		}
+		ct.IsMontgomery = true
 	}
-	left.IsMontgomery = true
 	leftBefore, rightBefore := left.CopyNew(), right.CopyNew()
 	out := ckks.NewCiphertext(params, 1, 3)
-	out.IsNTT = true
-	require.ErrorContains(t, eval.MulRelinElementQPrefixRows(left, right.El(), 4, out), "Montgomery")
+	out.IsNTT, out.IsMontgomery = true, true
+	require.NoError(t, eval.MulRelinElementQPrefixRows(left, right.El(), 4, out))
 	require.Equal(t, leftBefore, left)
 	require.Equal(t, rightBefore, right)
-	require.Zero(t, eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot().CtCtMultiplyCalls)
+	snapshot := eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+	require.Equal(t, uint64(1), snapshot.CtCtMultiplyCalls)
+	require.Equal(t, uint64(2), snapshot.InjectedPolynomials)
+	require.Len(t, snapshot.Events, 1)
+	require.True(t, snapshot.Events[0].MultiplyCompleted)
+	require.Contains(t, snapshot.Events[0].Left.DispatchEvidence, "MForm-mapped")
+	require.Contains(t, snapshot.Events[0].Right.DispatchEvidence, "MForm-mapped")
 }
