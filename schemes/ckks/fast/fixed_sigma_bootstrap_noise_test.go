@@ -1,6 +1,7 @@
 package fast
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"testing"
@@ -27,9 +28,13 @@ func fixedSigmaBootstrapNoiseTestCiphertext(params ckks.Parameters, level int) *
 }
 
 func fixedSigmaBootstrapNoiseLogN16TestParameters(t *testing.T) ckks.Parameters {
+	return fixedSigmaBootstrapNoiseParametersForLogN(t, 16)
+}
+
+func fixedSigmaBootstrapNoiseParametersForLogN(t *testing.T, logN int) ckks.Parameters {
 	t.Helper()
 	params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
-		LogN: 16,
+		LogN: logN,
 		Q: []uint64{
 			36028797019488257, 549754109953, 549753978881, 549753716737, 549753192449,
 			1152921504606584833, 1152921504614055937, 1152921504598720513, 1152921504615628801,
@@ -40,7 +45,7 @@ func fixedSigmaBootstrapNoiseLogN16TestParameters(t *testing.T) ckks.Parameters 
 		LogDefaultScale: 45,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 65536, params.N())
+	require.Equal(t, 1<<logN, params.N())
 	require.Len(t, params.Q(), 17)
 	require.Len(t, params.P(), 5)
 	return params
@@ -157,19 +162,129 @@ func TestFixedSigmaBootstrapNoiseLogN16LeavesOtherOperationsUntouched(t *testing
 	require.Empty(t, snapshot.Events)
 }
 
-func TestFixedSigmaBootstrapNoiseRejectsLogN14And15(t *testing.T) {
-	for _, logN := range []int{14, 15} {
+func TestFixedSigmaBootstrapNoiseSupportsLogN13Through16WithEncodedMontgomeryInputs(t *testing.T) {
+	const (
+		level = 12
+		sigma = 4.004280012097432
+		seed  = int64(20261027)
+	)
+	for _, logN := range []int{13, 14, 15, 16} {
 		t.Run(fmt.Sprintf("logn%d", logN), func(t *testing.T) {
-			params, err := ckks.NewParametersFromLiteral(ckks.ParametersLiteral{
-				LogN: logN, LogQ: []int{55, 39, 39, 39, 40}, LogDefaultScale: 45,
-			})
+			params := fixedSigmaBootstrapNoiseParametersForLogN(t, logN)
+			encoder := ckks.NewEncoder(params)
+			plain := ckks.NewPlaintext(params, level)
+			plain.Scale = rlwe.NewScale(math.Exp2(60))
+			plain.IsNTT = true
+			values := make([]complex128, params.MaxDimensions().Cols)
+			values[0], values[1] = complex(0.125, -0.25), complex(-0.0625, 0.03125)
+			require.NoError(t, encoder.Encode(values, plain))
+			input := ckks.NewCiphertext(params, 1, level)
+			input.Value[0] = *plain.Value.CopyNew()
+			input.Scale = plain.Scale
+			input.IsNTT, input.IsBatched = plain.IsNTT, plain.IsBatched
+			input.LogDimensions, input.IsBitReversed = plain.LogDimensions, plain.IsBitReversed
+			input.IsMontgomery = true
+			for row := 0; row < 4; row++ {
+				params.RingQ().SubRings[row].MForm(input.Value[0].Coeffs[row], input.Value[0].Coeffs[row])
+			}
+			original := input.CopyNew()
+
+			// A real encoded zero-secret c0 traverses ct×pt, scalar and rotation
+			// operations without triggering the ct×ct-only hook.
+			untouchedEval := NewEvaluator(params)
+			require.NoError(t, untouchedEval.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, seed))
+			plainOperand := rlwe.NewElement(untouchedEval.GetRLWEParameters(), 0, level)
+			plainOperand.IsNTT, plainOperand.IsMontgomery, plainOperand.IsBatched = true, true, true
+			plainOperand.Scale = rlwe.NewScale(1)
+			ctPtOut := ckks.NewCiphertext(params, 1, level)
+			ctPtOut.IsNTT, ctPtOut.IsMontgomery, ctPtOut.IsBatched = true, true, true
+			require.NoError(t, untouchedEval.MulElementQPrefixRows(input, plainOperand, 4, ctPtOut))
+			scalarOut := ckks.NewCiphertext(params, 1, level)
+			scalarOut.IsNTT, scalarOut.IsMontgomery, scalarOut.IsBatched = true, true, true
+			require.NoError(t, untouchedEval.Mul(input, int64(7), scalarOut))
+			rotationOut := ckks.NewCiphertext(params, 1, level)
+			rotationOut.IsNTT, rotationOut.IsMontgomery, rotationOut.IsBatched = true, true, true
+			require.NoError(t, untouchedEval.Automorphism(input, rotationOut, params.GaloisElementForRotation(1)))
+			snapshot := untouchedEval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+			require.Zero(t, snapshot.CtCtMultiplyCalls)
+			require.Zero(t, snapshot.InjectedPolynomials)
+			require.Empty(t, snapshot.Events)
+
+			// Disabling the opt-in hook must preserve the ordinary Fast product
+			// bit-for-bit at every tested ring dimension.
+			baseline := NewEvaluator(params)
+			disabled := NewEvaluator(params)
+			require.NoError(t, disabled.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, seed))
+			disabled.DisableFixedSigmaBootstrapNoiseDiagnostic()
+			baselineOut := ckks.NewCiphertext(params, 1, level)
+			disabledOut := ckks.NewCiphertext(params, 1, level)
+			for _, out := range []*rlwe.Ciphertext{baselineOut, disabledOut} {
+				out.IsNTT, out.IsMontgomery, out.IsBatched = true, true, true
+			}
+			rows, err := QPrefixWidth(level)
 			require.NoError(t, err)
-			eval := NewEvaluator(params)
-			err = eval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 1)
-			require.ErrorContains(t, err, "supports only the frozen LogN13 and LogN16 profiles")
-			require.False(t, eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot().Enabled)
+			require.NoError(t, baseline.MulRelinElementQPrefixRows(input.CopyNew(), input.El(), rows, baselineOut))
+			require.NoError(t, disabled.MulRelinElementQPrefixRows(input.CopyNew(), input.El(), rows, disabledOut))
+			require.Equal(t, baselineOut, disabledOut)
+			require.False(t, disabled.FixedSigmaBootstrapNoiseDiagnosticSnapshot().Enabled)
+
+			runSquare := func(aliasOutput bool) (*rlwe.Ciphertext, FixedSigmaBootstrapNoiseSnapshot) {
+				eval := NewEvaluator(params)
+				require.NoError(t, eval.EnableFixedSigmaBootstrapNoiseDiagnostic(sigma, seed))
+				left := input.CopyNew()
+				out := ckks.NewCiphertext(params, 1, level)
+				out.IsNTT, out.IsMontgomery, out.IsBatched = true, true, true
+				if aliasOutput {
+					out = left
+				}
+				require.NoError(t, eval.MulRelinElementQPrefixRows(left, left.El(), rows, out))
+				return out, eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot()
+			}
+			copiedOut, copiedEvidence := runSquare(false)
+			aliasedOut, aliasedEvidence := runSquare(true)
+			require.Equal(t, copiedOut, aliasedOut, "square output alias must use independent operand copies")
+			require.Equal(t, original, input, "hook must not mutate original encoded input")
+			for _, result := range []struct {
+				name     string
+				observed FixedSigmaBootstrapNoiseSnapshot
+			}{{"copied", copiedEvidence}, {"aliased", aliasedEvidence}} {
+				require.True(t, result.observed.Enabled, result.name)
+				require.Equal(t, uint64(1), result.observed.CtCtMultiplyCalls, result.name)
+				require.Equal(t, uint64(2), result.observed.InjectedPolynomials, result.name)
+				require.Len(t, result.observed.Events, 1, result.name)
+				event := result.observed.Events[0]
+				require.True(t, event.MultiplyCompleted, result.name)
+				require.Equal(t, params.N(), event.Left.SampleCount, result.name)
+				require.Equal(t, params.N(), event.Right.SampleCount, result.name)
+				require.Equal(t, level, event.Level, result.name)
+				require.Equal(t, input.Scale.Value.Text('g', -1), event.Scale, result.name)
+				require.NotEqual(t, event.Left.Seed, event.Right.Seed, result.name)
+				require.NotEqual(t, event.Left.CoefficientSHA256, event.Right.CoefficientSHA256, result.name)
+				require.Len(t, mustDecodeFixedSigmaSHA256(t, event.Left.CoefficientSHA256), 32, result.name)
+				require.Len(t, mustDecodeFixedSigmaSHA256(t, event.Right.CoefficientSHA256), 32, result.name)
+				require.True(t, event.Left.Capacity.StrictFit, result.name)
+				require.True(t, event.Right.Capacity.StrictFit, result.name)
+				require.Equal(t, rows, event.Left.Capacity.Rows, result.name)
+				require.Equal(t, rows, event.Right.Capacity.Rows, result.name)
+			}
+			require.Equal(t, copiedEvidence.Events[0].Left.CoefficientSHA256, aliasedEvidence.Events[0].Left.CoefficientSHA256)
+			require.Equal(t, copiedEvidence.Events[0].Right.CoefficientSHA256, aliasedEvidence.Events[0].Right.CoefficientSHA256)
 		})
 	}
+}
+
+func mustDecodeFixedSigmaSHA256(t *testing.T, value string) []byte {
+	t.Helper()
+	digest, err := hex.DecodeString(value)
+	require.NoError(t, err)
+	return digest
+}
+
+func TestFixedSigmaBootstrapNoiseRejectsUninitializedParameters(t *testing.T) {
+	eval := &Evaluator{}
+	err := eval.EnableFixedSigmaBootstrapNoiseDiagnostic(4.004280012097432, 1)
+	require.ErrorContains(t, err, "do not contain an initialized CKKS ring")
+	require.False(t, eval.FixedSigmaBootstrapNoiseDiagnosticSnapshot().Enabled)
 }
 
 func TestFixedSigmaBootstrapNoiseDefaultOffIsBitExact(t *testing.T) {

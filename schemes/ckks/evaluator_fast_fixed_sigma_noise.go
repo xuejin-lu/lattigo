@@ -104,10 +104,12 @@ func (eval Evaluator) InjectFixedSigmaCoefficientNoiseDiagnostic(ct *rlwe.Cipher
 
 // InjectFixedSigmaBootstrapMulNoiseDiagnostic injects the same coefficient-
 // domain diagnostic noise as InjectFixedSigmaCoefficientNoiseDiagnostic, but
-// accepts every active Q-prefix level and positive Scale used by the bounded
-// LogN13 Bootstrap multiplication path. It remains explicit and is never
-// called by ordinary CKKS operations. The historical post-Mul/Rescale helper
-// above retains its Level3/4 and Scale2^45 contract.
+// accepts any valid CKKS ring degree and active Q-prefix level with positive
+// Scale, valid NTT representation, and the Fast zero-secret ciphertext shape.
+// It remains explicit and is never called by ordinary CKKS operations. Task-
+// specific ring-degree restrictions belong in the measurement layer. The
+// historical post-Mul/Rescale helper above retains its LogN13 Level3/4 and
+// Scale2^45 contract.
 func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphertext, sigma float64, seed int64) (FixedSigmaCoefficientNoiseEvidence, error) {
 	evidence := FixedSigmaCoefficientNoiseEvidence{Sigma: sigma, Seed: seed}
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma <= 0 {
@@ -120,9 +122,6 @@ func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphe
 		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic is available only for the Fast zero-secret CKKS capability")
 	}
 	params := eval.GetParameters()
-	if (params.LogN() != 13 || params.N() != 1<<13) && (params.LogN() != 16 || params.N() != 1<<16) {
-		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul diagnostic supports only the frozen LogN13 and LogN16 profiles (got LogN=%d N=%d)", params.LogN(), params.N())
-	}
 	if _, err := validateFastCKKSZeroSecretMulShape("Bootstrap Mul target", ct, params); err != nil {
 		return evidence, fmt.Errorf("fixed-sigma Bootstrap Mul target: %w", err)
 	}

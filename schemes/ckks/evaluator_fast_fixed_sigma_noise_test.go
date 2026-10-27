@@ -1,6 +1,8 @@
 package ckks
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -287,9 +289,13 @@ func TestFixedSigmaBootstrapMulNoiseMontgomeryLevel12Scale60PreservesSignedCoeff
 }
 
 func fixedSigmaBootstrapMulNoiseLogN16Parameters(t *testing.T) Parameters {
+	return fixedSigmaBootstrapMulNoiseParametersForLogN(t, 16)
+}
+
+func fixedSigmaBootstrapMulNoiseParametersForLogN(t *testing.T, logN int) Parameters {
 	t.Helper()
 	params, err := NewParametersFromLiteral(ParametersLiteral{
-		LogN: 16,
+		LogN: logN,
 		Q: []uint64{
 			36028797019488257, 549754109953, 549753978881, 549753716737, 549753192449,
 			1152921504606584833, 1152921504614055937, 1152921504598720513, 1152921504615628801,
@@ -300,7 +306,7 @@ func fixedSigmaBootstrapMulNoiseLogN16Parameters(t *testing.T) Parameters {
 		LogDefaultScale: 45, RingType: ring.Standard,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 65536, params.N())
+	require.Equal(t, 1<<logN, params.N())
 	require.Len(t, params.Q(), 17)
 	require.Len(t, params.P(), 5)
 	return params
@@ -390,20 +396,112 @@ func TestFixedSigmaBootstrapMulNoiseLogN16CapacityFailureDoesNotMutateTarget(t *
 	require.Equal(t, metadata, *ct.MetaData)
 }
 
-func TestFixedSigmaBootstrapMulNoiseRejectsUnapprovedLogNDomains(t *testing.T) {
-	for _, logN := range []int{14, 15} {
+func TestFixedSigmaBootstrapMulNoiseSupportsLogN13Through16MontgomeryEncodedInputs(t *testing.T) {
+	const (
+		level = 12
+		sigma = 4.004280012097432
+	)
+	for _, logN := range []int{13, 14, 15, 16} {
 		t.Run(fmt.Sprintf("logn%d", logN), func(t *testing.T) {
-			params, err := NewParametersFromLiteral(ParametersLiteral{
-				LogN: logN, LogQ: []int{55, 39, 39, 39, 40}, LogDefaultScale: 45, RingType: ring.Standard,
-			})
-			require.NoError(t, err)
+			params := fixedSigmaBootstrapMulNoiseParametersForLogN(t, logN)
+			encoder := NewEncoder(params)
+			plain := NewPlaintext(params, level)
+			plain.Scale = rlwe.NewScale(math.Exp2(60))
+			plain.IsNTT = true
+			values := make([]complex128, params.MaxDimensions().Cols)
+			values[0], values[1] = complex(0.125, -0.25), complex(-0.0625, 0.03125)
+			require.NoError(t, encoder.Encode(values, plain))
+
+			ct := NewCiphertext(params, 1, level)
+			ct.Value[0] = *plain.Value.CopyNew()
+			ct.Scale = plain.Scale
+			ct.IsNTT, ct.IsBatched = plain.IsNTT, plain.IsBatched
+			ct.LogDimensions, ct.IsBitReversed = plain.LogDimensions, plain.IsBitReversed
+			ct.IsMontgomery = true
+			for row := 0; row < 4; row++ {
+				params.RingQ().SubRings[row].MForm(ct.Value[0].Coeffs[row], ct.Value[0].Coeffs[row])
+			}
+			before := ct.CopyNew()
+			beforeMeta := *ct.MetaData
+			seed := int64(20261027 + logN)
 			evaluator := NewEvaluator(params, nil)
-			ct := NewCiphertext(params, 1, 3)
-			ct.Scale, ct.IsNTT = rlwe.NewScale(math.Exp2(45)), true
-			_, err = evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, 4.004280012097432, 7)
-			require.ErrorContains(t, err, "supports only the frozen LogN13 and LogN16 profiles")
+			evidence, err := evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct, sigma, seed)
+			require.NoError(t, err)
+			require.Equal(t, params.N(), evidence.SampleCount)
+			require.Equal(t, seed, evidence.Seed)
+			require.Equal(t, 4, evidence.Capacity.Rows)
+			require.Equal(t, params.N(), evidence.Capacity.CheckedCoefficients)
+			require.True(t, evidence.Capacity.StrictFit)
+			require.Len(t, mustDecodeSHA256(t, evidence.CoefficientSHA256), sha256.Size)
+			require.Equal(t, beforeMeta, *ct.MetaData)
+			require.Equal(t, before.Value[1], ct.Value[1], "c1 must be unchanged")
+			require.Equal(t, level, ct.Level())
+			require.True(t, ct.Scale.Equal(rlwe.NewScale(math.Exp2(60))))
+			require.True(t, ct.IsNTT && ct.IsMontgomery)
+			for row := 4; row <= level; row++ {
+				require.Equal(t, before.Value[0].Coeffs[row], ct.Value[0].Coeffs[row], "dormant q%d must be unchanged", row)
+			}
+
+			// The evidence digest must be exactly the deterministic signed Gaussian
+			// sequence of length params.N(), and each active Montgomery/NTT row must
+			// decode to the original encoded coefficient plus that same sequence.
+			rng := rand.New(rand.NewSource(seed))
+			expected := make([]int64, params.N())
+			hasher := sha256.New()
+			var encoded [8]byte
+			for index := range expected {
+				expected[index] = int64(math.Round(rng.NormFloat64() * sigma))
+				binary.LittleEndian.PutUint64(encoded[:], uint64(expected[index]))
+				_, _ = hasher.Write(encoded[:])
+			}
+			require.Equal(t, hex.EncodeToString(hasher.Sum(nil)), evidence.CoefficientSHA256)
+			got, prior := ct.Value[0].CopyNew(), before.Value[0].CopyNew()
+			for row := 0; row < evidence.Capacity.Rows; row++ {
+				subring := params.RingQ().SubRings[row]
+				subring.INTT(got.Coeffs[row], got.Coeffs[row])
+				subring.IMForm(got.Coeffs[row], got.Coeffs[row])
+				subring.INTT(prior.Coeffs[row], prior.Coeffs[row])
+				subring.IMForm(prior.Coeffs[row], prior.Coeffs[row])
+				modulus := subring.Modulus
+				for coefficient, noise := range expected {
+					want := (prior.Coeffs[row][coefficient] + signedCoefficientResidue(noise, modulus)) % modulus
+					require.Equalf(t, want, got.Coeffs[row][coefficient], "q%d coefficient %d", row, coefficient)
+				}
+			}
+
+			// A near-boundary Level-0 coefficient must still fail the strict
+			// capacity proof transactionally at every ring dimension.
+			failure := NewCiphertext(params, 1, 0)
+			failure.Scale = rlwe.NewScale(math.Exp2(60))
+			failure.IsNTT, failure.IsMontgomery = true, true
+			q0 := params.RingQ().SubRings[0]
+			failure.Value[0].Coeffs[0][0] = q0.Modulus/2 - 1
+			q0.NTT(failure.Value[0].Coeffs[0], failure.Value[0].Coeffs[0])
+			q0.MForm(failure.Value[0].Coeffs[0], failure.Value[0].Coeffs[0])
+			failureSeed := fixedSigmaCapacityFailureSeed(sigma)
+			require.GreaterOrEqual(t, failureSeed, int64(0))
+			failureBefore := snapshotCiphertextValue(failure)
+			_, err = evaluator.InjectFixedSigmaBootstrapMulNoiseDiagnostic(failure, sigma, failureSeed)
+			require.ErrorContains(t, err, "exceeds or cannot prove Q-prefix capacity")
+			require.Equal(t, failureBefore, snapshotCiphertextValue(failure))
 		})
 	}
+}
+
+func mustDecodeSHA256(t *testing.T, value string) []byte {
+	t.Helper()
+	digest, err := hex.DecodeString(value)
+	require.NoError(t, err)
+	return digest
+}
+
+func fixedSigmaCapacityFailureSeed(sigma float64) int64 {
+	for seed := int64(0); seed < 1000; seed++ {
+		if int64(math.Round(rand.New(rand.NewSource(seed)).NormFloat64()*sigma)) > 1 {
+			return seed
+		}
+	}
+	return -1
 }
 
 func TestFixedSigmaBootstrapMulNoiseCapacityFailureDoesNotMutateTarget(t *testing.T) {

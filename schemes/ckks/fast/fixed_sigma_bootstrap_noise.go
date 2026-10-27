@@ -54,8 +54,8 @@ func (eval *Evaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, r
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma <= 0 {
 		return fmt.Errorf("fixed-sigma Bootstrap noise requires finite sigma > 0")
 	}
-	if !supportsFixedSigmaBootstrapNoiseProfile(eval.Parameters.LogN(), eval.Parameters.N()) {
-		return fmt.Errorf("fixed-sigma Bootstrap noise supports only the frozen LogN13 and LogN16 profiles (got LogN=%d N=%d)", eval.Parameters.LogN(), eval.Parameters.N())
+	if err := validateFixedSigmaBootstrapNoiseParameters(eval.Parameters); err != nil {
+		return fmt.Errorf("fixed-sigma Bootstrap noise CKKS parameters: %w", err)
 	}
 	// The existing coefficient-noise helper lives in the parent ckks package.
 	// Fast already depends on that package for Parameters, so this reuses the
@@ -68,11 +68,31 @@ func (eval *Evaluator) EnableFixedSigmaBootstrapNoiseDiagnostic(sigma float64, r
 	return nil
 }
 
-// supportsFixedSigmaBootstrapNoiseProfile is an explicit research-profile
-// allowlist. The dimension-generic sampler and Q-prefix checker are verified
-// only at these two ring sizes; unknown LogN values remain unsupported.
-func supportsFixedSigmaBootstrapNoiseProfile(logN, n int) bool {
-	return (logN == 13 && n == 1<<13) || (logN == 16 && n == 1<<16)
+// validateFixedSigmaBootstrapNoiseParameters checks structural and NTT
+// capabilities required by the generic hook. Experiment profile restrictions
+// (including a task's LogN) belong in the Primary measurement layer.
+func validateFixedSigmaBootstrapNoiseParameters(params ckks.Parameters) error {
+	n := params.N()
+	logN := params.LogN()
+	ringQ := params.RingQ()
+	if n < 2 || logN < 1 || ringQ == nil || len(ringQ.SubRings) == 0 || ringQ.SubRings[0] == nil {
+		return fmt.Errorf("parameters do not contain an initialized CKKS ring")
+	}
+	if ringQ.N() != n || ringQ.LogN() != logN {
+		return fmt.Errorf("CKKS N/LogN do not match RingQ (N=%d LogN=%d RingQ.N=%d RingQ.LogN=%d)", n, logN, ringQ.N(), ringQ.LogN())
+	}
+	if params.QCount() != len(ringQ.SubRings) || ringQ.Level() != params.MaxLevel() {
+		return fmt.Errorf("CKKS Q chain does not match RingQ backing (QCount=%d subrings=%d maxLevel=%d ringLevel=%d)", params.QCount(), len(ringQ.SubRings), params.MaxLevel(), ringQ.Level())
+	}
+	if !params.NTTFlag() {
+		return fmt.Errorf("CKKS parameters do not enable NTT representation")
+	}
+	for row, subring := range ringQ.SubRings {
+		if subring == nil || subring.N != n {
+			return fmt.Errorf("RingQ subring %d is missing or has an incompatible degree", row)
+		}
+	}
+	return nil
 }
 
 // DisableFixedSigmaBootstrapNoiseDiagnostic restores the exact default-off
