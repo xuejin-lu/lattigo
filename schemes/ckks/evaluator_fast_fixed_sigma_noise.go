@@ -38,10 +38,11 @@ type FixedSigmaCoefficientNoiseEvidence struct {
 
 // FixedSigmaCoefficientNoisePhase records a bounded helper subphase for CP-D.
 type FixedSigmaCoefficientNoisePhase struct {
-	Name       string `json:"name"`
-	ElapsedNS  int64  `json:"elapsed_ns"`
-	AllocBytes uint64 `json:"alloc_bytes"`
-	Allocs     uint64 `json:"allocs"`
+	Name                 string `json:"name"`
+	ElapsedNS            int64  `json:"elapsed_ns"`
+	AllocBytes           uint64 `json:"alloc_bytes"`
+	Allocs               uint64 `json:"allocs"`
+	MemoryStatsCollected bool   `json:"memory_stats_collected"`
 }
 
 // InjectFixedSigmaCoefficientNoiseDiagnostic explicitly adds one sampled
@@ -98,7 +99,7 @@ func (eval Evaluator) InjectFixedSigmaCoefficientNoiseDiagnostic(ct *rlwe.Cipher
 		}
 	}
 
-	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows)
+	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows, true)
 }
 
 // InjectFixedSigmaBootstrapMulNoiseDiagnostic injects the same coefficient-
@@ -149,17 +150,17 @@ func (eval Evaluator) InjectFixedSigmaBootstrapMulNoiseDiagnostic(ct *rlwe.Ciphe
 			}
 		}
 	}
-	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows)
+	return eval.injectFixedSigmaCoefficientNoise(ct, sigma, seed, rows, false)
 }
 
-func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigma float64, seed int64, rows int) (FixedSigmaCoefficientNoiseEvidence, error) {
+func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigma float64, seed int64, rows int, collectMemoryStats bool) (FixedSigmaCoefficientNoiseEvidence, error) {
 	params := eval.GetParameters()
 	ringQ := params.RingQ()
 	evidence := FixedSigmaCoefficientNoiseEvidence{Sigma: sigma, Seed: seed, Level: ct.Level(), Scale: ct.Scale.Value.Text('g', -1)}
 	n := params.N()
 	evidence.SamplingAlgorithm = "Go math/rand.NewSource(seed).NormFloat64(), rounded to nearest integer with math.Round (ties away from zero)"
 	var coefficients []int64
-	phase, phaseErr := measureFixedSigmaCoefficientNoisePhase("sampling_hash_moments", func() error {
+	phase, phaseErr := measureFixedSigmaCoefficientNoisePhase("sampling_hash_moments", collectMemoryStats, func() error {
 		coefficients = make([]int64, n)
 		rng := rand.New(rand.NewSource(seed))
 		hasher := sha256.New()
@@ -202,7 +203,7 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 	}
 
 	var noiseNTT ring.Poly
-	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("coefficient_to_qprefix_ntt", func() error {
+	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("coefficient_to_qprefix_ntt", collectMemoryStats, func() error {
 		noiseNTT = ring.NewPoly(n, rows-1)
 		for row := 0; row < rows; row++ {
 			modulus := ringQ.SubRings[row].Modulus
@@ -220,7 +221,7 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 
 	var candidate *ring.Poly
 	var candidateCT rlwe.Ciphertext
-	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("candidate_c0_add", func() error {
+	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("candidate_c0_add", collectMemoryStats, func() error {
 		candidate = ct.Value[0].CopyNew()
 		for row := 0; row < rows; row++ {
 			ringQ.SubRings[row].Add(candidate.Coeffs[row], noiseNTT.Coeffs[row], candidate.Coeffs[row])
@@ -240,7 +241,7 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 	if !ok {
 		return evidence, fmt.Errorf("fixed-sigma diagnostic requires the existing Fast Q-prefix capacity checker")
 	}
-	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("qprefix_centered_capacity_check", func() error {
+	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("qprefix_centered_capacity_check", collectMemoryStats, func() error {
 		var checkErr error
 		evidence.Capacity, checkErr = capacityChecker.CheckQPrefixAdditionCapacity(ringQ, ct, &candidateCT, coefficients, rows)
 		return checkErr
@@ -251,7 +252,7 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 	}
 	// Commit only c0 after all rows and centered capacity have passed. Level,
 	// scale, metadata, c1, and dormant logical limbs remain untouched.
-	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("commit_c0", func() error {
+	phase, phaseErr = measureFixedSigmaCoefficientNoisePhase("commit_c0", collectMemoryStats, func() error {
 		ct.Value[0] = *candidate
 		return nil
 	})
@@ -263,18 +264,21 @@ func (eval Evaluator) injectFixedSigmaCoefficientNoise(ct *rlwe.Ciphertext, sigm
 	return evidence, nil
 }
 
-func measureFixedSigmaCoefficientNoisePhase(name string, operation func() error) (FixedSigmaCoefficientNoisePhase, error) {
+func measureFixedSigmaCoefficientNoisePhase(name string, collectMemoryStats bool, operation func() error) (FixedSigmaCoefficientNoisePhase, error) {
 	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
+	if collectMemoryStats {
+		runtime.ReadMemStats(&before)
+	}
 	started := time.Now()
 	err := operation()
 	elapsed := time.Since(started).Nanoseconds()
-	runtime.ReadMemStats(&after)
-	return FixedSigmaCoefficientNoisePhase{
-		Name: name, ElapsedNS: elapsed,
-		AllocBytes: after.TotalAlloc - before.TotalAlloc,
-		Allocs:     after.Mallocs - before.Mallocs,
-	}, err
+	phase := FixedSigmaCoefficientNoisePhase{Name: name, ElapsedNS: elapsed, MemoryStatsCollected: collectMemoryStats}
+	if collectMemoryStats {
+		runtime.ReadMemStats(&after)
+		phase.AllocBytes = after.TotalAlloc - before.TotalAlloc
+		phase.Allocs = after.Mallocs - before.Mallocs
+	}
+	return phase, err
 }
 
 func signedCoefficientResidue(value int64, modulus uint64) uint64 {

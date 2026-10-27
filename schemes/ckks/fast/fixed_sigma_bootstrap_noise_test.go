@@ -68,6 +68,13 @@ func TestFixedSigmaBootstrapNoiseInjectsIndependentSidesAndPreservesAliasedInput
 	require.Equal(t, uint64(1), event.Operation)
 	require.Equal(t, 4.004280012097432, event.Left.Sigma)
 	require.Equal(t, 4.004280012097432, event.Right.Sigma)
+	for side, evidence := range map[string]ckks.FixedSigmaCoefficientNoiseEvidence{"left": event.Left, "right": event.Right} {
+		for _, phase := range evidence.Phases {
+			require.False(t, phase.MemoryStatsCollected, "%s Bootstrap injection must omit per-phase MemStats", side)
+			require.Zero(t, phase.AllocBytes)
+			require.Zero(t, phase.Allocs)
+		}
+	}
 }
 
 func TestFixedSigmaBootstrapNoiseAliasedSquareOutputMatchesCopiedSquare(t *testing.T) {

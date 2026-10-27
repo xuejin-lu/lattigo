@@ -92,6 +92,7 @@ func TestFixedSigmaCoefficientNoiseIsDeterministicAndMapsOnePolynomialToEveryRow
 			}, fixedSigmaCoefficientNoisePhaseNames(evidenceFirst.Phases))
 			for _, phase := range evidenceFirst.Phases {
 				require.GreaterOrEqual(t, phase.ElapsedNS, int64(0))
+				require.True(t, phase.MemoryStatsCollected, "historical helper keeps its existing allocation diagnostics")
 			}
 			require.Equal(t, first.Value[0], second.Value[0])
 			require.Equal(t, evidenceFirst.SampleCount, params.N())
@@ -198,6 +199,11 @@ func TestFixedSigmaBootstrapMulNoiseSupportsActiveLevelsAndScales(t *testing.T) 
 				require.Equal(t, ct.Scale.Value.Text('g', -1), evidence.Scale)
 				require.Equal(t, min(level+1, 4), evidence.Capacity.Rows)
 				require.True(t, evidence.Capacity.StrictFit)
+				for _, phase := range evidence.Phases {
+					require.False(t, phase.MemoryStatsCollected, "Bootstrap hot-path helper must not call runtime.ReadMemStats per phase")
+					require.Zero(t, phase.AllocBytes)
+					require.Zero(t, phase.Allocs)
+				}
 				require.Equal(t, before.Level(), ct.Level())
 				require.Equal(t, *before.MetaData, *ct.MetaData)
 				require.True(t, before.Scale.Equal(ct.Scale))
