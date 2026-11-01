@@ -134,6 +134,37 @@ Bound tracking is therefore retained as a correctness tool even though the indep
 
 If an operation cannot prove its required intermediate/result bound fits the current Q-prefix capacity, that operation is not valid under this Q-prefix policy. Do not silently read dormant q rows or fall back to Standard full-RNS.
 
+## Experimental Trust policy — CNN512 (user authorized 2026-11-02)
+
+On `experiment/fast-bootstrap-noise-fidelity` only, ordinary Fast-capability
+CKKS evaluators default to **Experimental Trust** for the existing high-level
+QP compatibility lane. This explicit user decision supersedes the lane's
+historical centered-prefix consistency and evaluator-local `armed` prerequisites.
+It does not change the capacity theorem, claim a certified lift, or apply to
+original Standard, generic RLWE, BGV, or the `fast-qprefix` branch.
+
+Complete Q/P storage supplied by the caller may be consumed without CRT,
+INTT-based centered-prefix verification, fingerprint hashing or an additional
+integer-capacity proof. Results are `CAPACITY_UNPROVEN_EXPERIMENTAL`; CNN512's
+unchanged Golden comparison remains the end-to-end acceptance gate. The caller
+is responsible for numerical coherence of supplied complete rows. Trust never
+allocates or reconstructs missing input rows, certifies stale data, or fabricates
+an arithmetic result. Backing/ring/level/domain checks, zero-secret requirements,
+Fast-key checks and deferred-error propagation remain mandatory.
+
+High-level fully backed, all-zero-c1 ciphertexts can use the existing full-Q
+Rescale implementation on a fresh evaluator. Compact Q-prefix results remain
+on the existing shared prefix core. Key switching is still elided only under
+its zero-component contract. No application mode switch or second evaluator
+implementation is introduced. The original strict policy remains an internal
+regression-test configuration; its row-consistency and transactional-rejection
+tests must be retained at their original thresholds.
+
+This amendment authorizes library implementation and lightweight zero-Bootstrap
+regressions only. It authorizes no CNN/model/Golden edits, performance campaign,
+noise model change, or new Bootstrap calls. See
+`docs/FAST_EXPERIMENTAL_TRUST_MODE.md` for implementation and test evidence.
+
 ## Task-scoped experimental zero-secret capacity waiver — BTS Batch 006
 
 For the explicitly authorized `BTS-FAST-E2E-FIRST-006` research experiment only, the user has chosen to prioritize completing the original BTS on this branch's intentionally insecure zero-secret simulation over first obtaining a trusted centered-coefficient-bound certificate. This task-scoped exception permits the bounded Fast zero-secret API repair, its local regression tests, and at most the task-journaled end-to-end calls even when the generic lifted-integer capacity proof is unavailable.

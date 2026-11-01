@@ -587,14 +587,15 @@ func (eval Evaluator) Rescale(op0, opOut *rlwe.Ciphertext) (err error) {
 			return fmt.Errorf("cannot Fast CKKS Rescale: previous compatibility operation failed: %w", err)
 		}
 	}
-	// The compatibility fallback is entered only after a high-level lazy-QP
-	// automorphism has validated and armed this evaluator, and only for a
-	// complete logical-Q ciphertext beyond the maintained prefix. Ordinary
-	// compact Fast ciphertexts remain on the shared Q-prefix Rescale core.
-	if eval.usesFastCKKSZeroSecretSimulation() && eval.fastQPCompat.isArmed() &&
+	// Complete zero-secret Q results from custom QP producers remain usable
+	// after a key-chunk evaluator replacement in Experimental Trust policy.
+	// Compact results (and dormant nonzero c1 rows) keep the shared prefix core.
+	if eval.usesFastCKKSZeroSecretSimulation() &&
+		(eval.fastQPCompat.isArmed() || eval.usesFastQPExperimentalTrust()) &&
 		len(op0.Value) == 2 && len(op0.Value[0].Coeffs) > fastcore.MaxQPrefixWidth &&
 		fullFastPolyRows(op0.Value[0], len(op0.Value[0].Coeffs)-1, eval.GetParameters().N()) &&
-		fullFastPolyRows(op0.Value[1], len(op0.Value[0].Coeffs)-1, eval.GetParameters().N()) {
+		fullFastPolyRows(op0.Value[1], len(op0.Value[0].Coeffs)-1, eval.GetParameters().N()) &&
+		(!eval.usesFastQPExperimentalTrust() || fastQPolyIsZero(op0.Value[1], len(op0.Value[0].Coeffs))) {
 		return eval.fastQPRescale(op0, opOut)
 	}
 

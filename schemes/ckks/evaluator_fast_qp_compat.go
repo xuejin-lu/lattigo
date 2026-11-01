@@ -14,17 +14,17 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
-// fastQPCompatibilityState is local to one ordinary CKKS evaluator. The
-// compatibility lane is armed only after a complete high-level Q ciphertext
-// has been checked against the authoritative Q-prefix CRT representative.
-// Once armed, BTS's full-Q custom BSGS intermediates may use the existing
-// full-RNS ModDown and Rescale implementations after backing and c1 checks.
+// fastQPCompatibilityState is local to one ordinary CKKS evaluator. This
+// experimental branch trusts caller-supplied complete Q rows by default, while
+// retaining structural/zero-secret checks. Strict validation remains available
+// internally for research regressions; only that policy uses armed/fingerprints.
 type fastQPCompatibilityState struct {
-	mu       sync.Mutex
-	armed    bool
-	pending  error
-	trusted  map[*rlwe.Ciphertext]fastQPFingerprint
-	counters fastQPCompatibilityCounters
+	mu                sync.Mutex
+	experimentalTrust bool // immutable policy; disabled only by strict regression fixtures
+	armed             bool
+	pending           error
+	trusted           map[*rlwe.Ciphertext]fastQPFingerprint
+	counters          fastQPCompatibilityCounters
 }
 
 type fastQPFingerprint struct {
@@ -45,14 +45,20 @@ type fastQPCompatibilityCounters struct {
 }
 
 func newFastQPCompatibilityState() *fastQPCompatibilityState {
-	return &fastQPCompatibilityState{trusted: make(map[*rlwe.Ciphertext]fastQPFingerprint)}
+	return &fastQPCompatibilityState{experimentalTrust: true, trusted: make(map[*rlwe.Ciphertext]fastQPFingerprint)}
+}
+
+// usesFastQPExperimentalTrust cannot select the policy for Standard or generic
+// RLWE execution. No application/backend selector is required or exposed.
+func (eval Evaluator) usesFastQPExperimentalTrust() bool {
+	return eval.usesFastCKKSZeroSecretSimulation() && eval.fastQPCompat != nil && eval.fastQPCompat.experimentalTrust
 }
 
 // Automorphism is the ordinary CKKS public-API boundary for Fast zero-secret
 // ciphertexts. The maintained Q-prefix path reuses the shared Fast
 // automorphism core. When a caller (such as BTS C2S) supplies a complete
 // high-level Q representation, the full-Q compatibility path is allowed only
-// after proving its rows are the centered lift of the authoritative prefix;
+// after structural checks (and centered-prefix consistency in strict policy);
 // it performs the Galois permutation but never a key switch because c1 was
 // checked zero. Standard execution keeps the embedded RLWE implementation.
 func (eval Evaluator) Automorphism(ctIn *rlwe.Ciphertext, galEl uint64, opOut *rlwe.Ciphertext) error {
@@ -105,8 +111,10 @@ func (eval Evaluator) Automorphism(ctIn *rlwe.Ciphertext, galEl uint64, opOut *r
 		staged.Value[1].Zero()
 		*staged.MetaData = *ctIn.MetaData
 		opOut.Copy(staged)
-		fingerprint := fastQFingerprint(opOut, level)
-		eval.fastQPCompat.trust(opOut, fingerprint)
+		if !eval.usesFastQPExperimentalTrust() {
+			fingerprint := fastQFingerprint(opOut, level)
+			eval.fastQPCompat.trust(opOut, fingerprint)
+		}
 		eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.automorphisms++ })
 		return nil
 	}
@@ -587,7 +595,7 @@ func (eval Evaluator) AutomorphismHoistedLazy(levelQ int, ctIn *rlwe.Ciphertext,
 	return nil
 }
 
-// ModDownQPtoQNTT validates the complete QP representation before invoking
+// ModDownQPtoQNTT validates complete QP backing and zero P before invoking
 // the shared basis extender. The underlying API cannot return an error, so a
 // malformed call is deferred to the next error-returning evaluator boundary.
 func (eval Evaluator) ModDownQPtoQNTT(levelQ, levelP int, p1Q, p1P, p2Q ring.Poly) {
@@ -602,7 +610,7 @@ func (eval Evaluator) ModDownQPtoQNTT(levelQ, levelP int, p1Q, p1P, p2Q ring.Pol
 		eval.fastQPCompat.record(fmt.Errorf("cannot Fast CKKS ModDownQPtoQNTT: invalid Q/P level (%d,%d)", levelQ, levelP))
 		return
 	}
-	if levelQ+1 > fastcore.MaxQPrefixWidth && !eval.fastQPCompat.isArmed() {
+	if levelQ+1 > fastcore.MaxQPrefixWidth && !eval.usesFastQPExperimentalTrust() && !eval.fastQPCompat.isArmed() {
 		eval.fastQPCompat.record(fmt.Errorf("cannot Fast CKKS ModDownQPtoQNTT: high-level dormant Q rows are not authorized"))
 		return
 	}
@@ -710,6 +718,9 @@ func (eval Evaluator) verifyFastFullQCiphertext(ct *rlwe.Ciphertext) error {
 	if err = validateFastPolyRows("full-Q c0", ct.Value[0], level, ct.N(), true); err != nil {
 		return err
 	}
+	if eval.usesFastQPExperimentalTrust() {
+		return nil // Complete backing was checked; numerical consistency is caller-owned.
+	}
 	fingerprint := fastQFingerprint(ct, level)
 	if eval.fastQPCompat.trustedFingerprint(ct, fingerprint) {
 		return nil
@@ -724,6 +735,9 @@ func (eval Evaluator) verifyFastFullQCiphertext(ct *rlwe.Ciphertext) error {
 func (eval Evaluator) verifyFastFullQPoly(poly ring.Poly, level int, isNTT, isMontgomery bool) error {
 	if err := validateFastPolyRows("full-Q polynomial", poly, level, eval.GetParameters().N(), true); err != nil {
 		return err
+	}
+	if eval.usesFastQPExperimentalTrust() {
+		return nil
 	}
 	ringQ := eval.GetParameters().RingQ()
 	fullRing := ringQ.AtLevel(level)
@@ -755,6 +769,9 @@ func (eval Evaluator) verifyFastPScaledFullQPoly(poly ring.Poly, levelQ, levelP 
 	}
 	if err := validateFastPolyRows("P-scaled full-Q polynomial", poly, levelQ, params.N(), true); err != nil {
 		return err
+	}
+	if eval.usesFastQPExperimentalTrust() {
+		return nil // No INTT, P-inverse or centered-prefix CRT consistency check.
 	}
 	ringQ := params.RingQ()
 	coefficients := ring.NewPoly(params.N(), levelQ)
@@ -872,8 +889,10 @@ func (eval Evaluator) fastQPRescale(op0, opOut *rlwe.Ciphertext) error {
 		}
 	}
 	*opOut.MetaData = *stage.MetaData
-	fingerprint := fastQFingerprint(opOut, targetLevel)
-	eval.fastQPCompat.trust(opOut, fingerprint)
+	if !eval.usesFastQPExperimentalTrust() {
+		fingerprint := fastQFingerprint(opOut, targetLevel)
+		eval.fastQPCompat.trust(opOut, fingerprint)
+	}
 	eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.fullQRescales++ })
 	return nil
 }

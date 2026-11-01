@@ -103,6 +103,7 @@ func TestPublicFastAutomorphismUsesPrefixCoreAndVerifiedFullQPath(t *testing.T) 
 
 	t.Run("ordinary-Conjugate-uses-shared-prefix-core", func(t *testing.T) {
 		eval := NewEvaluator(params, nil)
+		eval.fastQPCompat.experimentalTrust = false // retain strict-policy regression
 		recorder := &recordingPublicAutomorphismCore{AutomorphismCore: eval.automorphismCore}
 		eval.automorphismCore = recorder
 		input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), fastRotateTestValues(4), 4, 3, true)
@@ -127,6 +128,7 @@ func TestPublicFastAutomorphismUsesPrefixCoreAndVerifiedFullQPath(t *testing.T) 
 	t.Run("verified-full-Q-preserves-rows-and-rejects-incoherent-dormant-row", func(t *testing.T) {
 		const level = 5
 		eval := NewEvaluator(params, nil)
+		eval.fastQPCompat.experimentalTrust = false // retain strict-policy regression
 		input := rlwe.NewCiphertext(params, 1, level)
 		input.IsNTT = false
 		input.Scale = rlwe.NewScale(1 << fastRotateTestLogScale)
@@ -169,6 +171,7 @@ func TestPublicFastAutomorphismUsesPrefixCoreAndVerifiedFullQPath(t *testing.T) 
 		level := params.MaxLevel()
 		require.Greater(t, level+1, fastcore.MaxQPrefixWidth)
 		eval := NewEvaluator(params, nil)
+		eval.fastQPCompat.experimentalTrust = false // retain strict-policy regression
 		input := rlwe.NewCiphertext(params, 1, level)
 		input.Scale = rlwe.NewScale(1 << fastRotateTestLogScale)
 		for row := 0; row <= level; row++ {
@@ -213,6 +216,7 @@ func TestFastQPCompatibilityDeferredModDownErrorStopsCompactRescale(t *testing.T
 	galEl := params.GaloisElementForRotation(1)
 	gk := kgen.GenGaloisKeyNew(galEl, sk)
 	eval := NewEvaluator(params, rlwe.NewMemEvaluationKeySet(nil, gk))
+	eval.fastQPCompat.experimentalTrust = false // retain strict-policy regression
 	encoder := NewEncoder(params)
 	input := fastRotateTestEncrypt(t, params, encoder, rlwe.NewEncryptor(params, sk), fastRotateTestValues(4), 4, params.MaxLevel(), true)
 
@@ -451,6 +455,7 @@ func TestFastQPCompatibilityFullQRescaleIsGatedAndMatchesRNSOracle(t *testing.T)
 	galEl := params.GaloisElementForRotation(1)
 	gk := kgen.GenGaloisKeyNew(galEl, sk)
 	eval := NewEvaluator(params, rlwe.NewMemEvaluationKeySet(nil, gk))
+	eval.fastQPCompat.experimentalTrust = false // retain strict-policy regression
 	encoder := NewEncoder(params)
 	encryptor := rlwe.NewEncryptor(params, sk)
 	input := fastRotateTestEncrypt(t, params, encoder, encryptor, fastRotateTestValues(4), 4, params.MaxLevel(), true)
