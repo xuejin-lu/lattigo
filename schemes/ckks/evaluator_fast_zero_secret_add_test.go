@@ -540,7 +540,7 @@ func TestPublicFastZeroSecretAddSubCompactsAbovePrefixAndRejectsUnsafeConsumers(
 	require.Equal(t, 2, len(recorder.calls), "unsupported consumers must not fall back through the Add/Sub core")
 }
 
-func TestPublicFastZeroSecretAddFallsBackForFullCiphertextAndRejectsCompactGenericOperand(t *testing.T) {
+func TestPublicFastZeroSecretAddFallsBackForFullCiphertextAndPreservesCompactOperandBoundaries(t *testing.T) {
 	params := fastRotateTestParameters(t, ring.Standard)
 	encoder := NewEncoder(params)
 	sk := NewKeyGenerator(params).GenSecretKeyNew()
@@ -569,8 +569,8 @@ func TestPublicFastZeroSecretAddFallsBackForFullCiphertextAndRejectsCompactGener
 	require.Equal(t, residueOutBefore.Value, residueOut.Value, "invalid specialized input must not mutate the output")
 	require.Empty(t, recorder.calls, "invalid residue must not enter the Fast core")
 
-	// The four-row cap is structural, not inferred from full backing: once a
-	// public Fast result is compact, scalar Add must not enter generic full-Q.
+	// Scalar Add is now a supported public Q-prefix API. Confirm its numerical
+	// result while retaining rejection of still-generic compact consumers.
 	paramsLong := fastRotateTestParameters(t, ring.Standard)
 	ctLong0 := encryptFastAddSubTestValues(t, paramsLong, NewEncoder(paramsLong), rlwe.NewEncryptor(paramsLong, rlwe.NewKeyGenerator(paramsLong).GenSecretKeyNew()), values, 5)
 	ctLong1 := ctLong0.CopyNew()
@@ -581,7 +581,24 @@ func TestPublicFastZeroSecretAddFallsBackForFullCiphertextAndRejectsCompactGener
 	require.NoError(t, err)
 	compactOut := NewCiphertext(paramsLong, 1, 5)
 	compactOutBefore := compactOut.CopyNew()
-	err = evaluatorLong.Add(compact, int64(3), compactOut)
+	require.NoError(t, evaluatorLong.Add(compact, int64(3), compactOut))
+	require.Equal(t, compact.Level(), compactOut.Level())
+	require.True(t, compact.Scale.Equal(compactOut.Scale))
+	wantScalar := make([]complex128, len(values))
+	for i := range values {
+		wantScalar[i] = 2*values[i] + 3
+	}
+	decoded := decodeFastAddSubTestValues(t, paramsLong, NewEncoder(paramsLong), rlwe.NewDecryptor(paramsLong, rlwe.NewKeyGenerator(paramsLong).GenSecretKeyNew()), compactOut)
+	requireComplexValuesNear(t, decoded, wantScalar, 1e-6)
+	for component := range compactOut.Value {
+		for row := fastcore.MaxQPrefixWidth; row <= compactOut.Level(); row++ {
+			require.Nil(t, compactOut.Value[component].Coeffs[row])
+		}
+	}
+	// Direct vector Add is outside this task; it must still reject compact
+	// input before a generic full-Q operation could read dormant rows.
+	compactOut = compactOutBefore.CopyNew()
+	err = evaluatorLong.Add(compact, []float64{3}, compactOut)
 	require.ErrorContains(t, err, "missing active row q4")
 	require.Equal(t, compactOutBefore.Value, compactOut.Value)
 }

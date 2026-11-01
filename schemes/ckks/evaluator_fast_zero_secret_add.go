@@ -10,7 +10,8 @@ import (
 )
 
 // addSubFastCKKSZeroSecret dispatches public ciphertext/ciphertext Add/Sub to
-// the same compact Q-prefix core used by the explicit Fast evaluator.
+// the same compact Q-prefix core used by the explicit Fast evaluator. A
+// borrowed degree-zero ciphertext view also adapts plaintext Add operands.
 func (eval Evaluator) addSubFastCKKSZeroSecret(op0, op1, opOut *rlwe.Ciphertext, sub bool) error {
 	operation := "Add"
 	if sub {
@@ -18,6 +19,12 @@ func (eval Evaluator) addSubFastCKKSZeroSecret(op0, op1, opOut *rlwe.Ciphertext,
 	}
 	if op0 == nil || op1 == nil || opOut == nil {
 		return fmt.Errorf("cannot Fast CKKS zero-secret %s: ciphertexts cannot be nil", operation)
+	}
+	if op0.MetaData == nil || op1.MetaData == nil || opOut.MetaData == nil {
+		return fmt.Errorf("cannot Fast CKKS zero-secret %s: operand and output metadata must be non-nil", operation)
+	}
+	if len(op0.Value) == 0 || len(op1.Value) == 0 || len(opOut.Value) == 0 {
+		return fmt.Errorf("cannot Fast CKKS zero-secret %s: operands and output must have polynomial storage", operation)
 	}
 	if eval.addSubCore == nil {
 		return fmt.Errorf("cannot Fast CKKS zero-secret %s: shared Fast core is unavailable", operation)
@@ -153,7 +160,8 @@ func (eval Evaluator) subFastCKKSZeroSecretScaleAligned(op0, op1, opOut *rlwe.Ci
 // zero-secret contract remain on the existing full-Q CKKS implementation;
 // compact inputs are separately rejected by the full-active-row preflight.
 func (eval Evaluator) fastCKKSZeroSecretAddSubEligible(op0, op1 *rlwe.Ciphertext) bool {
-	if op0 == nil || op1 == nil || eval.addSubCore == nil {
+	if op0 == nil || op1 == nil || op0.MetaData == nil || op1.MetaData == nil ||
+		len(op0.Value) == 0 || len(op1.Value) == 0 || eval.addSubCore == nil {
 		return false
 	}
 	params := eval.GetParameters()

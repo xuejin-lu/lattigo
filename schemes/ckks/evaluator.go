@@ -71,6 +71,17 @@ func (eval Evaluator) Add(op0 *rlwe.Ciphertext, op1 rlwe.Operand, opOut *rlwe.Ci
 		if eval.GetParameters().RingType() == ring.Standard && isFastCKKSScalarOperand(op1) {
 			return eval.addSubFastCKKSZeroSecretScalar("Add", op0, op1, opOut, false)
 		}
+		if plaintext, ok := op1.(*rlwe.Plaintext); ok {
+			if plaintext == nil || len(plaintext.Element.Value) != 1 {
+				return fmt.Errorf("cannot Fast CKKS zero-secret Add: plaintext must have degree-zero storage")
+			}
+			// A borrowed degree-zero view lets the existing Fast core add only
+			// the maintained Q-prefix, without copying or reading dormant rows.
+			view := &rlwe.Ciphertext{Element: plaintext.Element}
+			if eval.fastCKKSZeroSecretAddSubEligible(op0, view) {
+				return eval.addSubFastCKKSZeroSecret(op0, view, opOut, false)
+			}
+		}
 		if op1Ciphertext, ok := op1.(*rlwe.Ciphertext); ok {
 			if eval.fastCKKSZeroSecretAddSubEligible(op0, op1Ciphertext) {
 				return eval.addSubFastCKKSZeroSecret(op0, op1Ciphertext, opOut, false)
