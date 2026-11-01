@@ -141,6 +141,8 @@ func newTestEncryptorWithKeyedPRNG(params ParameterProvider, key EncryptionKey, 
 // The encryption procedure masks the plaintext by adding a fresh encryption of zero.
 // The encryption procedure depends on the parameters: If the auxiliary modulus P is defined, the
 // encryption of zero is sampled in QP before being rescaled by P; otherwise, it is directly sampled in Q.
+// Fast CKKS simulation parameters instead copy the plaintext into c0 and clear c1
+// for either key type. This intentionally insecure path does not apply to EncryptZero.
 func (enc Encryptor) Encrypt(pt *Plaintext, ct interface{}) (err error) {
 	if pt == nil {
 		return enc.EncryptZero(ct)
@@ -148,7 +150,8 @@ func (enc Encryptor) Encrypt(pt *Plaintext, ct interface{}) (err error) {
 		switch ct := ct.(type) {
 		case *Ciphertext:
 			if enc.fastCKKSZeroSecretSimulation {
-				if _, isSecretKey := enc.encKey.(*SecretKey); isSecretKey {
+				switch enc.encKey.(type) {
+				case *SecretKey, *PublicKey:
 					return enc.encryptFastCKKSZeroSecret(pt, ct)
 				}
 			}
@@ -215,6 +218,8 @@ func cloneFastCKKSMetadata(metadata *MetaData) *MetaData {
 // The encryption procedure masks the plaintext by adding a fresh encryption of zero.
 // The encryption procedure depends on the parameters: If the auxiliary modulus P is defined, the
 // encryption of zero is sampled in QP before being rescaled by P; otherwise, it is directly sampled in Q.
+// Fast CKKS simulation parameters instead copy the plaintext into c0 and clear c1
+// for either key type. This intentionally insecure path does not apply to EncryptZero.
 func (enc Encryptor) EncryptNew(pt *Plaintext) (ct *Ciphertext, err error) {
 	ct = NewCiphertext(enc.params, 1, pt.Level())
 	return ct, enc.Encrypt(pt, ct)

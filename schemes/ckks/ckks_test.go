@@ -750,13 +750,13 @@ func testEvaluatorMulThenAdd(tc *TestContext, t *testing.T) {
 
 		require.Equal(t, ciphertext3.Degree(), 2)
 		if _, fast := any(tc.Params).(fastCKKSZeroSecretSimulationProvider); fast {
-			// This shared CKKS test encrypts with the public key, while Fast
-			// evaluation keys intentionally model the zero-secret BTS workload.
-			// Nonzero-c1 public-key ciphertexts must therefore fail closed here.
+			// PK encryption now produces zero-secret ciphertexts as well.
+			// Explicitly inject an invalid c1 to retain this rejection regression.
+			ciphertext3.Value[1].Coeffs[0][0] = 1
 			before := ciphertext3.CopyNew()
 			err := tc.Evl.Relinearize(ciphertext3, ciphertext3)
 			require.ErrorContains(t, err, "input c1 is nonzero")
-			require.True(t, ciphertext3.Equal(before), "Fast zero-secret relinearization must reject public-key ciphertexts transactionally")
+			require.True(t, ciphertext3.Equal(before), "Fast zero-secret relinearization must reject nonzero-c1 ciphertexts transactionally")
 			return
 		}
 
