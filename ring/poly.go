@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"io"
 
-	"github.com/tuneinsight/lattigo/v6/utils"
+	"github.com/tuneinsight/lattigo/v6/ring/internal/compact"
 	"github.com/tuneinsight/lattigo/v6/utils/buffer"
 	"github.com/tuneinsight/lattigo/v6/utils/structs"
 )
@@ -27,10 +27,19 @@ func NewPolyFromUintPool(pool structs.BufferPool[*[]uint64], level int) (pol *Po
 // RecyclePolyInUintPool takes a reference to a [Poly] and recycles its backing []uint64 arrays
 // (i.e. they are returned to a pool). The input [Poly] must not be used after calling this method.
 func RecyclePolyInUintPool(pool structs.BufferPool[*[]uint64], pol *Poly) {
-	for i := range pol.Coeffs {
-		pool.Put(&pol.Coeffs[i])
+	if len(pol.Coeffs) == 0 {
+		return
 	}
-	pol = nil
+	compact.Width(pol.Coeffs, pol.Level(), pol.N())
+	compact.CheckAliases(pol.Coeffs, pol.Level(), true, false)
+	for _, row := range pol.Coeffs {
+		if len(row) != 0 {
+			// The pool must own an independent header, not a mutable Coeffs slot.
+			backing := row
+			pool.Put(&backing)
+		}
+	}
+	pol.Coeffs = nil
 }
 
 // NewPoly creates a new polynomial with N coefficients set to zero and Level+1 moduli.
@@ -43,17 +52,24 @@ func NewPoly(N, Level int) (pol Poly) {
 }
 
 // Resize resizes the level of the target polynomial to the provided level.
-// If the provided level is larger than the current level, then allocates zero
-// coefficients, otherwise dereferences the coefficients above the provided level.
+// Full polynomials grow with zero rows. Compact polynomials grow with unavailable
+// rows; resizing alone never materializes their dormant residues.
+// Shrinking dereferences the rows above the provided level.
 func (pol *Poly) Resize(level int) {
 	N := pol.N()
+	compactRows := -1
+	if len(pol.Coeffs) != 0 {
+		compactRows = compact.Width(pol.Coeffs, pol.Level(), N)
+	}
 	if pol.Level() > level {
 		pol.Coeffs = pol.Coeffs[:level+1]
 	} else if level > pol.Level() {
 		prevLevel := pol.Level()
 		pol.Coeffs = append(pol.Coeffs, make([][]uint64, level-prevLevel)...)
 		for i := prevLevel + 1; i < level+1; i++ {
-			pol.Coeffs[i] = make([]uint64, N)
+			if compactRows < 0 || compactRows == prevLevel+1 {
+				pol.Coeffs[i] = make([]uint64, N)
+			}
 		}
 	}
 }
@@ -71,15 +87,21 @@ func (pol Poly) Level() int {
 	return len(pol.Coeffs) - 1
 }
 
-// Zero sets all coefficients of the target polynomial to 0.
+// Zero clears available coefficients without activating dormant rows.
 func (pol Poly) Zero() {
+	if len(pol.Coeffs) != 0 {
+		compact.Width(pol.Coeffs, pol.Level(), pol.N())
+	}
 	for i := range pol.Coeffs {
 		ZeroVec(pol.Coeffs[i])
 	}
 }
 
-// CopyNew creates an exact copy of the target polynomial.
+// CopyNew deep-copies a valid row shape. Nil and empty dormant rows are equivalent.
 func (pol Poly) CopyNew() *Poly {
+	if len(pol.Coeffs) != 0 {
+		compact.Width(pol.Coeffs, pol.Level(), pol.N())
+	}
 	return &Poly{
 		Coeffs: pol.Coeffs.CopyNew(),
 	}
@@ -90,18 +112,52 @@ func (pol Poly) CopyNew() *Poly {
 // This method will resize the target polynomial to the level of
 // the input polynomial.
 func (pol *Poly) Copy(p1 Poly) {
-	pol.Resize(p1.Level())
-	pol.CopyLvl(p1.Level(), p1)
+	if len(p1.Coeffs) == 0 {
+		pol.Coeffs = nil
+		return
+	}
+	// Validate before Resize, so a malformed source cannot partially mutate us.
+	compact.Width(p1.Coeffs, p1.Level(), p1.N())
+	if pol.N() != 0 && p1.N() != 0 && pol.N() != p1.N() {
+		panic("ring compact: Copy dimension mismatch")
+	}
+	staged := *pol
+	staged.Coeffs = append(structs.Matrix[uint64](nil), pol.Coeffs...)
+	staged.Resize(p1.Level())
+	staged.CopyLvl(p1.Level(), p1)
+	pol.Coeffs = staged.Coeffs
 }
 
 // CopyLvl copies the coefficients of p1 on the target polynomial.
 // This method does nothing if the underlying arrays are the same.
 // Expects the degree of both polynomials to be identical.
+// Copies availability as well as values, allocating missing destination backing.
+// Invalid shapes/unsupported overlap panic before modifying the destination.
 func (pol *Poly) CopyLvl(level int, p1 Poly) {
-	for i := 0; i < level+1; i++ {
-		if !utils.Alias1D(pol.Coeffs[i], p1.Coeffs[i]) {
-			copy(pol.Coeffs[i], p1.Coeffs[i])
+	n := p1.N()
+	if n == 0 {
+		n = pol.N()
+	}
+	if pol.N() != 0 && p1.N() != 0 && pol.N() != p1.N() {
+		panic("ring compact: CopyLvl dimension mismatch")
+	}
+	rows := compact.Width(p1.Coeffs, level, n)
+	compact.Width(pol.Coeffs, level, n)
+	compact.CheckAliases(pol.Coeffs, level, true, true, p1.Coeffs)
+	if rows < level+1 && pol.Level() != level {
+		panic("ring compact: CopyLvl compact output requires matching logical level")
+	}
+	// Detach headers when changing availability. Shallow aliases retain their
+	// headers; existing coefficient backing aliases still have normal copy semantics.
+	for i := 0; i <= level; i++ {
+		if (i < rows) != (len(pol.Coeffs[i]) != 0) {
+			pol.Coeffs = append(structs.Matrix[uint64](nil), pol.Coeffs...)
+			break
 		}
+	}
+	compact.Prepare(pol.Coeffs, level, n, rows)
+	for i := 0; i < level+1; i++ {
+		copy(pol.Coeffs[i], p1.Coeffs[i])
 	}
 }
 

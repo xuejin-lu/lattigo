@@ -9,7 +9,8 @@ import (
 
 // Add evaluates p3 = p1 + p2 coefficient-wise in the ring.
 func (r Ring) Add(p1, p2, p3 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p3, false, true, p1, p2)
+	for i, s := range r.SubRings[:rows] {
 		s.Add(p1.Coeffs[i], p2.Coeffs[i], p3.Coeffs[i])
 	}
 }
@@ -86,7 +87,8 @@ func (r Ring) MulCoeffsBarrettThenAddLazy(p1, p2, p3 Poly) {
 
 // MulCoeffsMontgomery evaluates p3 = p1 * p2 coefficient-wise in the ring, with Montgomery reduction.
 func (r Ring) MulCoeffsMontgomery(p1, p2, p3 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p3, false, true, p1, p2)
+	for i, s := range r.SubRings[:rows] {
 		s.MulCoeffsMontgomery(p1.Coeffs[i], p2.Coeffs[i], p3.Coeffs[i])
 	}
 }
@@ -107,7 +109,8 @@ func (r Ring) MulCoeffsMontgomeryLazyThenNeg(p1, p2, p3 Poly) {
 
 // MulCoeffsMontgomeryThenAdd evaluates p3 = p3 + p1 * p2 coefficient-wise in the ring, with Montgomery reduction, with p3 in [0, 2*modulus-1].
 func (r Ring) MulCoeffsMontgomeryThenAdd(p1, p2, p3 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p3, true, true, p1, p2)
+	for i, s := range r.SubRings[:rows] {
 		s.MulCoeffsMontgomeryThenAdd(p1.Coeffs[i], p2.Coeffs[i], p3.Coeffs[i])
 	}
 }
@@ -199,7 +202,8 @@ func (r Ring) SubScalarBigint(p1 Poly, scalar *big.Int, p2 Poly) {
 
 // MulScalar evaluates p2 = p1 * scalar coefficient-wise in the ring.
 func (r Ring) MulScalar(p1 Poly, scalar uint64, p2 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p2, false, true, p1)
+	for i, s := range r.SubRings[:rows] {
 		s.MulScalarMontgomery(p1.Coeffs[i], MForm(scalar, s.Modulus, s.BRedConstant), p2.Coeffs[i])
 	}
 }
@@ -229,8 +233,12 @@ func (r Ring) MulScalarThenSub(p1 Poly, scalar uint64, p2 Poly) {
 
 // MulScalarBigint evaluates p2 = p1 * scalar coefficient-wise in the ring.
 func (r Ring) MulScalarBigint(p1 Poly, scalar *big.Int, p2 Poly) {
+	if scalar == nil {
+		panic("ring compact: nil scalar")
+	}
+	rows := r.prepareCompactOperation(p2, false, true, p1)
 	scalarQi := new(big.Int)
-	for i, s := range r.SubRings[:r.level+1] {
+	for i, s := range r.SubRings[:rows] {
 		scalarQi.Mod(scalar, bignum.NewInt(s.Modulus))
 		s.MulScalarMontgomery(p1.Coeffs[i], MForm(scalarQi.Uint64(), s.Modulus, s.BRedConstant), p2.Coeffs[i])
 	}
@@ -283,7 +291,8 @@ func (r Ring) Shift(p1 Poly, k int, p2 Poly) {
 
 // MForm evaluates p2 = p1 * (2^64)^-1 coefficient-wise in the ring.
 func (r Ring) MForm(p1, p2 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p2, false, true, p1)
+	for i, s := range r.SubRings[:rows] {
 		s.MForm(p1.Coeffs[i], p2.Coeffs[i])
 	}
 }
@@ -297,7 +306,8 @@ func (r Ring) MFormLazy(p1, p2 Poly) {
 
 // IMForm evaluates p2 = p1 * 2^64 coefficient-wise in the ring.
 func (r Ring) IMForm(p1, p2 Poly) {
-	for i, s := range r.SubRings[:r.level+1] {
+	rows := r.prepareCompactOperation(p2, false, true, p1)
+	for i, s := range r.SubRings[:rows] {
 		s.IMForm(p1.Coeffs[i], p2.Coeffs[i])
 	}
 }

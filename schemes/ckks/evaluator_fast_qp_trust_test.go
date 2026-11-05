@@ -184,8 +184,10 @@ func TestFastQPExperimentalTrustRetainsStructuralAndZeroGuards(t *testing.T) {
 			case "bad-level":
 				requestedLevel = params.MaxLevel() + 1
 			}
-			before := out.CopyNew()
-			// Poly.CopyNew normalizes nil rows to empty slices; retain their shape.
+			// Snapshot deliberately malformed storage without passing it through
+			// Poly.CopyNew's new compact-shape validation. Oracle and guards stay unchanged.
+			before := &ring.Poly{Coeffs: out.Coeffs.CopyNew()}
+			// Matrix.CopyNew normalizes nil rows to empty slices; retain their shape.
 			for row := range out.Coeffs {
 				if out.Coeffs[row] == nil {
 					before.Coeffs[row] = nil

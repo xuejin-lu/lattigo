@@ -328,8 +328,10 @@ func TestPublicFastZeroSecretRotateRejectsInvalidInputsTransactionally(t *testin
 
 	t.Run("missing-output-row", func(t *testing.T) {
 		out := NewCiphertext(params, 1, 5)
-		out.Value[0].Coeffs[3] = nil
 		outBefore := out.CopyNew()
+		// Clone valid storage before deliberately breaking its row shape.
+		out.Value[0].Coeffs[3] = nil
+		outBefore.Value[0].Coeffs[3] = nil
 		require.Error(t, eval.Rotate(valid, 1, out))
 		require.True(t, out.Equal(outBefore))
 	})

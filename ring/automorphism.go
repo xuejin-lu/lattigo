@@ -5,6 +5,8 @@ import (
 	"math/bits"
 	"unsafe"
 
+	"github.com/tuneinsight/lattigo/v6/ring/internal/compact"
+
 	"github.com/tuneinsight/lattigo/v6/utils"
 )
 
@@ -49,7 +51,8 @@ func (r Ring) AutomorphismNTT(polIn Poly, gen uint64, polOut Poly) {
 // It must be noted that the result cannot be in-place.
 func (r Ring) AutomorphismNTTWithIndex(polIn Poly, index []uint64, polOut Poly) {
 
-	level := r.level
+	compact.Permutation(r.N(), index, polOut.Coeffs)
+	rows := r.prepareCompactOperation(polOut, false, false, polIn)
 
 	N := r.N()
 
@@ -58,7 +61,7 @@ func (r Ring) AutomorphismNTTWithIndex(polIn Poly, index []uint64, polOut Poly) 
 		/* #nosec G103 -- behavior and consequences well understood, possible buffer overflow if len(index)%8 != 0  */
 		x := (*[8]uint64)(unsafe.Pointer(&index[j]))
 
-		for i := 0; i < level+1; i++ {
+		for i := 0; i < rows; i++ {
 
 			/* #nosec G103 -- behavior and consequences well understood, possible buffer overflow if len(polOut.Coeffs)%8 != 0 */
 			z := (*[8]uint64)(unsafe.Pointer(&polOut.Coeffs[i][j]))

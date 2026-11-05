@@ -2,10 +2,12 @@ package ringqp
 
 import (
 	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/ring/internal/compact"
 )
 
 // Add adds p1 to p2 coefficient-wise and writes the result on p3.
 func (r Ring) Add(p1, p2, p3 Poly) {
+	r.preflightCompact(p3, false, true, p1, p2)
 	if r.RingQ != nil {
 		r.RingQ.Add(p1.Q, p2.Q, p3.Q)
 	}
@@ -231,6 +233,7 @@ func (r Ring) MulCoeffsMontgomeryLazyThenSubLazy(p1, p2, p3 Poly) {
 // MulCoeffsMontgomeryThenAdd multiplies p1 by p2 coefficient-wise with a
 // Montgomery modular reduction and adds the result to p3.
 func (r Ring) MulCoeffsMontgomeryThenAdd(p1, p2, p3 Poly) {
+	r.preflightCompact(p3, true, true, p1, p2)
 	if r.RingQ != nil {
 		r.RingQ.MulCoeffsMontgomeryThenAdd(p1.Q, p2.Q, p3.Q)
 	}
@@ -300,6 +303,13 @@ func (r Ring) AutomorphismNTT(p1 Poly, galEl uint64, p2 Poly) {
 // Index of automorphism must be provided.
 // Method is not in place.
 func (r Ring) AutomorphismNTTWithIndex(p1 Poly, index []uint64, p2 Poly) {
+	r.preflightCompact(p2, false, false, p1)
+	if r.RingQ != nil {
+		compact.Permutation(r.RingQ.N(), index, p2.Q.Coeffs)
+	}
+	if r.RingP != nil {
+		compact.Permutation(r.RingP.N(), index, p2.P.Coeffs)
+	}
 	if r.RingQ != nil {
 		r.RingQ.AutomorphismNTTWithIndex(p1.Q, index, p2.Q)
 	}
