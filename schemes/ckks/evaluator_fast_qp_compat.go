@@ -35,13 +35,15 @@ type fastQPFingerprint struct {
 const maxTrustedFastQPCiphertexts = 4
 
 type fastQPCompatibilityCounters struct {
-	decomposeElisions          uint64
-	applyEvaluationKeyElisions uint64
-	gadgetProductElisions      uint64
-	hoistedProductElisions     uint64
-	keySwitchElisions          uint64
-	automorphisms              uint64
-	fullQRescales              uint64
+	decomposeElisions           uint64
+	applyEvaluationKeyElisions  uint64
+	gadgetProductElisions       uint64
+	hoistedProductElisions      uint64
+	keySwitchElisions           uint64
+	automorphisms               uint64
+	fullQRescales               uint64
+	compactHoistedAutomorphisms uint64
+	compactModDowns             uint64
 }
 
 func newFastQPCompatibilityState() *fastQPCompatibilityState {
@@ -560,44 +562,89 @@ func (eval Evaluator) AutomorphismHoistedLazy(levelQ int, ctIn *rlwe.Ciphertext,
 	if !fastQPDecompositionIsZero(decompQP, levelQ, levelP) {
 		return fmt.Errorf("cannot Fast CKKS AutomorphismHoistedLazy: c1 decomposition is nonzero")
 	}
-	if levelQ+1 > fastcore.MaxQPrefixWidth {
-		if err = eval.verifyFastFullQCiphertext(ctIn); err != nil {
-			return fmt.Errorf("cannot Fast CKKS AutomorphismHoistedLazy: full-Q input is not authorized: %w", err)
+	available, err := fastQPAvailableQRows("hoisted c0", ctIn.Value[0], level, eval.GetParameters().N())
+	if err != nil {
+		return err
+	}
+	rows, _ := fastcore.QPrefixWidth(levelQ)
+	complete := available >= levelQ+1
+	if complete {
+		rows = levelQ + 1
+	}
+	if complete {
+		for component := range ctQP.Value {
+			if err = validateFastPolyRows("complete QP output", ctQP.Value[component].Q, levelQ, eval.GetParameters().N(), true); err != nil {
+				return err
+			}
+		}
+		if levelQ+1 > fastcore.MaxQPrefixWidth {
+			if err = eval.verifyFastFullQCiphertext(ctIn); err != nil {
+				return fmt.Errorf("cannot Fast CKKS AutomorphismHoistedLazy: full-Q input is not authorized: %w", err)
+			}
 		}
 	}
 	params := eval.GetParameters()
 	ringQ := params.RingQ().AtLevel(levelQ)
-	scaled := ringQ.NewPoly()
+	// Preserve the complete-Q lane's existing buffer/alias behavior. It is not
+	// a fallback for compact input: the availability classification is explicit.
+	if complete {
+		scaled := ringQ.NewPoly()
+		if levelP >= 0 {
+			ringQ.MulScalarBigint(ctIn.Value[0], params.RingP().ModulusAtLevel[levelP], scaled)
+		} else {
+			scaled.CopyLvl(levelQ, ctIn.Value[0])
+		}
+		if ctIn.IsNTT {
+			ringQ.AutomorphismNTTWithIndex(scaled, eval.AutomorphismIndex(galEl), ctQP.Value[0].Q)
+		} else {
+			ringQ.Automorphism(scaled, galEl, ctQP.Value[0].Q)
+		}
+		for row := 0; row <= levelP; row++ {
+			clear(ctQP.Value[0].P.Coeffs[row])
+			clear(ctQP.Value[1].P.Coeffs[row])
+		}
+		for row := 0; row <= levelQ; row++ {
+			clear(ctQP.Value[1].Q.Coeffs[row])
+		}
+		*ctQP.MetaData = *ctIn.MetaData
+		eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.keySwitchElisions++; c.automorphisms++ })
+		return nil
+	}
+	if eval.automorphismCore == nil {
+		return fmt.Errorf("cannot Fast CKKS AutomorphismHoistedLazy: shared core is unavailable")
+	}
+	// Views expose exactly the authorized rows, never dormant backing. Stage all
+	// output components so source/output aliases cannot cause a partial commit.
+	source := ring.Poly{Coeffs: make([][]uint64, levelQ+1)}
+	copy(source.Coeffs[:rows], ctIn.Value[0].Coeffs[:rows])
+	scaled := ring.Poly{Coeffs: make([][]uint64, levelQ+1)}
 	if levelP >= 0 {
-		ringQ.MulScalarBigint(ctIn.Value[0], params.RingP().ModulusAtLevel[levelP], scaled)
+		ringQ.MulScalarBigint(source, params.RingP().ModulusAtLevel[levelP], scaled)
 	} else {
-		scaled.CopyLvl(levelQ, ctIn.Value[0])
+		scaled.CopyLvl(levelQ, source)
 	}
-	if ctIn.IsNTT {
-		ringQ.AutomorphismNTTWithIndex(scaled, eval.AutomorphismIndex(galEl), ctQP.Value[0].Q)
-	} else {
-		ringQ.Automorphism(scaled, galEl, ctQP.Value[0].Q)
+	staged := rlwe.NewElementExtended(*params, 1, min(levelQ, rows-1), levelP)
+	for i := range staged.Value {
+		staged.Value[i].Q.Coeffs = append(staged.Value[i].Q.Coeffs, make([][]uint64, levelQ+1-rows)...)
 	}
-	for row := 0; row <= levelP; row++ {
-		clear(ctQP.Value[0].P.Coeffs[row])
+	if err = eval.automorphismCore.ApplyRows(ringQ, galEl, ctIn.IsNTT, rows,
+		fastcore.PolynomialPair{Input: scaled, Output: staged.Value[0].Q}); err != nil {
+		return err
 	}
-	for row := 0; row <= levelQ; row++ {
-		clear(ctQP.Value[1].Q.Coeffs[row])
-	}
-	for row := 0; row <= levelP; row++ {
-		clear(ctQP.Value[1].P.Coeffs[row])
-	}
-	*ctQP.MetaData = *ctIn.MetaData
+	*staged.MetaData = *ctIn.MetaData
+	ctQP.Value = staged.Value
+	*ctQP.MetaData = *staged.MetaData
 	eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) {
 		c.keySwitchElisions++
 		c.automorphisms++
+		c.compactHoistedAutomorphisms++
 	})
 	return nil
 }
 
-// ModDownQPtoQNTT validates complete QP backing and zero P before invoking
-// the shared basis extender. The underlying API cannot return an error, so a
-// malformed call is deferred to the next error-returning evaluator boundary.
+// ModDownQPtoQNTT checks Q availability and zero P before invoking the shared
+// basis extender. Compact input uses its existing P-inverse constants directly.
+// The API cannot return an error, so failures are deferred to the next checked boundary.
 func (eval Evaluator) ModDownQPtoQNTT(levelQ, levelP int, p1Q, p1P, p2Q ring.Poly) {
 	if !eval.usesFastCKKSZeroSecretSimulation() {
 		eval.Evaluator.ModDownQPtoQNTT(levelQ, levelP, p1Q, p1P, p2Q)
@@ -608,6 +655,24 @@ func (eval Evaluator) ModDownQPtoQNTT(levelQ, levelP int, p1Q, p1P, p2Q ring.Pol
 	}
 	if levelQ < 0 || levelQ > eval.GetParameters().MaxLevel() || levelP < 0 || levelP > eval.GetParameters().MaxLevelP() {
 		eval.fastQPCompat.record(fmt.Errorf("cannot Fast CKKS ModDownQPtoQNTT: invalid Q/P level (%d,%d)", levelQ, levelP))
+		return
+	}
+	rows, err := fastQPAvailableQRows("ModDown Q input", p1Q, levelQ, eval.GetParameters().N())
+	if err != nil {
+		eval.fastQPCompat.record(err)
+		return
+	}
+	if rows < levelQ+1 {
+		rows, _ = fastcore.QPrefixWidth(levelQ)
+		if eval.BasisExtender == nil {
+			eval.fastQPCompat.record(fmt.Errorf("Fast CKKS ModDown: basis extender is unavailable"))
+			return
+		}
+		if err = eval.BasisExtender.ModDownQPtoQNTTZeroP(levelQ, levelP, rows, p1Q, p1P, p2Q); err != nil {
+			eval.fastQPCompat.record(err)
+			return
+		}
+		eval.fastQPCompat.note(func(c *fastQPCompatibilityCounters) { c.compactModDowns++ })
 		return
 	}
 	if levelQ+1 > fastcore.MaxQPrefixWidth && !eval.usesFastQPExperimentalTrust() && !eval.fastQPCompat.isArmed() {
@@ -968,7 +1033,7 @@ func validateFastQPOutput(params *Parameters, output *rlwe.Element[ringqp.Poly],
 		return fmt.Errorf("QP output must contain two polynomials and metadata")
 	}
 	for component := range output.Value {
-		if err := validateFastPolyRows(fmt.Sprintf("QP output component %d Q", component), output.Value[component].Q, levelQ, params.N(), true); err != nil {
+		if _, err := fastQPAvailableQRows(fmt.Sprintf("QP output component %d Q", component), output.Value[component].Q, levelQ, params.N()); err != nil {
 			return err
 		}
 		if levelP >= 0 {
@@ -978,6 +1043,27 @@ func validateFastQPOutput(params *Parameters, output *rlwe.Element[ringqp.Poly],
 		}
 	}
 	return nil
+}
+
+// fastQPAvailableQRows enforces the CKKS minimum in addition to the generic
+// contiguous row shape. It certifies availability only, never integer capacity.
+func fastQPAvailableQRows(name string, poly ring.Poly, level, n int) (int, error) {
+	if err := validateFastPolyRows(name, poly, level, n, false); err != nil {
+		return 0, err
+	}
+	rows := 0
+	missing := false
+	for _, row := range poly.Coeffs[:level+1] {
+		if len(row) == 0 {
+			missing = true
+			continue
+		}
+		if len(row) != n || missing {
+			return 0, fmt.Errorf("%s has malformed or noncontiguous Q rows", name)
+		}
+		rows++
+	}
+	return rows, nil
 }
 
 func validateFastPolyRows(name string, poly ring.Poly, level, n int, full bool) error {

@@ -10,8 +10,17 @@ import (
 // Width validates the requested view and returns its contiguous available prefix.
 // Empty and nil rows are equivalent. Rows outside the view are not certified.
 func Width(coeffs [][]uint64, level, n int) int {
+	rows, err := ValidateWidth(coeffs, level, n)
+	if err != nil {
+		panic(err)
+	}
+	return rows
+}
+
+// ValidateWidth is the checked form for error-returning Library adapters.
+func ValidateWidth(coeffs [][]uint64, level, n int) (int, error) {
 	if level < 0 || len(coeffs) <= level {
-		panic(fmt.Sprintf("ring compact: missing logical rows for level %d", level))
+		return 0, fmt.Errorf("ring compact: missing logical rows for level %d", level)
 	}
 	width := 0
 	missing := false
@@ -21,12 +30,12 @@ func Width(coeffs [][]uint64, level, n int) int {
 			missing = true
 		default:
 			if len(row) != n || missing {
-				panic("ring compact: malformed row or noncontiguous available prefix")
+				return 0, fmt.Errorf("ring compact: malformed row or noncontiguous available prefix")
 			}
 			width++
 		}
 	}
-	return width
+	return width, nil
 }
 
 // Overlap compares backing ranges, including shifted slices.
@@ -41,25 +50,33 @@ func Overlap(a, b []uint64) bool {
 // CheckAliases rejects cross-row/output overlap before writes. Same-row exact
 // aliases are supported by elementwise kernels; Copy additionally permits memmove.
 func CheckAliases(out [][]uint64, level int, exact, memmove bool, inputs ...[][]uint64) {
+	if err := ValidateAliases(out, level, exact, memmove, inputs...); err != nil {
+		panic(err)
+	}
+}
+
+// ValidateAliases requires shapes to be checked first and never changes storage.
+func ValidateAliases(out [][]uint64, level int, exact, memmove bool, inputs ...[][]uint64) error {
 	for _, input := range inputs {
 		if headersOverlap(out, input) && unsafe.SliceData(out) != unsafe.SliceData(input) {
-			panic("ring compact: partially overlapping row headers")
+			return fmt.Errorf("ring compact: partially overlapping row headers")
 		}
 	}
 	for i, dst := range out[:level+1] {
 		for j := 0; j < i; j++ {
 			if Overlap(dst, out[j]) {
-				panic("ring compact: overlapping output rows")
+				return fmt.Errorf("ring compact: overlapping output rows")
 			}
 		}
 		for _, input := range inputs {
 			for j, src := range input[:level+1] {
 				if Overlap(dst, src) && !(i == j && (memmove || exact && unsafe.SliceData(dst) == unsafe.SliceData(src))) {
-					panic("ring compact: unsupported overlapping input/output")
+					return fmt.Errorf("ring compact: unsupported overlapping input/output")
 				}
 			}
 		}
 	}
+	return nil
 }
 
 func headersOverlap(a, b [][]uint64) bool {
